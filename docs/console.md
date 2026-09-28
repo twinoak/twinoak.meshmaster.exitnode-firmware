@@ -22,7 +22,8 @@ test, so it is the session the console accepts, line for line.
 | `status` | firmware, board and reset reason, the public key, the radio and its frame counters, WiFi, time and where it came from, the server's last answer, the heartbeat, the heap |
 | `mesh` | the adverts heard: how many, how many are waiting to be posted and how many the ring dropped, and the last five with their names, roles, hops, SNR and RSSI |
 | `server` | the exit node's loop: the last heartbeat and the next, the last observation batch, the job counters, and the four error counters the heartbeat itself carries |
-| `jobs` | the airtime budget in force and what it has spent, how many claims were made, and the last ten jobs with their outcome, their transaction count and when they ended |
+| `jobs` | the airtime budget in force and what it has spent, how many claims were made, the seven job types this firmware advertises, and the last ten jobs with their outcome, their transaction count and when they ended |
+| `sessions` | the repeater logins the board holds: per repeater the first twelve characters of its key, the class the session serves, the level the repeater granted and its age. A session is a key, a class, a role byte and a time; no secret is in one, and none is printed |
 | `wifi` | a blocking scan (a few seconds): every network with channel, RSSI and security, then the link's state |
 | `reboot` | restart |
 | `erase confirm` | forget every setting. The identity is not a setting and stays, so the exit node keeps its key on meshmaster.dk. Without the word, `erase` refuses and says what the word is |
@@ -45,7 +46,7 @@ that is not `https://`, a line over 200 characters, a control character.
 | `radio.cr` | 5..8 | 8 |
 | `radio.tx` | dBm, -9..22 | 22 |
 | `log.level` | `error`, `warn`, `info`, `debug` | `info` |
-| `log.frames` | `on`, `off`: one log line per frame, both directions. A frame of a job in flight - the login, the request, the reply, a trace - is printed as hex, header, path and payload; an advert and the mesh's own chat are the header line only, never their bytes | `off` |
+| `log.frames` | `on`, `off`: one log line per frame, both directions. A frame of a job in flight - the login, the request, a CLI line and its reply, a trace - is printed as hex, header, path and payload; a login that carries a password is printed with its encrypted body as one `*` per byte, which is the .NET agent's redaction of `CMD_SEND_LOGIN`; an advert and the mesh's own chat are the header line only, never their bytes | `off` |
 
 The radio's fallbacks are the Danish MeshCore channel, the one the field
 repeaters run; the ranges are MeshCore's own. A `set` takes effect at once:
@@ -104,14 +105,26 @@ A job is one line per step, and the same text goes to the server as the job's
 [12:31:07] I jobs: job 12345: ok after 2 transaction(s)
 [12:31:27] I jobs: job 12346 telemetry for repeater 17 "Risskov Water Tower" (acl)
 [12:31:31] I jobs: job 12346: ok after 1 transaction(s)
+[13:00:04] I jobs: job 12400 config.read for repeater 17 "Risskov Water Tower" (admin)
+[13:04:51] I jobs: job 12400: ok after 20 transaction(s)
 ```
 
+The job's own log, which the server shows on the job's page, says the same in
+more words: which login was sent and what it was answered (`login (admin) try
+1: logged in as admin, firmware level 2 (direct)`), each command and its
+outcome, and for a repeater this exit node holds a grant on the session's last
+command (`restore: cli 'setperm <own key> 1': ok`, then `the ACL entry of this
+exit node's key is back at read-only, as granted; the session is now read-only
+(task 60)`). A password is never an argument of any of those lines.
+
 What it never prints: the passphrase, the token (not in a reply, not in a log
-line, not in `status`), a repeater's password (this firmware holds none: its
-login carries the board's own key and nothing else), and anything the mesh
-*says* - an advert's name is read on demand with `mesh` and never logged, the
-mesh's own chat is counted by type and dropped unread, and `log.frames on`
-prints the bytes of a job's own frames and of nothing else.
+line, not in `status`), a repeater's password (the claim carries one for a
+`discover`, an `acl.set` or a `config.read`; it lives in one fixed buffer for
+the job, is zeroed when the job ends, reaches no log line and no NVS key, and
+`log.frames on` prints the login that carried it with the body as stars), and
+anything the mesh *says* - an advert's name is read on demand with `mesh` and
+never logged, the mesh's own chat is counted by type and dropped unread, and
+`log.frames on` prints the bytes of a job's own frames and of nothing else.
 
 ## The OLED
 
@@ -175,3 +188,20 @@ with `token revoked/wrong`, and it stays there until the token is set again.
    known yet (`unreachable`, and the log says *run discover first*).
 10. Leave it: `status` after an hour shows frames received, a `tx` that matches
     the transactions `jobs` counted, and a heap figure that has not moved.
+11. The association through the board (task 04). Run the wizard on meshmaster.dk
+    with this exit node: the `discover` logs in with the admin password (the log
+    says `login along the path the server holds` or `flooded login`, then
+    `logged in as admin`), the grant's `acl.set` reuses that session (`session
+    reused (admin, admin, N s old)`, one login across the two jobs, and `the
+    entry set is this exit node's own: the session is now read-only`), and the
+    verify's `status` at class `acl` logs in blank. `sessions` between the steps
+    shows the one session and its level moving from admin to read-only.
+12. *Read the configuration* on the repeater's page: 18 transactions and the
+    login, 20 in all with the restore, and `log.frames on` shows the last CLI
+    frame sent is `setperm <this board's key> 1`. The next read's `acl` value
+    lists the board's key at level 1 (`<12 hex>:1`), and the result's
+    `aclRestored` is `true`. With `set log.frames on` the login frame prints as
+    hex up to the key and then stars, never the body.
+13. A night of probes with the association `active`: `sessions` in the morning
+    shows a read-only session or none, never an admin one, and the association
+    on the server has not moved to `needs-regrant`.

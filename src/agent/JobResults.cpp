@@ -1,5 +1,6 @@
 #include "JobResults.h"
 
+#include "Iso8601.h"
 #include "JsonWriter.h"
 
 namespace mm {
@@ -143,6 +144,60 @@ size_t writeLoginBelowClassResult(const char* loggedInAs, const char* needed, ch
   w.string(loggedInAs);
   w.key("needed");
   w.string(needed);
+  w.endObject();
+  return w.overflowed() ? 0 : w.length();
+}
+
+const char kPathSourceLogin[] = "login";
+const char kPathSourceDiscovery[] = "discovery";
+
+size_t writeDiscoverResult(bool hasPath, const char* const* hops, int hopCount, const char* source, uint32_t learnedAt,
+                           const char* loggedInAs, char* out, size_t cap) {
+  JsonWriter w(out, cap);
+  char when[24];
+  w.beginObject();
+  if (hasPath) {
+    w.key("path");
+    w.beginObject();
+    w.key("hops");
+    w.beginArray();
+    for (int i = 0; i < hopCount; i++) {
+      w.comma();
+      w.string(hops[i]);
+    }
+    w.endArray();
+    if (source != nullptr) {
+      w.key("source");
+      w.string(source);
+    }
+    if (learnedAt != 0) {
+      w.key("learnedAt");
+      formatUtc(learnedAt, when, sizeof when);
+      w.string(when);
+    }
+    w.endObject();
+  }
+  if (loggedInAs != nullptr) {
+    w.key("loggedInAs");
+    w.string(loggedInAs);
+  }
+  w.endObject();
+  return w.overflowed() ? 0 : w.length();
+}
+
+size_t writeAclSetResult(const char* publicKey, int level, bool confirmed, const char* reply, char* out, size_t cap) {
+  JsonWriter w(out, cap);
+  w.beginObject();
+  w.key("publicKey");
+  w.string(publicKey);
+  w.key("level");
+  w.integer(level);
+  w.key("confirmed");
+  w.boolean(confirmed);
+  if (reply != nullptr) {
+    w.key("reply");
+    w.string(reply);
+  }
   w.endObject();
   return w.overflowed() ? 0 : w.length();
 }

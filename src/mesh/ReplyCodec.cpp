@@ -354,4 +354,47 @@ bool parseTrace(uint8_t flags, const uint8_t* hashes, size_t hashBytes, const ui
   return true;
 }
 
+bool parseAccessList(const uint8_t* data, size_t len, AccessListEntry* out, int max, int& count) {
+  count = 0;
+  if (data == nullptr && len > 0) return false;
+  size_t offset = 0;
+  while (offset + static_cast<size_t>(kAccessListEntrySize) <= len && data[offset + kAccessListPrefixBytes] != 0) {
+    if (count < max) {
+      AccessListEntry& e = out[count];
+      e = AccessListEntry();
+      toHexLower(&data[offset], static_cast<size_t>(kAccessListPrefixBytes), e.prefix);
+      e.permissions = data[offset + kAccessListPrefixBytes];
+    }
+    count++;
+    offset += static_cast<size_t>(kAccessListEntrySize);
+  }
+  if (count > max) count = max;
+  // What follows the last entry is the cipher block's padding and must be zero: anything else
+  // means the bytes are not the layout this reader knows, and a guessed ACL is what would revoke
+  // an association. Refuse instead.
+  for (size_t i = offset; i < len; i++) {
+    if (data[i] != 0) {
+      count = 0;
+      return false;
+    }
+  }
+  return true;
+}
+
+bool parseCliReply(const uint8_t* data, size_t len, char* text, size_t cap) {
+  if (text == nullptr || cap == 0) return false;
+  text[0] = 0;
+  if (data == nullptr || len <= 5) return false;
+  const uint8_t type = static_cast<uint8_t>(data[4] >> 2);
+  if (type != kTxtTypeCliData && type != kTxtTypePlain) return false;
+  size_t n = 0;
+  const size_t avail = len - 5;
+  while (n < avail && n < kMaxCliReplyLen && n + 1 < cap && data[5 + n] != 0) {
+    text[n] = static_cast<char>(data[5 + n]);
+    n++;
+  }
+  text[n] = 0;
+  return true;
+}
+
 }  // namespace mm

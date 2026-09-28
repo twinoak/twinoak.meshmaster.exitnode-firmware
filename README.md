@@ -147,7 +147,7 @@ requests  8 in the last minute of the 120 the policy allows, 0 held back; 0 batc
 > jobs
 budget    2/min, gap 20 s; 3 transaction(s) sent, 20 s waited for the budget
 claims    1 made, 2 job(s) run, 0 result(s) not taken first time
-types     status, telemetry, neighbours, trace
+types     status, telemetry, neighbours, config.read, trace, discover, acl.set
 last ten  newest first: id, type, outcome, transactions, when
   12346    telemetry   ok            1 tx  12:05:11
   12345    status      ok            2 tx  12:04:48
@@ -188,12 +188,16 @@ else:
   from the board and not from the registration form. A radio that differs from
   the `network.radio` setting raises the page's warning, which is the point of
   reporting it.
-- **Job types** `status`, `telemetry`, `neighbours`, `trace` — the four this
-  firmware has a handler for — and **queue depth** 0. Routing requires the type
-  advertised, so the server sends these and nothing else; a job of any other
-  type, or one whose credential class needs a password, is answered
-  `unsupported` at no transaction, because a password login is a later task's
-  and this board logs in as itself or not at all.
+- **Job types** `status`, `telemetry`, `neighbours`, `config.read`, `trace`,
+  `discover`, `acl.set` — the seven this firmware has a handler for — and
+  **queue depth** 0. Routing requires the type advertised, so the server sends
+  these and nothing else; a job of any other type (the writes are task 05's) is
+  answered `unsupported` at no transaction. The last three carry a repeater's
+  admin password in the claim; it lives in one fixed buffer for the length of
+  the job and is zeroed when the job ends, whatever it came to
+  (`src/agent/Credentials.h`). Every admin session on a repeater this exit node
+  holds a grant on ends with `setperm <own key> <granted level>`, so the entry
+  the association made is read-only again when the job is over.
 - **Error counters** `overheard` (frames of the mesh's own chat this board
   discarded unread — a large number is a busy public channel, not a fault),
   `wifiReconnects`, `httpFailures` and `observationsDropped` (adverts the RAM
@@ -264,9 +268,11 @@ reading.
   and flags that would tell it so (`test/test_tls_policy`).
 - **Secrets stay where they are.** The agent token lives in NVS and is printed
   by no command (`get meshmaster.token` says *set*); a repeater's password lives
-  in RAM for the job and is overwritten after; the serial log redacts as the
-  .NET agent does. Flash encryption is documented as the owner's choice, not
-  assumed.
+  in RAM for the job and is overwritten after (a test reads the bytes back, and
+  another greps the modules it passes through for the NVS and file APIs); the
+  serial log redacts as the .NET agent does, and `log.frames on` prints a login
+  that carries a password with its body as `*`. Flash encryption is documented
+  as the owner's choice, not assumed.
 - **Nothing the mesh says is logged as text.** Overheard channel and contact
   messages are counted and dropped, never printed; an advert's name is read on
   demand with `mesh` and never logged. `log.frames on` prints the bytes of a

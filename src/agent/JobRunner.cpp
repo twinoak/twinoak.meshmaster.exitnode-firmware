@@ -17,8 +17,10 @@ namespace mm {
 namespace {
 
 // A result's free text, bounded here rather than at the envelope: 4 000 characters is what API §3
-// allows and a kilobyte is more than any of these four jobs has to say. When it fills, the oldest
-// half goes - what a job did last is what a reader of its page wants.
+// allows and a kilobyte is more than any of these jobs has to say. When it fills, the oldest
+// half goes - what a job did last is what a reader of its page wants. Nothing that could need
+// redacting ever reaches it: a password is never an argument of any line below, and the .NET
+// agent's redactor has nothing to do here because there is nothing to redact.
 class JobLog {
  public:
   void clear() {
@@ -57,9 +59,11 @@ class JobLog {
 };
 
 // The scratch every job shares. Static, not automatic: the Arduino loop task has 8 KB of stack
-// and a neighbour list alone is more than that.
-constexpr size_t kDataCap = 3584;   // 54 neighbours at about 55 characters each, and room over
-constexpr size_t kBodyCap = 5632;   // the data, the envelope and the log
+// and a neighbour list alone is more than that. A config read of the default list is the
+// largest result here - fifteen values, the ACL's 23 tokens, a raw line or two - and the data
+// buffer is sized for it with room over.
+constexpr size_t kDataCap = 4608;
+constexpr size_t kBodyCap = 6656;  // the data, the envelope and the log
 ClaimedJob g_jobs[kClaimMax];
 char g_data[kDataCap];
 char g_body[kBodyCap];
@@ -72,6 +76,12 @@ char g_pathHops[kMaxClaimPathHops][8];
 const char* g_pathPtrs[kMaxClaimPathHops];
 uint8_t g_pathBytes[kMaxClaimPathHops * 3];
 uint8_t g_roundTrip[MAX_PATH_SIZE];
+ConfigSnapshot g_snapshot;
+AccessListEntry g_acl[kAccessListMaxEntries];
+char g_cliReply[kMaxCliReplyLen + 1];       // the last CLI reply, as the repeater wrote it
+char g_regionListing[kMaxCliReplyLen + 1];  // the `region` reply, kept across `region default`
+char g_regionValue[kMaxConfigValueLen + 1];
+char g_command[kPublicKeyHexLen + 32];
 
 int hexValue(char c) {
   if (c >= '0' && c <= '9') return c - '0';
@@ -81,7 +91,8 @@ int hexValue(char c) {
 }
 
 // The claim's path hops as bytes, and the hash size they are written at (the hop hashes are hex,
-// so their length says it). Returns the hop count, or 0 when the path cannot be read.
+// so their length says it). Returns the hop count, or 0 when the path cannot be read - which is
+// also a known path of zero hops, a direct neighbour; `job.hasPath` tells the two apart.
 uint8_t pathToBytes(const ClaimedJob& job, uint8_t* out, size_t cap, uint8_t& hashSize) {
   hashSize = 0;
   if (!job.hasPath || job.pathCount <= 0) return 0;
@@ -99,6 +110,18 @@ uint8_t pathToBytes(const ClaimedJob& job, uint8_t* out, size_t cap, uint8_t& ha
     }
   }
   return static_cast<uint8_t>(job.pathCount);
+}
+
+bool startsWithOk(const char* text) { return text != nullptr && text[0] == 'O' && text[1] == 'K'; }
+
+bool sameKey(const char* a, const char* b) {
+  if (a == nullptr || b == nullptr) return false;
+  for (;; a++, b++) {
+    const char x = (*a >= 'A' && *a <= 'F') ? static_cast<char>(*a - 'A' + 'a') : *a;
+    const char y = (*b >= 'A' && *b <= 'F') ? static_cast<char>(*b - 'A' + 'a') : *b;
+    if (x != y) return false;
+    if (x == '\0') return true;
+  }
 }
 
 }  // namespace
@@ -166,6 +189,94 @@ bool JobRunner::spend(const ClaimedJob& job, Context& ctx) {
   return true;
 }
 
+// ------------------------------------------------------------------ the login
+
+const char* JobRunner::loginMaterial(const ClaimedJob& job) const {
+  switch (job.credentialClass) {
+    case CredentialClass::Admin:
+      if (!job.credential.hasAdminPassword) {
+        g_log.add("the claim carried no admin material; nothing to log in with");
+        return nullptr;
+      }
+      if (job.credential.adminPasswordCut) {
+        g_log.add("the admin password is longer than %u bytes; the first %u are sent, as a companion sends them",
+                  static_cast<unsigned>(kMaxPasswordLen), static_cast<unsigned>(kMaxPasswordLen));
+      }
+      return job.credential.adminPassword;
+    case CredentialClass::Guest:
+      if (!job.credential.hasGuestPassword) {
+        g_log.add("the claim carried no guest material; nothing to log in with");
+        return nullptr;
+      }
+      if (job.credential.guestPasswordCut) {
+        g_log.add("the guest password is longer than %u bytes; the first %u are sent, as a companion sends them",
+                  static_cast<unsigned>(kMaxPasswordLen), static_cast<unsigned>(kMaxPasswordLen));
+      }
+      return job.credential.guestPassword;
+    default:
+      // Empty material at class none or acl is not missing material: it is the ACL login, which
+      // offers the repeater our own key and nothing else.
+      return "";
+  }
+}
+
+JobRunner::LoginResult JobRunner::loginOnce(const ClaimedJob& job, Context& ctx, const char* material,
+                                            const char* what) {
+  if (!spend(job, ctx)) return LoginResult::Timeout;
+  const uint32_t started = millis();
+  uint32_t tag = 0;
+  const SendResult sent = mesh_->sendLogin(material, tag);
+  if (sent == SendResult::Failed) {
+    g_log.add("%s: the packet could not be built", what);
+    return LoginResult::Failed;
+  }
+  if (!mesh_->awaitReply(tag, loginWaitMs(job), pump_)) {
+    // Stock firmware answers a login it will not take with **silence** (`handleLoginReq`
+    // returns 0): a key its ACL does not hold on a blank login, a password that is neither of
+    // its two on a password login. It cannot be told from a repeater that is off the air.
+    g_log.add("%s: no reply (%s)", what, sent == SendResult::Direct ? "direct" : "flood");
+    return LoginResult::NoReply;
+  }
+  if (!ctx.hasRtt) {
+    ctx.hasRtt = true;
+    ctx.rttMs = static_cast<int>(millis() - started);
+  }
+  const MeshReply& reply = mesh_->reply();
+  LoginReply login;
+  if (reply.kind != MeshReply::Kind::Response || !parseLoginReply(reply.data, reply.len, login)) {
+    g_log.add("%s: refused", what);
+    sessions_.invalidate(job.repeaterKey);
+    return LoginResult::Refused;
+  }
+  const uint8_t permissions = login.hasAclPermissions ? login.aclPermissions : login.role();
+  const RepeaterSession* stored = sessions_.put(job.repeaterKey, job.credentialClass, permissions, millis());
+  const uint8_t granted = stored != nullptr ? stored->role() : login.role();
+  char level[24] = {0};
+  if (login.hasFirmwareLevel) {
+    std::snprintf(level, sizeof level, ", firmware level %u", static_cast<unsigned>(login.firmwareLevel));
+  }
+  if (stored == nullptr || !stored->satisfies(job.credentialClass)) {
+    // A login judged against the class it was for, the moment it comes back (task p3.5-41):
+    // answered below what the job needs is the refusal it is, and the level travels in the
+    // result so the server can tell a demoted entry from one that is gone (task p4.1-60).
+    ctx.grantedBelowClass = true;
+    ctx.grantedRole = granted;
+    const char* with = job.credentialClass == CredentialClass::Admin   ? "admin password"
+                       : job.credentialClass == CredentialClass::Guest ? "guest password"
+                                                                       : "login from this exit node's own key";
+    g_log.add("logged in as %s, but this job needs %s: the repeater accepted the %s at a lower level than %s%s",
+              permissionName(granted), permissionName(roleNeededFor(job.credentialClass)), with,
+              permissionName(roleNeededFor(job.credentialClass)), level);
+    return LoginResult::Refused;
+  }
+  ctx.hasSession = true;
+  ctx.sessionRole = granted;
+  ctx.sessionWasFresh = true;
+  g_log.add("%s: logged in as %s%s%s (%s)", what, permissionName(granted), level, login.legacy ? " (a legacy reply)" : "",
+            sent == SendResult::Direct ? "direct" : "flood");
+  return LoginResult::Ok;
+}
+
 Outcome JobRunner::ensureSession(const ClaimedJob& job, Context& ctx) {
   if (job.credentialClass == CredentialClass::None) return Outcome::Ok;  // a trace asks nobody
 
@@ -179,70 +290,50 @@ Outcome JobRunner::ensureSession(const ClaimedJob& job, Context& ctx) {
     return Outcome::Ok;
   }
 
+  const char* material = loginMaterial(job);
+  if (material == nullptr) return Outcome::Unauthorized;
+
   for (int attempt = 1; attempt <= 2; attempt++) {
-    if (!spend(job, ctx)) return Outcome::Timeout;
-    uint32_t tag = 0;
-    const SendResult sent = mesh_->sendAclLogin(tag);
-    if (sent == SendResult::Failed) {
-      g_log.add("login try %d: the packet could not be built", attempt);
-      return Outcome::Failed;
+    char what[40];
+    std::snprintf(what, sizeof what, "login (%s) try %d", credentialClassName(job.credentialClass), attempt);
+    switch (loginOnce(job, ctx, material, what)) {
+      case LoginResult::Ok: return Outcome::Ok;
+      case LoginResult::Refused: return Outcome::Unauthorized;
+      case LoginResult::Failed: return Outcome::Failed;
+      case LoginResult::Timeout: return Outcome::Timeout;
+      case LoginResult::NoReply: break;  // once more
     }
-    if (!mesh_->awaitReply(tag, loginWaitMs(job), pump_)) {
-      // Stock firmware answers a login it will not take with **silence** (`handleLoginReq`
-      // returns 0), so this is both "the repeater is not there" and "our key is not in its ACL".
-      // Two tries and then `unreachable`, which is what the .NET agent reports for the same.
-      g_log.add("login (%s, %s) try %d: no reply", credentialClassName(job.credentialClass),
-                sent == SendResult::Direct ? "direct" : "flood", attempt);
-      continue;
-    }
-    const MeshReply& reply = mesh_->reply();
-    LoginReply login;
-    if (reply.kind != MeshReply::Kind::Response || !parseLoginReply(reply.data, reply.len, login)) {
-      g_log.add("login try %d: refused", attempt);
-      sessions_.invalidate(job.repeaterKey);
-      return Outcome::Unauthorized;
-    }
-    const uint8_t permissions = login.hasAclPermissions ? login.aclPermissions : login.role();
-    const RepeaterSession* stored = sessions_.put(job.repeaterKey, job.credentialClass, permissions, millis());
-    ctx.hasSession = true;
-    ctx.sessionRole = stored != nullptr ? stored->role() : login.role();
-    ctx.sessionWasFresh = true;
-    if (stored == nullptr || !stored->satisfies(job.credentialClass)) {
-      // A login judged against the class it was for, the moment it comes back (task p3.5-41):
-      // answered below what the job needs is the refusal it is, and the level travels in the
-      // result so the server can tell a demoted entry from one that is gone.
-      ctx.grantedBelowClass = true;
-      ctx.grantedRole = login.role();
-      g_log.add("logged in as %s, but this job needs %s", permissionName(login.role()),
-                permissionName(roleNeededFor(job.credentialClass)));
-      return Outcome::Unauthorized;
-    }
-    g_log.add("logged in as %s%s", permissionName(login.role()), login.legacy ? " (a legacy reply)" : "");
-    return Outcome::Ok;
   }
+  // Two tries and then `unreachable`, which is what the .NET agent reports for the same: on
+  // stock firmware a refused key is silence, and silence is all a board can see.
   return Outcome::Unreachable;
 }
 
-Outcome JobRunner::request(const ClaimedJob& job, Context& ctx, const char* what, uint8_t reqType,
-                           const uint8_t* data, uint8_t len) {
-  for (int attempt = 1; attempt <= 2; attempt++) {
+// ------------------------------------------------------------------ one exchange
+
+template <typename Send>
+Outcome JobRunner::exchange(const ClaimedJob& job, Context& ctx, const char* what, bool retry, bool text, Send send) {
+  const int attempts = retry ? 2 : 1;
+  for (int attempt = 1; attempt <= attempts; attempt++) {
     if (!spend(job, ctx)) return Outcome::Timeout;
     const uint32_t started = millis();
     uint32_t tag = 0;
-    const SendResult sent = mesh_->sendRequest(reqType, data, len, tag);
+    const SendResult sent = send(tag);
     if (sent == SendResult::Failed) {
       g_log.add("%s try %d: the packet could not be built", what, attempt);
       return Outcome::Failed;
     }
-    if (mesh_->awaitReply(tag, requestWaitMs(job), pump_)) {
+    const bool answered = text ? mesh_->awaitText(requestWaitMs(job), pump_) : mesh_->awaitReply(tag, requestWaitMs(job), pump_);
+    if (answered) {
       ctx.hasRtt = true;
       ctx.rttMs = static_cast<int>(millis() - started);
       g_log.add("%s try %d: ok (%s, %lu ms)", what, attempt, sent == SendResult::Direct ? "direct" : "flood",
                 static_cast<unsigned long>(ctx.rttMs));
+      if (text) std::memcpy(g_cliReply, mesh_->reply().text, sizeof g_cliReply);
       return Outcome::Ok;
     }
     g_log.add("%s try %d: no reply", what, attempt);
-    if (attempt == 1 && !ctx.sessionWasFresh && ctx.hasSession) {
+    if (attempt == 1 && retry && !ctx.sessionWasFresh && ctx.hasSession) {
       // An old session and no answer: the repeater may have rebooted and forgotten us.
       sessions_.invalidate(job.repeaterKey);
       ctx.hasSession = false;
@@ -253,6 +344,83 @@ Outcome JobRunner::request(const ClaimedJob& job, Context& ctx, const char* what
   }
   return Outcome::Unreachable;
 }
+
+Outcome JobRunner::request(const ClaimedJob& job, Context& ctx, const char* what, uint8_t reqType,
+                           const uint8_t* data, uint8_t len) {
+  return exchange(job, ctx, what, true, false,
+                  [&](uint32_t& tag) { return mesh_->sendRequest(reqType, data, len, tag); });
+}
+
+Outcome JobRunner::cliLine(const ClaimedJob& job, Context& ctx, const char* what, const char* command, bool retry) {
+  g_cliReply[0] = '\0';
+  // Each attempt is its own sender timestamp, strictly above the last (uniqueTime): the
+  // repeater answers an equal one with nothing and runs nothing, and drops a lower one.
+  return exchange(job, ctx, what, retry, true, [&](uint32_t& tag) {
+    tag = mesh_->uniqueTime();
+    return mesh_->sendCli(command, tag);
+  });
+}
+
+// ------------------------------------------------------------------ the restore (task p4.1-60)
+
+int JobRunner::restoreAcl(const ClaimedJob& job, Context& ctx, Outcome outcome) {
+  if (ctx.aclRestoreDone) return -1;
+  // Nothing to restore unless the claim carried a grant below admin and the session in force is
+  // admin - by the admin password, which rewrote our entry to admin on stock firmware, or a
+  // blank login answered admin because an earlier session died before its restore.
+  if (!job.hasAclLevel || job.aclLevel >= kPermAdmin || job.aclLevel < kPermReadOnly || !ctx.hasSession ||
+      ctx.sessionRole != kPermAdmin) {
+    return -1;
+  }
+  ctx.aclRestoreDone = true;
+  const char* granted = permissionName(static_cast<uint8_t>(job.aclLevel));
+  if (outcome == Outcome::Unreachable || outcome == Outcome::Timeout) {
+    // The repeater stopped answering, or the lease is spent: a restore sent now would go into
+    // the same silence. The session is dropped, and the next login from this key - a blank
+    // login answered admin - puts the entry back on that job's account (the third rule of §7).
+    g_log.add("the ACL entry of this exit node's key may still be at admin: the job ended %s, so the restore is not "
+              "sent; the session is dropped, and the next login from this key will put it right (task 60)",
+              outcomeName(outcome));
+    sessions_.invalidate(job.repeaterKey);
+    ctx.hasSession = false;
+    return 0;
+  }
+  if (publicKey_ == nullptr || std::strlen(publicKey_) != kPublicKeyHexLen) {
+    g_log.add("the ACL entry cannot be put back: this board's own public key is unknown");
+    sessions_.invalidate(job.repeaterKey);
+    ctx.hasSession = false;
+    return 0;
+  }
+  std::snprintf(g_command, sizeof g_command, "setperm %s %d", publicKey_, job.aclLevel);
+  char what[48];
+  std::snprintf(what, sizeof what, "restore: cli 'setperm <own key> %d'", job.aclLevel);
+  const Outcome sent = cliLine(job, ctx, what, g_command, false);
+  trimInPlace(g_cliReply);
+  if (sent == Outcome::Ok && startsWithOk(g_cliReply)) {
+    // On stock firmware the entry *is* the session (ClientACL::applyPermissions finds the same
+    // ClientInfo the login filled): the repeater now holds us at the granted level and the cache
+    // says so - reusable by the next acl-class job, invisible to an admin-class one.
+    sessions_.put(job.repeaterKey, CredentialClass::Acl, static_cast<uint8_t>(job.aclLevel), millis());
+    ctx.sessionRole = static_cast<uint8_t>(job.aclLevel);
+    g_log.add("the ACL entry of this exit node's key is back at %s, as granted; the session is now %s (task 60)",
+              granted, granted);
+    return 1;
+  }
+  sessions_.invalidate(job.repeaterKey);
+  ctx.hasSession = false;
+  if (sent == Outcome::Ok) {
+    g_log.add("the ACL entry of this exit node's key may still be at admin: the repeater answered '%s'; the session "
+              "is dropped, and the next login from this key will put it right (task 60)",
+              g_cliReply);
+  } else {
+    g_log.add("the ACL entry of this exit node's key may still be at admin: the restore got %s; the session is "
+              "dropped, and the next login from this key will put it right (task 60)",
+              outcomeName(sent));
+  }
+  return 0;
+}
+
+// ------------------------------------------------------------------ the four reads
 
 Outcome JobRunner::runStatus(const ClaimedJob& job, Context& ctx, size_t& dataLen) {
   const Outcome session = ensureSession(job, ctx);
@@ -359,8 +527,12 @@ Outcome JobRunner::runNeighbours(const ClaimedJob& job, Context& ctx, size_t& da
 
 Outcome JobRunner::runTrace(const ClaimedJob& job, Context& ctx, size_t& dataLen) {
   uint8_t hashSize = 0;
-  const uint8_t hops = pathToBytes(job, g_pathBytes, sizeof g_pathBytes, hashSize);
-  if (hops == 0) {
+  uint8_t hops = pathToBytes(job, g_pathBytes, sizeof g_pathBytes, hashSize);
+  if (hops == 0 && job.hasPath && job.pathCount == 0) {
+    // A direct neighbour: a known path of zero hops, and the trace's hashes are this board's own
+    // size, one byte (PATH_HASH_SIZE).
+    hashSize = 1;
+  } else if (hops == 0) {
     g_log.add("no path is known to this repeater: a trace needs one; run discover first");
     return Outcome::Unreachable;
   }
@@ -437,9 +609,329 @@ Outcome JobRunner::runTrace(const ClaimedJob& job, Context& ctx, size_t& dataLen
   return Outcome::Unreachable;
 }
 
+// ------------------------------------------------------------------ discover (tasks p3.5-39, 40, 41)
+
+Outcome JobRunner::learned(const ClaimedJob& job, Context& ctx, LoginResult from, const char* source,
+                           size_t& dataLen) {
+  (void)job;
+  const int hopCount = mesh_->describePath(g_pathHops, kMaxClaimPathHops);
+  for (int h = 0; h < hopCount; h++) g_pathPtrs[h] = g_pathHops[h];
+  g_log.add("path of %d hop(s), learned from the %s", hopCount, source);
+  const uint32_t learnedAt = clock_->now();
+  if (ctx.grantedBelowClass) {
+    // The route is real and is reported; the job is unauthorized, because the grant that would
+    // follow would fail at this same login (task p3.5-41).
+    g_log.add("the path is reported; the job is unauthorized, because an admin job that follows would fail at this "
+              "same login");
+    dataLen = writeDiscoverResult(true, g_pathPtrs, hopCount, source, learnedAt, permissionName(ctx.grantedRole),
+                                  g_data, kDataCap);
+    return dataLen > 0 ? Outcome::Unauthorized : Outcome::Failed;
+  }
+  if (ctx.hasSession) {
+    g_log.add("the admin session is open for %lu s: the next job for this repeater logs in again only if it has gone",
+              static_cast<unsigned long>(SessionStore::kLifetimeMs / 1000));
+    dataLen = writeDiscoverResult(true, g_pathPtrs, hopCount, source, learnedAt, permissionName(ctx.sessionRole),
+                                  g_data, kDataCap);
+    return dataLen > 0 ? Outcome::Ok : Outcome::Failed;
+  }
+  if (from == LoginResult::Refused) {
+    g_log.add("the login was refused, which still taught the path - but an admin job through this exit node needs a "
+              "password this repeater accepts");
+  }
+  dataLen = writeDiscoverResult(true, g_pathPtrs, hopCount, source, learnedAt, nullptr, g_data, kDataCap);
+  return dataLen > 0 ? Outcome::Ok : Outcome::Failed;
+}
+
+Outcome JobRunner::runDiscover(const ClaimedJob& job, Context& ctx, size_t& dataLen) {
+  // Why this order (25 September 2026, task p3.5-39): a login that is answered - accepted or
+  // refused - proves the path in both directions and costs the transaction the association flow
+  // needs next anyway; a flooded login's reply comes back along a path and teaches it; and the
+  // path-discovery request is what a v1.17.1 repeater ten metres away forwarded twice and never
+  // answered, so it is the last resort. Which login (task p3.5-40): the admin password, because
+  // a login with none is the ACL login, and a repeater that has not granted our key an entry
+  // answers that with nothing at all.
+  const char* material = loginMaterial(job);
+  if (material != nullptr) {
+    if (mesh_->hasPath()) {
+      char what[80];
+      std::snprintf(what, sizeof what, "login along the path the server holds (%u hop(s)), which verifies it",
+                    static_cast<unsigned>(mesh_->pathHopCount()));
+      const LoginResult direct = loginOnce(job, ctx, material, what);
+      if (direct == LoginResult::Ok || direct == LoginResult::Refused) {
+        return learned(job, ctx, direct, kPathSourceLogin, dataLen);
+      }
+      if (direct == LoginResult::Failed || direct == LoginResult::Timeout) {
+        dataLen = writeDiscoverResult(false, nullptr, 0, nullptr, 0, nullptr, g_data, kDataCap);
+        return direct == LoginResult::Failed ? Outcome::Failed : Outcome::Timeout;
+      }
+      // Silence: the path may be stale, so it goes and the next login floods. A flood that is
+      // answered writes a fresh one; the next claim brings the server's path back anyway.
+      mesh_->forgetPath();
+      g_log.add("nothing came back along it: the path is cleared, so the next login floods");
+    }
+
+    const LoginResult flooded = loginOnce(job, ctx, material, "flooded login, for the path its reply comes back along");
+    if (flooded == LoginResult::Failed || flooded == LoginResult::Timeout) {
+      dataLen = writeDiscoverResult(false, nullptr, 0, nullptr, 0, nullptr, g_data, kDataCap);
+      return flooded == LoginResult::Failed ? Outcome::Failed : Outcome::Timeout;
+    }
+    if (flooded == LoginResult::Ok || flooded == LoginResult::Refused) {
+      if (mesh_->hasPath()) return learned(job, ctx, flooded, kPathSourceLogin, dataLen);
+      g_log.add("the login was answered but no path came back with the reply");
+    }
+  }
+
+  // The last resort, and the reason this handler exists: what the field found a v1.17.1
+  // repeater forwarding and never answering. One try only - a login has already gone unanswered
+  // by now (or the claim carried nothing to log in with), so a second flood of a different shape
+  // is not worth two.
+  if (!spend(job, ctx)) {
+    dataLen = writeDiscoverResult(false, nullptr, 0, nullptr, 0, nullptr, g_data, kDataCap);
+    return Outcome::Timeout;
+  }
+  uint32_t tag = 0;
+  if (mesh_->sendDiscovery(tag) == SendResult::Failed) {
+    g_log.add("path discovery request: the packet could not be built");
+    dataLen = writeDiscoverResult(false, nullptr, 0, nullptr, 0, nullptr, g_data, kDataCap);
+    return Outcome::Failed;
+  }
+  const uint32_t started = millis();
+  if (mesh_->awaitReply(tag, requestWaitMs(job), pump_) && mesh_->hasPath()) {
+    ctx.hasRtt = true;
+    ctx.rttMs = static_cast<int>(millis() - started);
+    g_log.add("path discovery request, the last resort (some firmware never answers it): ok, %lu ms",
+              static_cast<unsigned long>(ctx.rttMs));
+    return learned(job, ctx, LoginResult::NoReply, kPathSourceDiscovery, dataLen);
+  }
+  g_log.add("path discovery request, the last resort (some firmware never answers it): no reply");
+  dataLen = writeDiscoverResult(false, nullptr, 0, nullptr, 0, nullptr, g_data, kDataCap);
+  return Outcome::Unreachable;
+}
+
+// ------------------------------------------------------------------ acl.set (CONFIGURATION §8, task p4.1-60)
+
+Outcome JobRunner::runAclSet(const ClaimedJob& job, Context& ctx, size_t& dataLen) {
+  if (!job.hasAclSet || job.aclSetKey[0] == '\0' || job.aclSetLevel < 0 || job.aclSetLevel > 3) {
+    g_log.add("acl.set needs a public key and a level 0..3");
+    return Outcome::Failed;
+  }
+  const Outcome session = ensureSession(job, ctx);
+  if (session != Outcome::Ok) return session;
+  if (ctx.sessionRole != kPermAdmin) {
+    g_log.add("logged in as %s: setperm needs admin", permissionName(ctx.sessionRole));
+    return Outcome::Unauthorized;
+  }
+
+  std::snprintf(g_command, sizeof g_command, "setperm %s %d", job.aclSetKey, job.aclSetLevel);
+  char what[48];
+  std::snprintf(what, sizeof what, "cli 'setperm %.12s... %d'", job.aclSetKey, job.aclSetLevel);
+  const Outcome sent = cliLine(job, ctx, what, g_command, true);
+  if (sent != Outcome::Ok) {
+    dataLen = writeAclSetResult(job.aclSetKey, job.aclSetLevel, false, nullptr, g_data, kDataCap);
+    return sent;
+  }
+  trimInPlace(g_cliReply);
+  g_log.add("the repeater answered '%s'", g_cliReply);
+  const bool confirmed = startsWithOk(g_cliReply);
+  if (confirmed && sameKey(job.aclSetKey, publicKey_)) {
+    // The entry that was just written is our own session: on stock firmware `applyPermissions`
+    // finds the same ClientInfo the login filled, so from here the repeater holds this exit node
+    // at the level sent - read-only after a grant, nothing after a revoke - and the cache must
+    // say the same, or the next admin-class job would reuse a session the repeater no longer
+    // honours at admin. No second setperm follows: the command is the level.
+    if (job.aclSetLevel == 0) {
+      sessions_.invalidate(job.repeaterKey);
+      ctx.hasSession = false;
+    } else {
+      sessions_.put(job.repeaterKey, CredentialClass::Acl, static_cast<uint8_t>(job.aclSetLevel), millis());
+      ctx.sessionRole = static_cast<uint8_t>(job.aclSetLevel);
+    }
+    ctx.aclRestoreDone = true;
+    g_log.add("the entry set is this exit node's own: the session is now %s",
+              job.aclSetLevel == 0 ? "gone" : permissionName(static_cast<uint8_t>(job.aclSetLevel)));
+  }
+  dataLen = writeAclSetResult(job.aclSetKey, job.aclSetLevel, confirmed, g_cliReply, g_data, kDataCap);
+  if (dataLen == 0) return Outcome::Failed;
+  return confirmed ? Outcome::Ok : Outcome::Failed;
+}
+
+// ------------------------------------------------------------------ config.read (CONFIGURATION §3, §8)
+
+Outcome JobRunner::readRegions(const ClaimedJob& job, Context& ctx, ConfigSnapshot& snapshot) {
+  // Two commands, because the firmware prints the map in one and the default scope in another
+  // (task p4-57): `region` is RegionMap::exportTo into 160 characters, and `region default` is
+  // the scope a `region load` clears, which is why it is part of the value.
+  Outcome got = cliLine(job, ctx, "cli 'region'", kRegionListCommand, true);
+  if (got != Outcome::Ok) return got;
+  std::memcpy(g_regionListing, g_cliReply, sizeof g_regionListing);
+
+  const char* start = g_regionListing;
+  while (*start == ' ' || *start == '\t' || *start == '\r' || *start == '\n') start++;
+  char line[kMaxConfigRawLen + 1];
+  if (*start != '*') {
+    // RegionMap::exportTo always starts at the wildcard root; anything else is a firmware that
+    // does not know the command (`Unknown command` is a reply, not silence) or a reply this
+    // version cannot read. No evidence, and the snapshot says so.
+    trimInPlace(g_regionListing);
+    std::snprintf(line, sizeof line, "%s: %.160s", kRegionListCommand, g_regionListing);
+    snapshot.addRaw(line);
+    return Outcome::Ok;
+  }
+  if (regionListingIsTruncated(g_regionListing)) {
+    g_log.add("the region listing filled the firmware's 160-character buffer: no hierarchy is stored from this read");
+    snapshot.addRaw(kRegionTruncatedLine);
+    return Outcome::Ok;
+  }
+
+  got = cliLine(job, ctx, "cli 'region default'", kRegionDefaultCommand, true);
+  if (got != Outcome::Ok) return got;
+  char scope[kMaxConfigKeyLen + 1];
+  if (!regionDefaultOf(g_cliReply, scope, sizeof scope)) {
+    trimInPlace(g_cliReply);
+    std::snprintf(line, sizeof line, "%s: %.160s", kRegionDefaultCommand, g_cliReply);
+    snapshot.addRaw(line);
+  }
+  if (regionValue(g_regionListing, g_cliReply, g_regionValue, sizeof g_regionValue)) {
+    snapshot.put(kRegionsKey, g_regionValue);
+  }
+  return Outcome::Ok;
+}
+
+Outcome JobRunner::readAccessList(const ClaimedJob& job, Context& ctx, ConfigSnapshot& snapshot) {
+  // The ACL is a binary request and not a `get` (task p3.5-43): `get acl` is answered on the
+  // repeater's local serial console alone. Admin only; both reserved bytes zero.
+  const uint8_t data[2] = {0, 0};
+  const Outcome got = request(job, ctx, "access-list request (the ACL)", AgentMesh::kReqTypeGetAccessList, data,
+                              sizeof data);
+  if (got != Outcome::Ok) {
+    if ((got == Outcome::Unreachable || got == Outcome::Timeout) && snapshot.valuesRead() > 0) {
+      // No answer, and keys were read before it (task p4-49): the ACL is the one key whose
+      // silence the firmware guarantees for a repeater that is perfectly reachable - a session
+      // below admin, a firmware without the request, an ACL of 24 entries or more - so the read
+      // stands, with no ACL, which is no evidence either way.
+      g_log.add("no reply to the access-list request after %d keys were read: no ACL in this snapshot, and no "
+                "evidence either way",
+                snapshot.valuesRead());
+      snapshot.addRaw(kAclSilentLine);
+      return Outcome::Ok;
+    }
+    return got;
+  }
+  const MeshReply& reply = mesh_->reply();
+  int count = 0;
+  if (!parseAccessList(reply.data, reply.len, g_acl, kAccessListMaxEntries, count)) {
+    // Something after the list that is not the padding it should be: these are not the bytes
+    // this reader knows, and a short list is what revokes an association. Read no ACL.
+    g_log.add("the access-list reply is not the layout this agent reads: no ACL was read from it");
+    snapshot.addRaw(kAclUnreadableLine);
+    return Outcome::Ok;
+  }
+  accessListTokens(g_acl, count, snapshot.acl, sizeof snapshot.acl);
+  snapshot.hasAcl = true;
+  g_log.add("the ACL has %d entr%s", count, count == 1 ? "y" : "ies");
+  if (count >= kAccessListMaxEntries) {
+    // A reply at the packet's ceiling: a key absent from it may never have fitted.
+    snapshot.addRaw(kAclFullLine);
+  }
+  return Outcome::Ok;
+}
+
+Outcome JobRunner::runConfigRead(const ClaimedJob& job, Context& ctx, size_t& dataLen) {
+  ConfigSnapshot& snapshot = g_snapshot;
+  snapshot.clear();
+
+  const Outcome session = ensureSession(job, ctx);
+  if (session != Outcome::Ok) return session;
+  if (ctx.sessionRole != kPermAdmin) {
+    // The login *succeeded*, so this is not `unauthorized` at any class but admin: that outcome
+    // means a refused login, and at class acl the server reads it as "the entry is gone". A `get`
+    // is a CLI command the 1.17 firmware answers to admin alone.
+    g_log.add("logged in as %s: this firmware answers CLI commands (get) to admin only", permissionName(ctx.sessionRole));
+    return job.credentialClass == CredentialClass::Admin ? Outcome::Unauthorized : Outcome::Unsupported;
+  }
+
+  const char* const* keys = kDefaultConfigKeys;
+  int keyCount = kDefaultConfigKeyCount;
+  const char* asked[kMaxConfigKeys];
+  if (job.hasConfigKeys) {
+    for (int i = 0; i < job.configKeyCount; i++) asked[i] = job.configKeys[i];
+    keys = asked;
+    keyCount = job.configKeyCount;
+  }
+  bool wantsAcl = false;
+  bool wantsRegions = false;
+  for (int i = 0; i < keyCount; i++) {
+    if (std::strcmp(keys[i], kAclKey) == 0) wantsAcl = true;
+    if (std::strcmp(keys[i], kRegionsKey) == 0) wantsRegions = true;
+  }
+  g_log.add("%d key(s), %s list", keyCount, job.hasConfigKeys ? "the claim's" : "the default");
+
+  // `regions` first, as the .NET handler reads it, so the two snapshots have the same order.
+  if (wantsRegions) {
+    const Outcome got = readRegions(job, ctx, snapshot);
+    if (got != Outcome::Ok) {
+      dataLen = writeConfigReadResult(snapshot, g_data, kDataCap);
+      return got;
+    }
+  }
+
+  char command[kMaxConfigKeyLen + 8];
+  char what[kMaxConfigKeyLen + 16];
+  char line[kMaxConfigRawLen + 1];
+  for (int i = 0; i < keyCount + kConfigReadExtraCount; i++) {
+    const bool extra = i >= keyCount;
+    const char* key = extra ? kConfigReadExtras[i - keyCount] : keys[i];
+    if (!extra && (std::strcmp(key, kAclKey) == 0 || std::strcmp(key, kRegionsKey) == 0)) continue;
+    if (extra) {
+      std::snprintf(command, sizeof command, "%s", key);
+    } else {
+      std::snprintf(command, sizeof command, "get %s", key);
+    }
+    std::snprintf(what, sizeof what, "cli '%s'", command);
+    const Outcome got = cliLine(job, ctx, what, command, true);
+    if (got != Outcome::Ok) {
+      dataLen = writeConfigReadResult(snapshot, g_data, kDataCap);
+      return got;
+    }
+    trimInPlace(g_cliReply);
+    if (extra && std::strcmp(key, "ver") == 0) {
+      // `ver` is "v1.17.1 (Build: 27 Sep 2025)"; the snapshot keeps the first 64 characters.
+      std::snprintf(snapshot.firmware, sizeof snapshot.firmware, "%.*s", static_cast<int>(kMaxConfigTextLen), g_cliReply);
+    } else if (extra) {
+      std::snprintf(snapshot.board, sizeof snapshot.board, "%.*s", static_cast<int>(kMaxConfigTextLen), g_cliReply);
+    } else if (const char* value = cliReplyValue(g_cliReply)) {
+      snapshot.put(key, value);
+    } else {
+      // A refusal or an unknown key (`??: <key>`), kept verbatim so nothing the repeater said
+      // is lost (CONFIGURATION §3). A raw line is the command, a colon and up to 160 characters.
+      std::snprintf(line, sizeof line, "%.36s: %.160s", command, g_cliReply);
+      snapshot.addRaw(line);
+    }
+  }
+
+  if (wantsAcl) {
+    const Outcome got = readAccessList(job, ctx, snapshot);
+    if (got != Outcome::Ok) {
+      dataLen = writeConfigReadResult(snapshot, g_data, kDataCap);
+      return got;
+    }
+  }
+
+  // The session's last command, and this result says what became of it (task p4.1-60): the ACL
+  // just read lists our own key at admin, because this read's login put it there, and the server
+  // must not read that as a session that died before its restore.
+  const int restored = restoreAcl(job, ctx, Outcome::Ok);
+  snapshot.hasAclRestored = restored >= 0;
+  snapshot.aclRestored = restored == 1;
+  dataLen = writeConfigReadResult(snapshot, g_data, kDataCap);
+  return dataLen > 0 ? Outcome::Ok : Outcome::Failed;
+}
+
+// ------------------------------------------------------------------ the runner
+
 Outcome JobRunner::runJob(const ClaimedJob& job, Context& ctx, size_t& dataLen) {
   dataLen = 0;
-  char why[160] = {0};
+  char why[200] = {0};
   if (!canRun(job, why, sizeof why)) {
     g_log.add("%s", why);
     return Outcome::Unsupported;
@@ -451,12 +943,16 @@ Outcome JobRunner::runJob(const ClaimedJob& job, Context& ctx, size_t& dataLen) 
     g_log.add("the repeater's public key is not 64 hex characters");
     return Outcome::Failed;
   }
-  g_log.add("path %s", hops > 0 ? "from the server" : "unknown: the mesh floods");
+  if (hops == 0 && job.hasPath && job.pathCount == 0) mesh_->setDirectPath();  // a direct neighbour
+  g_log.add("path %s", mesh_->hasPath() ? "from the server" : "unknown: the mesh floods");
 
   if (std::strcmp(job.type, "status") == 0) return runStatus(job, ctx, dataLen);
   if (std::strcmp(job.type, "telemetry") == 0) return runTelemetry(job, ctx, dataLen);
   if (std::strcmp(job.type, "neighbours") == 0) return runNeighbours(job, ctx, dataLen);
   if (std::strcmp(job.type, "trace") == 0) return runTrace(job, ctx, dataLen);
+  if (std::strcmp(job.type, "discover") == 0) return runDiscover(job, ctx, dataLen);
+  if (std::strcmp(job.type, "acl.set") == 0) return runAclSet(job, ctx, dataLen);
+  if (std::strcmp(job.type, "config.read") == 0) return runConfigRead(job, ctx, dataLen);
   return Outcome::Unsupported;
 }
 
@@ -506,8 +1002,14 @@ void JobRunner::remember(const ClaimedJob& job, Outcome outcome, int transaction
 int JobRunner::claimAndRun() {
   flushPending();
 
+  // Whatever a previous claim left: no password outlives its job, and none waits for the next.
+  for (int i = 0; i < kClaimMax; i++) g_jobs[i].credential.wipe();
+
   int count = 0;
-  if (!server_->claimJobs(g_jobs, kClaimMax, count)) return -1;
+  if (!server_->claimJobs(g_jobs, kClaimMax, count)) {
+    for (int i = 0; i < kClaimMax; i++) g_jobs[i].credential.wipe();
+    return -1;
+  }
   claims_++;
   if (count == 0) {
     LOG_D("jobs: the claim came back with nothing");
@@ -516,7 +1018,7 @@ int JobRunner::claimAndRun() {
   LOG_I("jobs: %d claimed", count);
 
   for (int i = 0; i < count; i++) {
-    const ClaimedJob& job = g_jobs[i];
+    ClaimedJob& job = g_jobs[i];
     const uint32_t startedAt = clock_->now();
     g_log.clear();
     g_log.add("job %lld %s for repeater %lld \"%s\" (%s)", job.id, job.type, job.repeaterId, job.repeaterLabel,
@@ -536,6 +1038,15 @@ int JobRunner::claimAndRun() {
     ctx.job = &job;
     size_t dataLen = 0;
     Outcome outcome = runJob(job, ctx, dataLen);
+
+    // The session's last command (task p4.1-60): an admin session on a repeater where this exit
+    // node holds a grant puts its own entry back to the granted level before the job is over,
+    // whatever the job came to. A config.read has sent it already, for its result's sake; an
+    // acl.set on our own key *is* the level and needs no second one.
+    if (std::strcmp(job.type, "acl.set") != 0) restoreAcl(job, ctx, outcome);
+
+    // The password's job is over. Whatever the outcome, and before anything is posted.
+    job.credential.wipe();
 
     // A login answered below the class carries the tier it was answered at, for a type that has
     // no result of its own to say it (task p4.1-60).
@@ -586,6 +1097,7 @@ int JobRunner::claimAndRun() {
     ran_++;
     remember(job, outcome, ctx.transactions, posted);
   }
+  for (int i = 0; i < kClaimMax; i++) g_jobs[i].credential.wipe();
   return count;
 }
 
@@ -596,7 +1108,9 @@ void JobRunner::report(Stream& out) const {
   out.printf("claims    %lu made, %lu job(s) run, %lu result(s) not taken first time\r\n",
              static_cast<unsigned long>(claims_), static_cast<unsigned long>(ran_),
              static_cast<unsigned long>(postFailures_));
-  out.printf("types     status, telemetry, neighbours, trace\r\n");
+  out.print("types     ");
+  for (int i = 0; i < kJobTypeCount; i++) out.printf("%s%s", i > 0 ? ", " : "", kJobTypes[i]);
+  out.print("\r\n");
   if (pendingLen_ > 0) out.printf("pending   the result of job %lld is waiting to be sent\r\n", pendingJobId_);
   if (recentCount_ == 0) {
     out.println("last ten  none yet");
@@ -610,6 +1124,24 @@ void JobRunner::report(Stream& out) const {
     out.printf("  %-8lld %-11s %-13s %d tx  %s%s\r\n", r.id, r.type, outcomeName(r.outcome), r.transactions, when,
                r.posted ? "" : "  (not posted)");
   }
+}
+
+void JobRunner::reportSessions(Stream& out) const {
+  const uint32_t now = millis();
+  out.printf("sessions  %u live of %u slots, lifetime %lu s; a repeater's session is a key, a class, a level and an "
+             "age - no secret is in one\r\n",
+             static_cast<unsigned>(sessions_.live(now)), static_cast<unsigned>(SessionStore::kMaxSessions),
+             static_cast<unsigned long>(SessionStore::kLifetimeMs / 1000));
+  bool any = false;
+  for (size_t i = 0; i < SessionStore::kMaxSessions; i++) {
+    const RepeaterSession* s = sessions_.slot(i, now);
+    if (s == nullptr) continue;
+    if (!any) out.println("live      repeater key (first 12), class, level, age");
+    any = true;
+    out.printf("  %.12s...  %-6s %-10s %lu s old\r\n", s->key, credentialClassName(s->credentialClass), s->tier(),
+               static_cast<unsigned long>((now - s->loggedInAtMs) / 1000));
+  }
+  if (!any) out.println("live      none");
 }
 
 void JobRunner::describe(char* out, size_t cap) const {

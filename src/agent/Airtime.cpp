@@ -26,6 +26,13 @@ int transactionsFor(const char* type, CredentialClass credentialClass, int items
     return credentialClass == CredentialClass::Acl ? 2 : 1;
   }
   if (std::strcmp(type, "neighbours") == 0) return neighbourPages(items);
+  if (std::strcmp(type, "config.read") == 0) {
+    // n + 2 + r for a list of n keys (ConfigReadPayload.Transactions): `items` is the list's
+    // length when the claim named one, and the default list of fifteen - `regions` on it - when
+    // it did not. A named list is priced as if it held `regions`, which is the ceiling.
+    return items > 0 ? items + kConfigReadExtraCount + 1 : configReadTransactions(nullptr, 0);
+  }
+  // discover is one at best and three at worst; acl.set, telemetry and a trace are one.
   return 1;
 }
 

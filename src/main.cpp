@@ -1,8 +1,10 @@
 // The MeshMaster agent firmware: a Heltec V3 that boots, takes its settings over the USB serial
 // console, joins WiFi, sets its clock, and is an exit node on meshmaster.dk - it heartbeats over
-// verified TLS, posts the adverts its radio hears, and claims and answers the four read jobs of
-// EXIT-NODES §7: status, telemetry, neighbours and trace (task 03). What leaves the radio is one
-// packet per transaction and nothing else (src/mesh/AgentMesh.h).
+// verified TLS, posts the adverts its radio hears, and claims and answers the jobs of EXIT-NODES
+// §7 that read and log in: status, telemetry, neighbours and trace (task 03), and discover,
+// acl.set and config.read, which carry a repeater's password for the length of the job and
+// nothing longer (task 04, src/agent/Credentials.h). What leaves the radio is one packet per
+// transaction and nothing else (src/mesh/AgentMesh.h).
 //
 // The pieces, each in its own file:
 //   settings/   the key table (host-portable) and the NVS store
@@ -222,6 +224,10 @@ void printServer(Stream& out) { agent.report(out); }
 // their transaction count.
 void printJobs(Stream& out) { jobs.report(out); }
 
+// `sessions`: the repeater logins held - per repeater the class, the level and the age. A
+// session is a key, a class, a role byte and a time; no secret is in one.
+void printSessions(Stream& out) { jobs.reportSessions(out); }
+
 // A job's exchange blocks: a transaction is a send and up to sixteen seconds of waiting, and the
 // budget's gap is twenty more. The console and the OLED are pumped through all of it, so a board
 // running a job is still a board a person can type at; the mesh is pumped by the runner itself.
@@ -318,8 +324,8 @@ void setup() {
   agent.setIdentity(public_key_hex[0] != 0 ? public_key_hex : nullptr);
   if (!server.configured()) LOG_I("server: not configured; set meshmaster.url and meshmaster.token");
 
-  mm::ConsoleHost host = {&printStatus,  &printMesh, &printServer,      &printJobs,
-                          &printWifi,    &doReboot,  &onSettingChanged, &onErased};
+  mm::ConsoleHost host = {&printStatus, &printMesh, &printServer,      &printJobs, &printSessions,
+                          &printWifi,   &doReboot,  &onSettingChanged, &onErased};
   console.begin(Serial, settings, host);
   board.onBootComplete();
 }

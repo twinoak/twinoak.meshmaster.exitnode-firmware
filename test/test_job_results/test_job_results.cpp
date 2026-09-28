@@ -187,6 +187,44 @@ TEST(JobResultReport, TheSameInputMakesTheDotNetFixtureByteForByte) {
   EXPECT_EQ(std::string(out, len), fixture("JobResultReport"));
 }
 
+// DiscoverResult(PathInfo? Path, string? LoggedInAs), byte for byte (task 04).
+TEST(DiscoverResult, TheSameInputMakesTheDotNetFixtureByteForByte) {
+  const char* hops[] = {"a1", "7f"};
+  char out[256];
+  const std::size_t len =
+      mm::writeDiscoverResult(true, hops, 2, mm::kPathSourceLogin, at("2026-09-18T10:12:00Z"), "admin", out, sizeof out);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ(std::string(out, len), fixture("DiscoverResult"));
+}
+
+TEST(DiscoverResult, NoPathAndNoLoginIsAnEmptyObject) {
+  char out[128];
+  std::size_t len = mm::writeDiscoverResult(false, nullptr, 0, nullptr, 0, nullptr, out, sizeof out);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ(std::string(out, len), "{}");
+
+  // A refused login still teaches a path, and then there is no tier to report; a direct
+  // neighbour is a path of no hops.
+  len = mm::writeDiscoverResult(true, nullptr, 0, mm::kPathSourceDiscovery, at("2026-09-18T10:12:00Z"), nullptr, out,
+                                sizeof out);
+  EXPECT_EQ(std::string(out, len), "{\"path\":{\"hops\":[],\"source\":\"discovery\",\"learnedAt\":\"2026-09-18T10:12:00Z\"}}");
+}
+
+// AclSetResult(string PublicKey, int Level, bool Confirmed, string? Reply), byte for byte.
+TEST(AclSetResult, TheSameInputMakesTheDotNetFixtureByteForByte) {
+  char out[256];
+  const std::size_t len = mm::writeAclSetResult("a1b2c3d4e5f60718", 1, true, "permission set", out, sizeof out);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ(std::string(out, len), fixture("AclSetResult"));
+}
+
+TEST(AclSetResult, SilenceLeavesTheReplyOut) {
+  char out[128];
+  const std::size_t len = mm::writeAclSetResult("a1b2c3d4e5f60718", 0, false, nullptr, out, sizeof out);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ(std::string(out, len), "{\"publicKey\":\"a1b2c3d4e5f60718\",\"level\":0,\"confirmed\":false}");
+}
+
 TEST(JobResultReport, TheOutcomesAreTheEnumsCamelCaseNames) {
   EXPECT_STREQ(mm::outcomeName(mm::Outcome::Ok), "ok");
   EXPECT_STREQ(mm::outcomeName(mm::Outcome::Failed), "failed");

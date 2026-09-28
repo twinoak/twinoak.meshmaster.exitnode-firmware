@@ -78,7 +78,7 @@ bool AgentMesh::takeRssi(const mesh::Packet* pkt, float& rssi) {
   return false;
 }
 
-void AgentMesh::logFrame(const char* direction, const mesh::Packet* pkt, bool withHex) {
+void AgentMesh::logFrame(const char* direction, const mesh::Packet* pkt, bool withHex, bool redactBody) {
   if (!frameLog_) return;
   const uint8_t type = pkt->getPayloadType();
   const char* route = pkt->isRouteFlood() ? "flood" : (pkt->isRouteDirect() ? "direct" : "other");
@@ -90,11 +90,16 @@ void AgentMesh::logFrame(const char* direction, const mesh::Packet* pkt, bool wi
   }
   // The frame as hex, both directions, for the raw-exchange log - the board's version of the
   // .NET agent's --log-frames. What is never printed: an advert's bytes (a stranger's name is
-  // in them, and `mesh` is where a person reads one) and the mesh's own chat. A login frame
-  // carries no password on this firmware and would be ciphertext if it did.
+  // in them, and `mesh` is where a person reads one) and the mesh's own chat. A login that
+  // carries a password is printed with its encrypted body as one `*` per byte
+  // (agent/Credentials.h): the ACL login's body is our key and a timestamp and is printed whole.
   char payload[2 * MAX_PACKET_PAYLOAD + 1];
   char path[2 * MAX_PATH_SIZE + 1];
-  hexLine(pkt->payload, pkt->payload_len, payload, sizeof payload);
+  if (redactBody) {
+    redactLoginPayloadHex(pkt->payload, pkt->payload_len, payload, sizeof payload);
+  } else {
+    hexLine(pkt->payload, pkt->payload_len, payload, sizeof payload);
+  }
   hexLine(pkt->path, pkt->getPathByteLen(), path, sizeof path);
   LOG_I("frame %s %s %s hdr=%02x path=%s payload=%s", direction, payloadTypeName(type), route,
         static_cast<unsigned>(pkt->header), path[0] != '\0' ? path : "-", payload);
@@ -120,15 +125,20 @@ mesh::DispatcherAction AgentMesh::onRecvPacket(mesh::Packet* pkt) {
   hasRssi_ = takeRssi(pkt, rssiDbm_);
 
   // An advert's bytes carry a name somebody else chose; the chat's bytes are other people's
-  // conversation. Neither is printed as hex, whatever `log.frames` says.
-  const bool jobFrame = type == PAYLOAD_TYPE_RESPONSE || type == PAYLOAD_TYPE_PATH || type == PAYLOAD_TYPE_TRACE;
+  // conversation. Neither is printed as hex, whatever `log.frames` says. A TXT_MSG is a job's
+  // frame only while a CLI reply is awaited - it is then the repeater's answer to us - and a
+  // stranger's message at every other moment.
+  const bool textAwaited = awaiting_ == Awaiting::Text;
+  const bool jobFrame = type == PAYLOAD_TYPE_RESPONSE || type == PAYLOAD_TYPE_PATH || type == PAYLOAD_TYPE_TRACE ||
+                        (type == PAYLOAD_TYPE_TXT_MSG && textAwaited);
   logFrame("rx", pkt, jobFrame && waiting_);
 
-  // Everything but an advert - and, while a job is waiting for its reply, a RESPONSE, a PATH or
-  // a TRACE - is counted and released here, before MeshCore's own dispatch: no payload is
-  // decrypted, no shared secret is calculated, and there is no branch left that could compose a
-  // reply. What does go on to Mesh::onRecvPacket gets its signature check, its replay check and
-  // its de-duplication for free.
+  // Everything but an advert - and, while a job is waiting for its reply, a RESPONSE, a PATH, a
+  // TRACE or the awaited TXT_MSG - is counted and released here, before MeshCore's own dispatch:
+  // no payload is decrypted, no shared secret is calculated, and there is no branch left that
+  // could compose a reply. What does go on to Mesh::onRecvPacket gets its signature check, its
+  // replay check and its de-duplication for free, and is decrypted only when its source hash is
+  // the peer of the job (searchPeersByHash).
   if (type == PAYLOAD_TYPE_ADVERT) return mesh::Mesh::onRecvPacket(pkt);
   if (jobFrame && waiting_ && peerSet_) return mesh::Mesh::onRecvPacket(pkt);
   return ACTION_RELEASE;
@@ -208,12 +218,24 @@ bool AgentMesh::beginJob(const char* publicKeyHex, const uint8_t* pathHashes, ui
   return true;
 }
 
+void AgentMesh::setDirectPath() {
+  if (!peerSet_) return;
+  outPathLen_ = 0;
+  haveOutPath_ = true;
+}
+
+void AgentMesh::forgetPath() {
+  haveOutPath_ = false;
+  outPathLen_ = 0;
+}
+
 void AgentMesh::endJob() {
   peerSet_ = false;
   haveOutPath_ = false;
   outPathLen_ = 0;
   waiting_ = false;
   waitingFor_ = 0;
+  awaiting_ = Awaiting::None;
   reply_ = MeshReply();
   // The ECDH secret is the one thing here that is worth wiping rather than dropping.
   volatile uint8_t* p = peerSecret_;
@@ -240,9 +262,9 @@ const uint8_t* AgentMesh::sharedSecret() {
   return peerSecret_;
 }
 
-SendResult AgentMesh::dispatch(mesh::Packet* pkt) {
+SendResult AgentMesh::dispatch(mesh::Packet* pkt, bool redactBody) {
   if (pkt == nullptr) return SendResult::Failed;
-  logFrame("tx", pkt, true);
+  logFrame("tx", pkt, true, redactBody);
   if (haveOutPath_) {
     sendDirect(pkt, outPath_, outPathLen_);
     return SendResult::Direct;
@@ -251,16 +273,30 @@ SendResult AgentMesh::dispatch(mesh::Packet* pkt) {
   return SendResult::Flood;
 }
 
-SendResult AgentMesh::sendAclLogin(uint32_t& tag) {
+SendResult AgentMesh::sendLogin(const char* password, uint32_t& tag) {
   if (!peerSet_) return SendResult::Failed;
-  uint8_t temp[4];
+  // The tag, then the password's bytes - at most fifteen, as BaseChatMesh::sendLogin sends
+  // them (src/helpers/BaseChatMesh.cpp:572-591 at d9296435). With no password it is the four
+  // bytes of the tag and nothing after them, which is the ACL login: `MyMesh::handleLoginReq`
+  // reads data[0] of what follows the timestamp, the datagram's plaintext is zero-padded to a
+  // cipher block, so the empty string arrives as the empty string and the repeater answers from
+  // its ACL alone (simple_repeater/MyMesh.cpp:90-99). With one, the repeater compares it with
+  // its admin and guest passwords and the entry of this key takes the password's level.
+  uint8_t temp[4 + kMaxPasswordLen];
   tag = getRTCClock()->getCurrentTimeUnique();
   std::memcpy(temp, &tag, 4);
-  // A blank password, which is the ACL login: the four bytes of the tag and nothing after them.
-  // `MyMesh::handleLoginReq` reads data[0] of what follows the timestamp, and the datagram's
-  // plaintext is zero-padded to a cipher block, so the empty string arrives as the empty string
-  // and the repeater answers from its ACL alone (simple_repeater/MyMesh.cpp:90-99 at d9296435).
-  return dispatch(createAnonDatagram(PAYLOAD_TYPE_ANON_REQ, self_id, peer_, sharedSecret(), temp, sizeof temp));
+  size_t len = 0;
+  if (password != nullptr) {
+    while (password[len] != '\0' && len < kMaxPasswordLen) {
+      temp[4 + len] = static_cast<uint8_t>(password[len]);
+      len++;
+    }
+  }
+  mesh::Packet* pkt = createAnonDatagram(PAYLOAD_TYPE_ANON_REQ, self_id, peer_, sharedSecret(), temp, 4 + len);
+  // The one plaintext copy of the password this file ever holds, gone before the packet is on
+  // the air; the packet's own body is ciphertext.
+  wipeBytes(temp, sizeof temp);
+  return dispatch(pkt, len > 0);
 }
 
 SendResult AgentMesh::sendRequest(uint8_t reqType, const uint8_t* data, uint8_t len, uint32_t& tag) {
@@ -271,6 +307,43 @@ SendResult AgentMesh::sendRequest(uint8_t reqType, const uint8_t* data, uint8_t 
   temp[4] = reqType;
   if (len > 0 && data != nullptr) std::memcpy(&temp[5], data, len);
   return dispatch(createDatagram(PAYLOAD_TYPE_REQ, peer_, sharedSecret(), temp, 5u + len));
+}
+
+SendResult AgentMesh::sendCli(const char* text, uint32_t timestamp) {
+  if (!peerSet_ || text == nullptr) return SendResult::Failed;
+  const size_t len = std::strlen(text);
+  // Mesh::createDatagram refuses a plaintext past MAX_PACKET_PAYLOAD - MAC - (block - 1).
+  if (len == 0 || len + 5u > MAX_PACKET_PAYLOAD - 16u - 15u) return SendResult::Failed;
+  // The shape BaseChatMesh::sendMessage gives a CLI line (src/helpers/BaseChatMesh.cpp:442-470
+  // at d9296435): the sender timestamp, a flags byte of attempt 0 and TXT_TYPE_CLI_DATA in the
+  // upper bits, then the text. The repeater runs it when the timestamp is above the last it saw
+  // from this key, answers nothing to an equal one, and drops a lower one as a replay.
+  uint8_t temp[MAX_PACKET_PAYLOAD];
+  std::memcpy(temp, &timestamp, 4);
+  temp[4] = static_cast<uint8_t>(kTxtTypeCliData << 2);
+  std::memcpy(&temp[5], text, len);
+  return dispatch(createDatagram(PAYLOAD_TYPE_TXT_MSG, peer_, sharedSecret(), temp, 5u + len));
+}
+
+SendResult AgentMesh::sendDiscovery(uint32_t& tag) {
+  if (!peerSet_) return SendResult::Failed;
+  // 'Path Discovery' is just a special case of flood + Telemetry req (the companion's own
+  // comment): the telemetry request with the inverse permission mask asking for base telemetry
+  // alone, three reserved bytes and four random ones, and the contact's path forced to unknown
+  // so that it floods whatever is known. The reply, when a repeater answers one at all, comes
+  // back as a returned path and onPeerPathRecv learns it.
+  uint8_t temp[4 + 9];
+  tag = getRTCClock()->getCurrentTimeUnique();
+  std::memcpy(temp, &tag, 4);
+  temp[4] = kReqTypeGetTelemetry;
+  temp[5] = static_cast<uint8_t>(~0x01u);  // ~TELEM_PERM_BASE
+  temp[6] = temp[7] = temp[8] = 0;
+  getRNG()->random(&temp[9], 4);
+  mesh::Packet* pkt = createDatagram(PAYLOAD_TYPE_REQ, peer_, sharedSecret(), temp, sizeof temp);
+  if (pkt == nullptr) return SendResult::Failed;
+  logFrame("tx", pkt, true);
+  sendFlood(pkt);
+  return SendResult::Flood;
 }
 
 SendResult AgentMesh::sendTrace(const uint8_t* roundTripHashes, uint8_t hashBytes, uint8_t hashSize, uint32_t& tag) {
@@ -294,9 +367,10 @@ SendResult AgentMesh::sendTrace(const uint8_t* roundTripHashes, uint8_t hashByte
   return SendResult::Direct;
 }
 
-bool AgentMesh::awaitReply(uint32_t tag, uint32_t timeoutMs, void (*pump)()) {
+bool AgentMesh::await(Awaiting what, uint32_t tag, uint32_t timeoutMs, void (*pump)()) {
   reply_ = MeshReply();
   waitingFor_ = tag;
+  awaiting_ = what;
   waiting_ = true;
   const uint32_t deadline = millis() + timeoutMs;
   while (!elapsed(millis(), deadline)) {
@@ -304,13 +378,21 @@ bool AgentMesh::awaitReply(uint32_t tag, uint32_t timeoutMs, void (*pump)()) {
     if (pump != nullptr) pump();
     if (reply_.kind != MeshReply::Kind::None) {
       waiting_ = false;
+      awaiting_ = Awaiting::None;
       return true;
     }
     delay(1);
   }
   waiting_ = false;
+  awaiting_ = Awaiting::None;
   return false;
 }
+
+bool AgentMesh::awaitReply(uint32_t tag, uint32_t timeoutMs, void (*pump)()) {
+  return await(Awaiting::Response, tag, timeoutMs, pump);
+}
+
+bool AgentMesh::awaitText(uint32_t timeoutMs, void (*pump)()) { return await(Awaiting::Text, 0, timeoutMs, pump); }
 
 int AgentMesh::searchPeersByHash(const uint8_t* hash) {
   // One peer, ever: the repeater of the job in flight. Nobody else's packet is decrypted.
@@ -320,8 +402,28 @@ int AgentMesh::searchPeersByHash(const uint8_t* hash) {
 
 void AgentMesh::getPeerSharedSecret(uint8_t* dest_secret, int) { std::memcpy(dest_secret, sharedSecret(), PUB_KEY_SIZE); }
 
+void AgentMesh::takeText(mesh::Packet* pkt, const uint8_t* data, size_t len) {
+  // A CLI reply carries the repeater's own timestamp and no tag: the first text of CLI data from
+  // the peer while one is awaited is the answer, which is also how the .NET agent reads it.
+  if (awaiting_ != Awaiting::Text) return;
+  char text[kMaxCliReplyLen + 1];
+  if (!parseCliReply(data, len, text, sizeof text)) {
+    LOG_D("mesh: a text of another type arrived from the peer and was dropped");
+    return;
+  }
+  reply_ = MeshReply();
+  reply_.kind = MeshReply::Kind::Text;
+  std::memcpy(reply_.text, text, sizeof reply_.text);
+  reply_.snr = pkt->getSNR();
+}
+
 void AgentMesh::takeResponse(mesh::Packet* pkt, const uint8_t* data, size_t len, bool viaPath) {
   if (len < 4) return;
+  if (awaiting_ == Awaiting::Text) {
+    // A RESPONSE while a CLI reply is awaited is an old one that took another route home.
+    LOG_D("mesh: a response arrived while a text reply was awaited and was dropped");
+    return;
+  }
   uint32_t tag = 0;
   std::memcpy(&tag, data, 4);
   if (waitingFor_ != 0 && tag != waitingFor_) {
@@ -343,8 +445,11 @@ void AgentMesh::takeResponse(mesh::Packet* pkt, const uint8_t* data, size_t len,
 
 void AgentMesh::onPeerDataRecv(mesh::Packet* pkt, uint8_t type, int, const uint8_t*, uint8_t* data, size_t len) {
   // A REQ never reaches this: onRecvPacket released it, so nothing here can compose a reply.
-  if (type != PAYLOAD_TYPE_RESPONSE) return;
-  takeResponse(pkt, data, len, false);
+  if (type == PAYLOAD_TYPE_RESPONSE) {
+    takeResponse(pkt, data, len, false);
+  } else if (type == PAYLOAD_TYPE_TXT_MSG) {
+    takeText(pkt, data, len);
+  }
 }
 
 bool AgentMesh::onPeerPathRecv(mesh::Packet* pkt, int, const uint8_t*, uint8_t* path, uint8_t path_len,
@@ -368,6 +473,7 @@ bool AgentMesh::onPeerPathRecv(mesh::Packet* pkt, int, const uint8_t*, uint8_t* 
 
 void AgentMesh::onTraceRecv(mesh::Packet* pkt, uint32_t tag, uint32_t, uint8_t flags, const uint8_t* path_snrs,
                             const uint8_t* path_hashes, uint8_t path_len) {
+  if (awaiting_ != Awaiting::Response) return;
   if (waitingFor_ != 0 && tag != waitingFor_) return;
   const uint8_t hops = static_cast<uint8_t>(path_len >> (flags & 0x03));
   reply_ = MeshReply();

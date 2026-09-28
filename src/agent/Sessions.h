@@ -61,6 +61,10 @@ class SessionStore {
 
   size_t live(uint32_t nowMs) const;
 
+  // The slots, for the console's `sessions`: the session in slot `i` when it is live, else
+  // nullptr. Nothing in a session is a secret - a key, a class, a role byte and a time.
+  const RepeaterSession* slot(size_t i, uint32_t nowMs) const;
+
  private:
   int indexOf(const char* key) const;
 

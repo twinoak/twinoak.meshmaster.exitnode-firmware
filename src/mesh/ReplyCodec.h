@@ -195,4 +195,56 @@ bool parseTrace(uint8_t flags, const uint8_t* hashes, size_t hashBytes, const ui
 // Lowercase hex of `len` bytes into `out` (2*len + 1 bytes).
 void toHexLower(const uint8_t* bytes, size_t len, char* out);
 
+// ---------------------------------------------------------------------------------------------
+// The access-list reply (task p3.5-43)
+
+// REQ_TYPE_GET_ACCESS_LIST (0x05), answered to an **admin** session and to nobody else - a
+// session below admin gets no reply at all (`MyMesh::handleRequest` at d9296435,
+// examples/simple_repeater/MyMesh.cpp:262-275, guarded by `sender->isAdmin()` and returning 0).
+// After the four-byte tag: {pub_key[6], permissions} per entry, entries with permissions 0
+// skipped by the firmware, then the cipher block's zero padding.
+constexpr uint8_t kReqTypeGetAccessList = 0x05;
+constexpr int kAccessListPrefixBytes = 6;
+constexpr int kAccessListEntrySize = kAccessListPrefixBytes + 1;
+
+// What one reply can **carry**: the firmware's own loop would write 25 (4 + 25 x 7 fits its
+// reply buffer), but a reply is one encrypted RESPONSE datagram and Mesh::createDatagram
+// refuses one whose plaintext passes MAX_PACKET_PAYLOAD - CIPHER_MAC_SIZE - (CIPHER_BLOCK_SIZE
+// - 1) = 167 bytes, so 4 + 23 x 7 = 165 fits and 24 entries (172) are never sent at all: an ACL
+// of 24 or more is silence, not a short list. A list of exactly 23 is a list at the ceiling
+// and no evidence either way (EXIT-NODES §4.3).
+constexpr int kAccessListMaxEntries = (167 - 4) / kAccessListEntrySize;  // 23
+
+struct AccessListEntry {
+  char prefix[2 * kAccessListPrefixBytes + 1] = {0};  // twelve lowercase hex characters
+  uint8_t permissions = 0;
+
+  uint8_t role() const { return permissions & kPermRoleMask; }
+};
+
+// `data` is the reply payload after the four-byte tag. Entries are read until one whose
+// permissions byte is 0 - the firmware never sends one, so that is where the padding starts -
+// and everything after it must be zero: a non-zero tail means these are not the bytes this
+// firmware thinks they are, and the function refuses rather than guesses (false, count 0). An
+// empty body is an empty ACL, which is a real answer (true, count 0).
+bool parseAccessList(const uint8_t* data, size_t len, AccessListEntry* out, int max, int& count);
+
+// ---------------------------------------------------------------------------------------------
+// A CLI reply (task p3-34, p4-54)
+
+// A repeater answers a CLI command with a TXT_MSG datagram of its own: a timestamp (4), a flags
+// byte whose upper six bits are the text type - TXT_TYPE_CLI_DATA (1) since v1.17, TXT_TYPE_PLAIN
+// (0) from older firmware - and the reply text, zero-padded to the cipher block
+// (`MyMesh::onPeerDataRecv`, examples/simple_repeater/MyMesh.cpp:739-758 at d9296435). The
+// reply's own timestamp is the repeater's clock and is matched on nothing.
+constexpr uint8_t kTxtTypePlain = 0;
+constexpr uint8_t kTxtTypeCliData = 1;
+// `CommonCLI::handleCommand` answers in a 160-byte buffer.
+constexpr size_t kMaxCliReplyLen = 160;
+
+// `data` is the datagram's plaintext, timestamp first. False when it is not a CLI reply this
+// firmware reads (too short, or a text type that is neither of the two). The text is copied up
+// to its first NUL or kMaxCliReplyLen bytes.
+bool parseCliReply(const uint8_t* data, size_t len, char* text, size_t cap);
+
 }  // namespace mm

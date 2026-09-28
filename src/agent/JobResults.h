@@ -54,4 +54,20 @@ size_t writeTraceResult(const TraceHop* hops, int count, char* out, size_t cap);
 // guest" from "the entry is gone", which carries no data at all.
 size_t writeLoginBelowClassResult(const char* loggedInAs, const char* needed, char* out, size_t cap);
 
+//   DiscoverResult(PathInfo? Path, string? LoggedInAs); PathInfo(IReadOnlyList<string> Hops, string? Source,
+//                  DateTime? LearnedAt)
+//   AclSetResult(string PublicKey, int Level, bool Confirmed, string? Reply)
+//
+// (task 04). A discover with no path is `{}`: both fields null and left out. `source` is one of
+// PathSources - "login" for a path a login's reply came back along, "discovery" for the
+// path-discovery request - and `loggedInAs` is the tier the repeater granted, or nullptr when no
+// login was answered.
+extern const char kPathSourceLogin[];
+extern const char kPathSourceDiscovery[];
+
+size_t writeDiscoverResult(bool hasPath, const char* const* hops, int hopCount, const char* source, uint32_t learnedAt,
+                           const char* loggedInAs, char* out, size_t cap);
+
+size_t writeAclSetResult(const char* publicKey, int level, bool confirmed, const char* reply, char* out, size_t cap);
+
 }  // namespace mm
