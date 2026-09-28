@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "ConfigRead.h"
 #include "ConfigReply.h"
 #include "mesh/ReplyCodec.h"
 
@@ -26,6 +27,11 @@ namespace mm {
 
 // The login, when there is no session for this repeater yet.
 constexpr int kTransactionsForLogin = 1;
+
+// The restore (task p4.1-60): `setperm <own key> <granted level>` as the last command of every
+// admin session on a repeater where this exit node holds a grant - one more on every admin
+// type through an `acl` pair, and on a blank login the repeater answered above the grant.
+constexpr int kTransactionsForAclRestore = 1;
 
 // What one run of `type` at `credentialClass` costs, without the login. `items` is what the job
 // is as long as - the number of neighbours for `neighbours` - and -1 is what the system assumes

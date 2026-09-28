@@ -249,9 +249,11 @@ TEST(Lines, TheArgumentlessVerbsParseWithATerminalsLineEnding) {
   EXPECT_EQ(Verb::Mesh, parseLine("mesh").command.verb);
   EXPECT_EQ(Verb::Server, parseLine("server\r\n").command.verb);
   EXPECT_EQ(Verb::Jobs, parseLine("  jobs ").command.verb);
+  EXPECT_EQ(Verb::Sessions, parseLine("sessions\r\n").command.verb);
 
   // Each of them takes no argument, and says so by name rather than "unknown command".
-  const char* const withAnArgument[] = {"help x", "status x", "mesh x", "server x", "jobs x", "wifi x", "reboot x"};
+  const char* const withAnArgument[] = {"help x", "status x", "mesh x",   "server x",
+                                        "jobs x", "sessions x", "wifi x", "reboot x"};
   for (const char* line : withAnArgument) {
     const ParseResult r = parseLine(line);
     EXPECT_FALSE(r.ok) << line;

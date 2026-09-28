@@ -78,6 +78,7 @@ void Console::help() {
   io_->println("  mesh                the adverts heard, and the last five with their names");
   io_->println("  server              the heartbeat and the observation batches, and the counters");
   io_->println("  jobs                the last ten jobs claimed: outcome, transactions, when");
+  io_->println("  sessions            the repeater logins held: class, level, age (never a secret)");
   io_->println("  wifi                scan for networks and show the link");
   io_->println("  reboot");
   io_->printf("  erase %s       forget every setting; the identity stays\r\n", kEraseWord);
@@ -144,6 +145,9 @@ void Console::runLine() {
       return;
     case Verb::Jobs:
       if (host_.jobs) host_.jobs(*io_);
+      return;
+    case Verb::Sessions:
+      if (host_.sessions) host_.sessions(*io_);
       return;
     case Verb::Wifi:
       if (host_.wifi) host_.wifi(*io_);

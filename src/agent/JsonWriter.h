@@ -44,26 +44,55 @@ class JsonWriter {
     out_[len_] = '\0';
   }
 
-  // A JSON string: the two characters JSON reserves and the C0 controls are escaped, and
-  // nothing else is - the text has already been bounded to well-formed UTF-8, which is what a
-  // JSON string is made of. (The .NET encoder escapes non-ASCII as \uXXXX as well; that is a
-  // difference in bytes and not in value, and it cannot arise in an envelope whose every field
-  // is ASCII and is held against a fixture.)
+  // A JSON string, escaped exactly as System.Text.Json's default encoder escapes one
+  // (JavaScriptEncoder.Default): `"` and `\` with a backslash; \b \f \n \r \t in their short
+  // forms; every other C0 control, the HTML-sensitive `<` `>` `&` `'` `+` and the backtick as
+  // \u00XX with uppercase hex; and every non-ASCII code point as \uXXXX, a surrogate pair above
+  // the BMP. The text has already been bounded to well-formed UTF-8; a byte that is not (a cut
+  // sequence) is written as U+FFFD, which is what the .NET side would have made of it too. Same
+  // value either way - the point of matching the bytes is that a fixture can be compared byte
+  // for byte, and tests/fixtures/contracts/ConfigReadResult.json carries a `>`.
   void string(const char* text) {
-    put('"');
-    if (text != nullptr) {
-      for (const unsigned char* p = reinterpret_cast<const unsigned char*>(text); *p != '\0'; p++) {
-        escape(*p);
-      }
+    if (text == nullptr) {
+      string(text, 0);
+      return;
     }
-    put('"');
+    string(text, std::strlen(text));
   }
 
   // The same, for text that is not NUL-terminated or is longer than it should be.
   void string(const char* text, size_t len) {
     put('"');
-    if (text != nullptr) {
-      for (size_t i = 0; i < len && text[i] != '\0'; i++) escape(static_cast<unsigned char>(text[i]));
+    size_t i = 0;
+    while (text != nullptr && i < len && text[i] != '\0') {
+      const unsigned char c = static_cast<unsigned char>(text[i]);
+      if (c < 0x80) {
+        escape(c);
+        i++;
+        continue;
+      }
+      // A UTF-8 sequence: its length from the lead byte, and the code point out of it.
+      size_t need = c >= 0xF0 ? 4 : (c >= 0xE0 ? 3 : (c >= 0xC0 ? 2 : 0));
+      uint32_t cp = need == 4 ? (c & 0x07u) : (need == 3 ? (c & 0x0Fu) : (c & 0x1Fu));
+      bool ok = need > 0 && i + need <= len;
+      for (size_t k = 1; ok && k < need; k++) {
+        const unsigned char cc = static_cast<unsigned char>(text[i + k]);
+        if ((cc & 0xC0) != 0x80) ok = false;
+        cp = (cp << 6) | (cc & 0x3Fu);
+      }
+      if (!ok) {
+        unicode(0xFFFD);
+        i++;
+        continue;
+      }
+      if (cp >= 0x10000) {
+        cp -= 0x10000;
+        unicode(0xD800 + (cp >> 10));
+        unicode(0xDC00 + (cp & 0x3FF));
+      } else {
+        unicode(cp);
+      }
+      i += need;
     }
     put('"');
   }
@@ -131,16 +160,28 @@ class JsonWriter {
 
  private:
   void escape(unsigned char c) {
-    if (c == '"' || c == '\\') {
-      put('\\');
-      put(static_cast<char>(c));
-    } else if (c < 0x20) {
-      char esc[8];
-      std::snprintf(esc, sizeof esc, "\\u%04x", c);
-      raw(esc);
-    } else {
-      put(static_cast<char>(c));
+    switch (c) {
+      case '"': raw("\\\""); return;
+      case '\\': raw("\\\\"); return;
+      case '\b': raw("\\b"); return;
+      case '\f': raw("\\f"); return;
+      case '\n': raw("\\n"); return;
+      case '\r': raw("\\r"); return;
+      case '\t': raw("\\t"); return;
+      case '<': case '>': case '&': case '\'': case '+': case '`': unicode(c); return;
+      default: break;
     }
+    if (c < 0x20 || c == 0x7F) {
+      unicode(c);
+      return;
+    }
+    put(static_cast<char>(c));
+  }
+
+  void unicode(uint32_t unit) {
+    char esc[8];
+    std::snprintf(esc, sizeof esc, "\\u%04X", static_cast<unsigned>(unit & 0xFFFF));
+    raw(esc);
   }
 
   char* out_;

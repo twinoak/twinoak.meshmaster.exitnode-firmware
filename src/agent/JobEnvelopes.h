@@ -21,6 +21,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "ConfigRead.h"
+#include "Credentials.h"
 #include "mesh/ReplyCodec.h"
 
 namespace mm {
@@ -30,9 +32,11 @@ namespace mm {
 enum class Outcome : uint8_t { Ok, Failed, Unreachable, Unauthorized, Unsupported, Timeout };
 const char* outcomeName(Outcome o);
 
-// The four types this firmware has a handler for, in the order EXIT-NODES §7 lists them. The
-// heartbeat sends exactly this list, and routing sends nothing else (task p3-53).
-constexpr int kJobTypeCount = 4;
+// The seven types this firmware has a handler for, in the order JobTypes.All lists them: the
+// four reads of task 03 and, since task 04, the three that carry a password - discover, acl.set
+// and config.read. The heartbeat sends exactly this list, and routing sends nothing else (task
+// p3-53).
+constexpr int kJobTypeCount = 7;
 extern const char* const kJobTypes[kJobTypeCount];
 bool isKnownJobType(const char* type);
 
@@ -62,10 +66,24 @@ struct ClaimedJob {
   int perHopMs = 4000;
   int loginMs = 8000;
 
-  // `acl` is the level the repeater's ACL grants this exit node's own key, and the only
-  // credential material a job of these four types ever carries.
+  // `acl` is the level the repeater's ACL grants this exit node's own key: the material of an
+  // acl-class job, and beside the admin password of an admin-class one the level the session's
+  // last command puts the entry back to (task p4.1-60).
   bool hasAclLevel = false;
   int aclLevel = 0;
+
+  // The passwords, when the claim carried one for the job's class (Credentials.h): a fixed
+  // buffer, wiped when the job ends.
+  JobCredential credential;
+
+  // The payload, for the two types whose payload says something: a config.read's `keys` (none
+  // means the default list) and an acl.set's `publicKey` and `level`.
+  bool hasConfigKeys = false;
+  int configKeyCount = 0;
+  char configKeys[kMaxConfigKeys][kMaxConfigKeyLen + 1] = {};
+  bool hasAclSet = false;
+  char aclSetKey[kPublicKeyHexLen + 1] = {0};
+  int aclSetLevel = 0;
 
   // What reachability knows for this (agent, repeater): the hops to set as the contact's
   // out-path before sending. Absent while nothing has been learned, and then the mesh floods.
@@ -79,12 +97,16 @@ struct ClaimedJob {
   long long groupWith[kMaxGroupWith] = {};
 };
 
-// Whether this firmware can run the job at all, and one sentence saying why not when it cannot.
-// Its whole repertoire in phase 1 is the four read types at class `none` or `acl`: a login that
-// carries a password is task 04's, and a job that asks for one is answered `unsupported` rather
-// than `failed`, because "this firmware does not have what the job asked for" is what that
-// outcome means - and because an outcome that moves nothing in reachability is the honest one
-// for a transaction that never happened (EXIT-NODES §3).
+// Whether this firmware can run the job at all, and one sentence saying why not when it cannot:
+// a type without a handler, a class the type cannot use (JobTypes.CredentialClasses on the
+// server: status and telemetry at guest, acl or admin; neighbours at acl or admin; trace at
+// none; discover, acl.set and config.read at admin), a repeater with no key - and, belt beside
+// the claim's braces (task p4.1-60), the **guest password on a pair that holds a grant**: a
+// guest login from this key would rewrite the ACL entry to guest, so a claim that carries both
+// is refused here whatever the server decided. Every refusal is `unsupported` rather than
+// `failed`: "this firmware does not have what the job asked for" is what that outcome means,
+// and it moves nothing in reachability, which is right for a transaction that never happened
+// (EXIT-NODES §3).
 bool canRun(const ClaimedJob& job, char* why, size_t whyCap);
 
 // Jobs of one claim that share a login (EXIT-NODES §8): `groupWith` names them, and the repeater
@@ -97,8 +119,13 @@ size_t writeClaimRequest(int max, char* out, size_t cap);
 // Reads the claim's answer. At most `max` jobs are kept - the server sends at most what was
 // asked for, and a reply that says otherwise is not a reason to overrun a buffer. `count` is how
 // many were read; `serverTime` is the claim's own clock. On refusal, `err` says why.
-bool parseClaimResponse(const char* json, size_t len, ClaimedJob* jobs, int max, int& count, uint32_t& serverTime,
-                        char* err, size_t errCap);
+//
+// `json` is **mutable and is parsed in place** (ArduinoJson's zero-copy mode): the document
+// points into the caller's buffer and keeps no copy of any string, so a password in the claim
+// exists in that buffer and in the job's credential and nowhere else - and the caller wipes the
+// buffer the moment this returns (agent/AgentClient.cpp). The buffer is unreadable afterwards.
+bool parseClaimResponse(char* json, size_t len, ClaimedJob* jobs, int max, int& count, uint32_t& serverTime, char* err,
+                        size_t errCap);
 
 // The bound API §3 puts on a result's free text.
 constexpr size_t kMaxJobLogChars = 4000;

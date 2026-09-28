@@ -68,6 +68,11 @@ void SessionStore::clear() {
   for (size_t i = 0; i < kMaxSessions; i++) used_[i] = false;
 }
 
+const RepeaterSession* SessionStore::slot(size_t i, uint32_t nowMs) const {
+  if (i >= kMaxSessions || !used_[i] || expired(nowMs, sessions_[i].loggedInAtMs)) return nullptr;
+  return &sessions_[i];
+}
+
 size_t SessionStore::live(uint32_t nowMs) const {
   size_t n = 0;
   for (size_t i = 0; i < kMaxSessions; i++) {

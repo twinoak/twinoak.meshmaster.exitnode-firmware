@@ -46,8 +46,10 @@ One file touches it, `src/mesh/AgentMesh.cpp`, and a bump re-reads these:
 | Ours | MeshCore's | What would break it |
 |---|---|---|
 | `AgentMesh : mesh::Mesh` | `src/Mesh.h` | a change to the dispatch callbacks' signatures |
-| the login | `Mesh::createAnonDatagram` + `PAYLOAD_TYPE_ANON_REQ`, read by `MyMesh::handleLoginReq` (`examples/simple_repeater/MyMesh.cpp:90-145`) | the layout of a login request or its reply |
-| a request | `Mesh::createDatagram(PAYLOAD_TYPE_REQ, …)`, read by `MyMesh::handleRequest` (same file, 211-378) | a `REQ_TYPE_*` code, or the shape of a reply |
+| the login | `Mesh::createAnonDatagram` + `PAYLOAD_TYPE_ANON_REQ`, read by `MyMesh::handleLoginReq` (`examples/simple_repeater/MyMesh.cpp:90-145`): a blank password is looked up in the ACL, a password rewrites the key's entry to that password's level | the layout of a login request or its reply; the 15-character password cap of `BaseChatMesh::sendLogin` (`src/helpers/BaseChatMesh.cpp:572-591`) |
+| a request | `Mesh::createDatagram(PAYLOAD_TYPE_REQ, …)`, read by `MyMesh::handleRequest` (same file, 211-378); `REQ_TYPE_GET_ACCESS_LIST` (262-275) answers admin alone with `{pub_key[6], permissions}` per entry | a `REQ_TYPE_*` code, or the shape of a reply |
+| a CLI line | `Mesh::createDatagram(PAYLOAD_TYPE_TXT_MSG, …)` with `TXT_TYPE_CLI_DATA`, read by `MyMesh::onPeerDataRecv` (same file, 702-758): admin only, the sender timestamp must be **above** the last one seen (equal is a retry that runs nothing), and the reply is a `TXT_MSG` of the repeater's own with its own timestamp | the text type's bits, the replay rule, the 160-byte reply buffer of `CommonCLI::handleCommand`; `setperm` (1240-1261), `get`/`ver`/`board` and `region` (`src/helpers/CommonCLI.cpp:265-321`, `1036-1082`) |
+| path discovery | the flooded base-telemetry request the companion's `CMD_SEND_PATH_DISCOVERY_REQ` makes (`examples/companion_radio/MyMesh.cpp:1602-1630`), answered as a returned path | the request's bytes, or a firmware that answers it (none has yet) |
 | a trace | `Mesh::createTrace` + `sendDirect`, answered in `Mesh::onRecvPacket`'s `PAYLOAD_TYPE_TRACE` arm | the flags byte's meaning (`1 << (flags & 3)`, which task p3.5-42 got wrong once) |
 | the replies | `onPeerDataRecv`, `onPeerPathRecv`, `onTraceRecv` | the arguments, or when they are called |
 | the parsers | `src/mesh/ReplyCodec.cpp`, against `RepeaterStats` (`examples/simple_repeater/MyMesh.h:44-60`) and the request handlers above | a field added in the middle of `RepeaterStats` rather than at its end |
@@ -55,8 +57,9 @@ One file touches it, `src/mesh/AgentMesh.cpp`, and a bump re-reads these:
 `BaseChatMesh` is deliberately **not** used: its contact table, its channels,
 its message ACKs and its reciprocal path returns are all paths that put a packet
 on the air, and this firmware sends one packet per transaction and nothing else.
-The four calls it would have given us are three lines each of the primitives
-above, which is what its own `sendLogin` and `sendRequest` are made of.
+The five calls it would have given us are three lines each of the primitives
+above, which is what its own `sendLogin`, `sendRequest` and `sendMessage` are
+made of.
 
 ## Tier one — the weekly pull request (automatic)
 

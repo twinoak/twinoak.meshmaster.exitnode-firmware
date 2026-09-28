@@ -29,6 +29,33 @@ constexpr size_t kBodyCap = 2048;                  // the config and heartbeat a
 // Not `const char* const[]`: HTTPClient::collectHeaders takes `const char*[]`.
 const char* kWantedHeaders[] = {"Retry-After", "X-RateLimit-Remaining"};
 
+// A Stream that writes into a fixed buffer and reads nothing: what HTTPClient::writeToStream()
+// is handed, so a reply lands in the caller's buffer and in no String.
+class BodySink : public Stream {
+ public:
+  BodySink(char* buf, size_t cap) : buf_(buf), cap_(cap) {}
+  size_t write(uint8_t c) override {
+    if (len_ + 1 < cap_) buf_[len_++] = static_cast<char>(c);
+    return 1;  // always "taken": what does not fit is dropped, and the parser reports the cut
+  }
+  size_t write(const uint8_t* data, size_t size) override {
+    const size_t room = len_ + 1 < cap_ ? cap_ - 1 - len_ : 0;
+    const size_t n = size < room ? size : room;
+    if (n > 0) std::memcpy(buf_ + len_, data, n);
+    len_ += n;
+    return size;
+  }
+  int available() override { return 0; }
+  int read() override { return -1; }
+  int peek() override { return -1; }
+  size_t length() const { return len_; }
+
+ private:
+  char* buf_;
+  size_t cap_;
+  size_t len_ = 0;
+};
+
 void wipe(char* buf, size_t len) {
   volatile char* p = buf;
   for (size_t i = 0; i < len; i++) p[i] = 0;
@@ -111,11 +138,15 @@ int AgentClient::request(Root root, const char* method, const char* path, const 
   const int code = post ? http.POST(reinterpret_cast<uint8_t*>(const_cast<char*>(requestBody)), requestLen)
                         : http.GET();
   if (code > 0) {
-    // getString() reads a Content-Length or a chunked body alike; the answer is a few hundred
-    // bytes and anything past bodyCap is cut, which the parser then reports.
-    const String reply = http.getString();
-    bodyLen = reply.length() < bodyCap - 1 ? reply.length() : bodyCap - 1;
-    std::memcpy(body, reply.c_str(), bodyLen);
+    // The body straight into the caller's buffer: writeToStream() reads a Content-Length or a
+    // chunked body alike, and the sink below takes what fits in bodyCap and drops the rest, which
+    // the parser then reports. No String is made of it - a claim carries a repeater's password,
+    // and a String would be one more heap copy of it that nothing wipes (agent/Credentials.h).
+    // The chunk buffer HTTPClient moves the bytes through on the way is the one transient this
+    // code cannot wipe, the same shape as the .NET agent's HttpClient.
+    BodySink sink(body, bodyCap);
+    http.writeToStream(&sink);
+    bodyLen = sink.length();
     body[bodyLen] = '\0';
     out.retryAfterS = parseRetryAfter(http.header("Retry-After"));
     const String remaining = http.header("X-RateLimit-Remaining");
@@ -319,7 +350,13 @@ bool AgentClient::claimJobs(ClaimedJob* jobs, int max, int& count) {
   }
   uint32_t serverTime = 0;
   char err[80];
-  if (!parseClaimResponse(body, bodyLen, jobs, max, count, serverTime, err, sizeof err)) {
+  // The claim carries a repeater's password: it is parsed in place, the job keeps the one copy
+  // it needs, and the reply's bytes are wiped here whether the parse took or not.
+  const bool parsed = parseClaimResponse(body, bodyLen, jobs, max, count, serverTime, err, sizeof err);
+  wipe(body, sizeof body);
+  if (!parsed) {
+    for (int i = 0; i < max; i++) jobs[i].credential.wipe();
+    count = 0;
     lastCall_.ok = false;
     std::snprintf(lastCall_.error, sizeof lastCall_.error, "http 200 but the claim did not parse: %s", err);
     LOG_E("server: claim: %s", lastCall_.error);

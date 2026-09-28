@@ -70,12 +70,12 @@ TEST(Claim, TheRequestIsTheOneFieldTheServerReads) {
 }
 
 TEST(Claim, AClaimOfTwoTakesTwoHoweverManyTheServerSent) {
-  const std::string reply = recordedClaim();
+  std::string reply = recordedClaim();
   mm::ClaimedJob jobs[mm::kClaimMax];
   int count = 0;
   uint32_t serverTime = 0;
   char err[96] = {0};
-  ASSERT_TRUE(mm::parseClaimResponse(reply.c_str(), reply.size(), jobs, mm::kClaimMax, count, serverTime, err,
+  ASSERT_TRUE(mm::parseClaimResponse(&reply[0], reply.size(), jobs, mm::kClaimMax, count, serverTime, err,
                                      sizeof err))
       << err;
   EXPECT_EQ(count, 2) << "the reply carried three; the claim asked for two";
@@ -85,12 +85,12 @@ TEST(Claim, AClaimOfTwoTakesTwoHoweverManyTheServerSent) {
 }
 
 TEST(Claim, TheFixtureJobReadsFieldForField) {
-  const std::string reply = recordedClaim();
+  std::string reply = recordedClaim();
   mm::ClaimedJob jobs[mm::kClaimMax];
   int count = 0;
   uint32_t serverTime = 0;
   char err[96] = {0};
-  ASSERT_TRUE(mm::parseClaimResponse(reply.c_str(), reply.size(), jobs, mm::kClaimMax, count, serverTime, err,
+  ASSERT_TRUE(mm::parseClaimResponse(&reply[0], reply.size(), jobs, mm::kClaimMax, count, serverTime, err,
                                      sizeof err))
       << err;
   ASSERT_GE(count, 1);
@@ -117,12 +117,12 @@ TEST(Claim, TheFixtureJobReadsFieldForField) {
 }
 
 TEST(Claim, TheAclLevelIsTheOnlyMaterialTheseTypesCarry) {
-  const std::string reply = recordedClaim();
+  std::string reply = recordedClaim();
   mm::ClaimedJob jobs[mm::kClaimMax];
   int count = 0;
   uint32_t serverTime = 0;
   char err[96] = {0};
-  ASSERT_TRUE(mm::parseClaimResponse(reply.c_str(), reply.size(), jobs, mm::kClaimMax, count, serverTime, err,
+  ASSERT_TRUE(mm::parseClaimResponse(&reply[0], reply.size(), jobs, mm::kClaimMax, count, serverTime, err,
                                      sizeof err))
       << err;
   ASSERT_EQ(count, 2);
@@ -134,7 +134,7 @@ TEST(Claim, TheAclLevelIsTheOnlyMaterialTheseTypesCarry) {
 // The pre-task-60 shape of an acl credential: a flag rather than a level. The level is what the
 // restore of a later task needs, so a flag is read as the read-only a grant starts at.
 TEST(Claim, TheOlderAclFlagIsReadAsTheLevelAGrantStartsAt) {
-  const std::string reply =
+  std::string reply =
       "{\"serverTime\":\"2026-09-18T10:00:03Z\",\"jobs\":[{\"id\":7,\"type\":\"status\","
       "\"repeater\":{\"id\":1,\"label\":\"x\",\"publicKey\":\"ab\"},\"credentialClass\":\"acl\","
       "\"leaseUntil\":\"2026-09-18T10:02:03Z\",\"timeouts\":{\"perHopMs\":4000,\"loginMs\":8000},"
@@ -143,7 +143,7 @@ TEST(Claim, TheOlderAclFlagIsReadAsTheLevelAGrantStartsAt) {
   int count = 0;
   uint32_t serverTime = 0;
   char err[96] = {0};
-  ASSERT_TRUE(mm::parseClaimResponse(reply.c_str(), reply.size(), jobs, mm::kClaimMax, count, serverTime, err,
+  ASSERT_TRUE(mm::parseClaimResponse(&reply[0], reply.size(), jobs, mm::kClaimMax, count, serverTime, err,
                                      sizeof err))
       << err;
   ASSERT_EQ(count, 1);
@@ -154,12 +154,12 @@ TEST(Claim, TheOlderAclFlagIsReadAsTheLevelAGrantStartsAt) {
 // `groupWith` is what makes a claimed pair one login: the two jobs of the recorded claim name
 // each other, and a job for another repeater is nobody's group.
 TEST(Claim, GroupWithNamesTheJobsThatShareALogin) {
-  const std::string reply = recordedClaim();
+  std::string reply = recordedClaim();
   mm::ClaimedJob jobs[mm::kClaimMax];
   int count = 0;
   uint32_t serverTime = 0;
   char err[96] = {0};
-  ASSERT_TRUE(mm::parseClaimResponse(reply.c_str(), reply.size(), jobs, mm::kClaimMax, count, serverTime, err,
+  ASSERT_TRUE(mm::parseClaimResponse(&reply[0], reply.size(), jobs, mm::kClaimMax, count, serverTime, err,
                                      sizeof err))
       << err;
   ASSERT_EQ(count, 2);
@@ -176,12 +176,12 @@ TEST(Claim, GroupWithNamesTheJobsThatShareALogin) {
 // The lease is a deadline, and the board reads it as one: a claim taken at 10:00:03 with a lease
 // to 10:02:03 has two minutes of work in it, and a lease already in the past has none.
 TEST(Claim, TheLeaseIsWhatBoundsAJobsWork) {
-  const std::string reply = recordedClaim();
+  std::string reply = recordedClaim();
   mm::ClaimedJob jobs[mm::kClaimMax];
   int count = 0;
   uint32_t serverTime = 0;
   char err[96] = {0};
-  ASSERT_TRUE(mm::parseClaimResponse(reply.c_str(), reply.size(), jobs, mm::kClaimMax, count, serverTime, err,
+  ASSERT_TRUE(mm::parseClaimResponse(&reply[0], reply.size(), jobs, mm::kClaimMax, count, serverTime, err,
                                      sizeof err))
       << err;
   ASSERT_EQ(count, 2);
@@ -194,12 +194,12 @@ TEST(Claim, TheLeaseIsWhatBoundsAJobsWork) {
 }
 
 TEST(Claim, AnEmptyClaimIsNotAFailure) {
-  const std::string reply = "{\"serverTime\":\"2026-09-18T10:00:03Z\",\"jobs\":[]}";
+  std::string reply = "{\"serverTime\":\"2026-09-18T10:00:03Z\",\"jobs\":[]}";
   mm::ClaimedJob jobs[mm::kClaimMax];
   int count = 1;
   uint32_t serverTime = 0;
   char err[96] = {0};
-  EXPECT_TRUE(mm::parseClaimResponse(reply.c_str(), reply.size(), jobs, mm::kClaimMax, count, serverTime, err,
+  EXPECT_TRUE(mm::parseClaimResponse(&reply[0], reply.size(), jobs, mm::kClaimMax, count, serverTime, err,
                                      sizeof err))
       << err;
   EXPECT_EQ(count, 0);
@@ -219,11 +219,12 @@ TEST(Claim, AReplyThatIsNotAClaimIsRefusedByName) {
       {"{\"serverTime\":\"2026-09-18T10:00:03Z\",\"jobs\":[{\"id\":1,\"type\":\"status\"}]}", "repeater"},
   };
   for (const Case& c : cases) {
+    std::string body = c.json;
     mm::ClaimedJob jobs[mm::kClaimMax];
     int count = 0;
     uint32_t serverTime = 0;
     char err[96] = {0};
-    EXPECT_FALSE(mm::parseClaimResponse(c.json, std::strlen(c.json), jobs, mm::kClaimMax, count, serverTime, err,
+    EXPECT_FALSE(mm::parseClaimResponse(&body[0], body.size(), jobs, mm::kClaimMax, count, serverTime, err,
                                         sizeof err))
         << c.json;
     EXPECT_NE(std::string(err).find(c.says), std::string::npos) << c.json << " said: " << err;
@@ -236,32 +237,49 @@ TEST(Claim, AReplyThatIsNotAClaimIsRefusedByName) {
 // outcome that moves nothing in the server's reachability, and a transaction that never happened
 // must teach the router nothing (EXIT-NODES §3).
 TEST(Claim, AJobThisFirmwareCannotRunIsRecognisedBeforeAnythingIsSent) {
-  const std::string reply = recordedClaim();
+  std::string reply = recordedClaim();
   mm::ClaimedJob jobs[mm::kClaimMax];
   int count = 0;
   uint32_t serverTime = 0;
   char err[96] = {0};
-  ASSERT_TRUE(mm::parseClaimResponse(reply.c_str(), reply.size(), jobs, mm::kClaimMax, count, serverTime, err,
+  ASSERT_TRUE(mm::parseClaimResponse(&reply[0], reply.size(), jobs, mm::kClaimMax, count, serverTime, err,
                                      sizeof err))
       << err;
   ASSERT_EQ(count, 2);
 
-  char why[160] = {0};
-  // The fixture's job is guest class, and a guest login carries a password - task 04's.
-  EXPECT_FALSE(mm::canRun(jobs[0], why, sizeof why));
-  EXPECT_NE(std::string(why).find("guest"), std::string::npos) << why;
-  EXPECT_NE(std::string(why).find("no password"), std::string::npos) << why;
+  char why[200] = {0};
+  // The fixture's job is guest class with a guest password (task 04): a repeater nobody has
+  // associated, read with its guest password, which the claim carries.
+  EXPECT_TRUE(mm::canRun(jobs[0], why, sizeof why)) << why;
+  EXPECT_TRUE(jobs[0].credential.hasGuestPassword);
 
   // The acl-class telemetry beside it is exactly what this firmware does.
   EXPECT_TRUE(mm::canRun(jobs[1], why, sizeof why));
   EXPECT_STREQ(why, "");
 
+  // The class table of JobTypes.CredentialClasses: a status at admin runs, a neighbours at guest
+  // does not, a trace at anything but none does not, the three password types at admin alone.
   mm::ClaimedJob admin = jobs[1];
   admin.credentialClass = mm::CredentialClass::Admin;
-  EXPECT_FALSE(mm::canRun(admin, why, sizeof why));
+  EXPECT_TRUE(mm::canRun(admin, why, sizeof why)) << why;
+  mm::ClaimedJob guestNeighbours = jobs[1];
+  std::snprintf(guestNeighbours.type, sizeof guestNeighbours.type, "neighbours");
+  guestNeighbours.credentialClass = mm::CredentialClass::Guest;
+  EXPECT_FALSE(mm::canRun(guestNeighbours, why, sizeof why));
+  EXPECT_NE(std::string(why).find("class guest"), std::string::npos) << why;
+  mm::ClaimedJob aclTrace = jobs[1];
+  std::snprintf(aclTrace.type, sizeof aclTrace.type, "trace");
+  EXPECT_FALSE(mm::canRun(aclTrace, why, sizeof why));
+  for (const char* type : {"discover", "acl.set", "config.read"}) {
+    mm::ClaimedJob job = jobs[1];
+    std::snprintf(job.type, sizeof job.type, "%s", type);
+    EXPECT_FALSE(mm::canRun(job, why, sizeof why)) << type << " at acl";
+    job.credentialClass = mm::CredentialClass::Admin;
+    EXPECT_TRUE(mm::canRun(job, why, sizeof why)) << type << " at admin: " << why;
+  }
 
   mm::ClaimedJob unknown = jobs[1];
-  std::snprintf(unknown.type, sizeof unknown.type, "config.read");
+  std::snprintf(unknown.type, sizeof unknown.type, "cli");
   EXPECT_FALSE(mm::canRun(unknown, why, sizeof why));
   EXPECT_NE(std::string(why).find("no handler"), std::string::npos) << why;
 
@@ -271,19 +289,76 @@ TEST(Claim, AJobThisFirmwareCannotRunIsRecognisedBeforeAnythingIsSent) {
   EXPECT_NE(std::string(why).find("public key"), std::string::npos) << why;
 }
 
-TEST(Claim, TheFourTypesAreTheOnesThisFirmwareAdvertises) {
-  ASSERT_EQ(mm::kJobTypeCount, 4);
+TEST(Claim, TheSevenTypesAreTheOnesThisFirmwareAdvertises) {
+  ASSERT_EQ(mm::kJobTypeCount, 7);
   EXPECT_STREQ(mm::kJobTypes[0], "status");
   EXPECT_STREQ(mm::kJobTypes[1], "telemetry");
   EXPECT_STREQ(mm::kJobTypes[2], "neighbours");
-  EXPECT_STREQ(mm::kJobTypes[3], "trace");
+  EXPECT_STREQ(mm::kJobTypes[3], "config.read");
+  EXPECT_STREQ(mm::kJobTypes[4], "trace");
+  EXPECT_STREQ(mm::kJobTypes[5], "discover");
+  EXPECT_STREQ(mm::kJobTypes[6], "acl.set");
   for (int i = 0; i < mm::kJobTypeCount; i++) EXPECT_TRUE(mm::isKnownJobType(mm::kJobTypes[i]));
-  // The types a later task builds: routing does not send them here, and a claim that carried one
+  // The writes are task 05's: routing does not send them here, and a claim that carried one
   // anyway would be answered `unsupported` rather than run.
-  EXPECT_FALSE(mm::isKnownJobType("config.read"));
-  EXPECT_FALSE(mm::isKnownJobType("discover"));
+  EXPECT_FALSE(mm::isKnownJobType("config.apply"));
   EXPECT_FALSE(mm::isKnownJobType("cli"));
+  EXPECT_FALSE(mm::isKnownJobType("password.set"));
+  EXPECT_FALSE(mm::isKnownJobType("reboot"));
   EXPECT_FALSE(mm::isKnownJobType(nullptr));
+}
+
+// The two payloads that say something (task 04): a config.read's keys and an acl.set's entry.
+// The samples are the contract fixtures, ConfigReadPayload.json and AclSetPayload.json.
+TEST(Claim, TheConfigReadAndAclSetPayloadsAreRead) {
+  std::string reply = std::string("{\"serverTime\":\"2026-09-18T10:00:03Z\",\"jobs\":[") +
+                      "{\"id\":20,\"type\":\"config.read\",\"repeater\":{\"id\":17,\"label\":\"x\",\"publicKey\":\"a1b2\"},"
+                      "\"credentialClass\":\"admin\",\"leaseUntil\":\"2026-09-18T10:02:03Z\",\"timeouts\":{\"perHopMs\":4000,"
+                      "\"loginMs\":8000},\"payload\":" +
+                      fixture("ConfigReadPayload") + ",\"credential\":{\"adminPassword\":\"hunter2\",\"acl\":1}}," +
+                      "{\"id\":21,\"type\":\"acl.set\",\"repeater\":{\"id\":17,\"label\":\"x\",\"publicKey\":\"a1b2\"},"
+                      "\"credentialClass\":\"admin\",\"leaseUntil\":\"2026-09-18T10:02:03Z\",\"timeouts\":{\"perHopMs\":4000,"
+                      "\"loginMs\":8000},\"payload\":" +
+                      fixture("AclSetPayload") + ",\"credential\":{\"adminPassword\":\"hunter2\"}}]}";
+  mm::ClaimedJob jobs[mm::kClaimMax];
+  int count = 0;
+  uint32_t serverTime = 0;
+  char err[96] = {0};
+  ASSERT_TRUE(mm::parseClaimResponse(&reply[0], reply.size(), jobs, mm::kClaimMax, count, serverTime, err, sizeof err))
+      << err;
+  ASSERT_EQ(count, 2);
+
+  EXPECT_TRUE(jobs[0].hasConfigKeys);
+  ASSERT_EQ(jobs[0].configKeyCount, 3);
+  EXPECT_STREQ(jobs[0].configKeys[0], "name");
+  EXPECT_STREQ(jobs[0].configKeys[1], "advert.interval");
+  EXPECT_STREQ(jobs[0].configKeys[2], "flood.max");
+  EXPECT_TRUE(jobs[0].hasAclLevel);
+  EXPECT_EQ(jobs[0].aclLevel, 1) << "the granted level travels beside the admin password (task 60)";
+  EXPECT_FALSE(jobs[0].hasAclSet);
+
+  EXPECT_TRUE(jobs[1].hasAclSet);
+  EXPECT_STREQ(jobs[1].aclSetKey, "a1b2c3d4e5f60718");
+  EXPECT_EQ(jobs[1].aclSetLevel, 1);
+  EXPECT_FALSE(jobs[1].hasConfigKeys) << "an empty or absent list is the default list";
+
+  // An empty `keys` is the default list too, and a key list past the table is refused by name.
+  std::string empty =
+      "{\"serverTime\":\"2026-09-18T10:00:03Z\",\"jobs\":[{\"id\":22,\"type\":\"config.read\",\"repeater\":{\"id\":17,"
+      "\"label\":\"x\",\"publicKey\":\"a1b2\"},\"credentialClass\":\"admin\",\"leaseUntil\":\"2026-09-18T10:02:03Z\","
+      "\"payload\":{\"keys\":[]}}]}";
+  ASSERT_TRUE(mm::parseClaimResponse(&empty[0], empty.size(), jobs, mm::kClaimMax, count, serverTime, err, sizeof err))
+      << err;
+  EXPECT_FALSE(jobs[0].hasConfigKeys);
+  std::string tooMany =
+      "{\"serverTime\":\"2026-09-18T10:00:03Z\",\"jobs\":[{\"id\":23,\"type\":\"config.read\",\"repeater\":{\"id\":17,"
+      "\"label\":\"x\",\"publicKey\":\"a1b2\"},\"credentialClass\":\"admin\",\"leaseUntil\":\"2026-09-18T10:02:03Z\","
+      "\"payload\":{\"keys\":[";
+  for (int i = 0; i <= mm::kMaxConfigKeys; i++) tooMany += std::string(i > 0 ? "," : "") + "\"k" + std::to_string(i) + "\"";
+  tooMany += "]}}]}";
+  EXPECT_FALSE(
+      mm::parseClaimResponse(&tooMany[0], tooMany.size(), jobs, mm::kClaimMax, count, serverTime, err, sizeof err));
+  EXPECT_NE(std::string(err).find("more keys"), std::string::npos) << err;
 }
 
 }  // namespace

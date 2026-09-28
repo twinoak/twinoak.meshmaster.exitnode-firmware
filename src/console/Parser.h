@@ -14,6 +14,7 @@
 //   mesh                     the adverts heard: how many, and the last five with their names
 //   server                   the heartbeat and the observation batches: last, next, counters
 //   jobs                     the last ten jobs claimed: outcome, transactions, when
+//   sessions                 the repeater logins held: class, level, age (never a secret)
 //   wifi                     scan, and the link's state
 //   reboot
 //   erase confirm            forget every setting (the identity stays); "confirm" is the word
@@ -35,7 +36,8 @@ enum class Verb : unsigned char {
   Status,
   Mesh,    // the adverts heard
   Server,  // the heartbeat and the observation batches
-  Jobs,    // the last ten jobs claimed
+  Jobs,      // the last ten jobs claimed
+  Sessions,  // the repeater logins held
   Wifi,
   Reboot,
   Erase,   // only ever produced with the confirmation word present

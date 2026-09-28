@@ -204,6 +204,71 @@ TEST(Sessions, ADroppedSessionIsGoneAtOnce) {
   EXPECT_EQ(sessions.get("a1b2", mm::CredentialClass::Acl, 0), nullptr);
 }
 
+// The old shape the field printed (`session reused (Admin, read-only, 92 s old)`, task
+// p3.5-41): an admin-password login answered read-only, cached under the class that asked.
+// Seeded that way, the store refuses it to an admin job and to an acl job, and offers it to a
+// guest one - so a below-class session can never be handed to the class that asked for it.
+TEST(Sessions, AReadOnlySessionPutUnderAdminIsRefusedToAnAdminJobAndOfferedToAGuestOne) {
+  mm::SessionStore sessions;
+  const char* key = "b2b2";
+  const mm::RepeaterSession* stored = sessions.put(key, mm::CredentialClass::Admin, mm::kPermReadOnly, 0);
+  ASSERT_NE(stored, nullptr);
+  EXPECT_EQ(stored->credentialClass, mm::CredentialClass::Guest);
+  EXPECT_STREQ(stored->tier(), "read-only");
+  EXPECT_FALSE(stored->isAdmin());
+  EXPECT_EQ(sessions.get(key, mm::CredentialClass::Admin, 0), nullptr);
+  EXPECT_EQ(sessions.get(key, mm::CredentialClass::Acl, 0), nullptr);
+  EXPECT_EQ(sessions.get(key, mm::CredentialClass::Guest, 0), stored);
+  EXPECT_EQ(sessions.live(0), 1u);
+}
+
+// An acl.set on our own key is the session's level (task p4.1-60): after a grant the admin
+// session is a read-only one, reusable by the next acl-class job and invisible to an admin-class
+// one; after a revoke it is gone. The restore's put is the same call.
+TEST(Sessions, AnAclSetOfOurOwnKeyDropsTheAdminSessionToTheLevelSetAndARevokeDropsIt) {
+  mm::SessionStore sessions;
+  const char* key = "ef15";
+  sessions.put(key, mm::CredentialClass::Admin, mm::kPermAdmin, 0);
+  ASSERT_NE(sessions.get(key, mm::CredentialClass::Admin, 0), nullptr);
+
+  // The grant: `setperm <own key> 1` confirmed - or the restore at the end of an admin session.
+  const mm::RepeaterSession* after = sessions.put(key, mm::CredentialClass::Acl, mm::kPermReadOnly, 1000);
+  ASSERT_NE(after, nullptr);
+  EXPECT_EQ(after->credentialClass, mm::CredentialClass::Acl);
+  EXPECT_STREQ(after->tier(), "read-only");
+  EXPECT_EQ(sessions.get(key, mm::CredentialClass::Admin, 1000), nullptr) << "no admin session survives its own setperm";
+  EXPECT_EQ(sessions.get(key, mm::CredentialClass::Acl, 1000), after);
+  EXPECT_EQ(sessions.live(1000), 1u) << "one session per repeater: the put replaced, not added";
+
+  // The revoke: `setperm <own key> 0` confirmed.
+  sessions.invalidate(key);
+  EXPECT_EQ(sessions.get(key, mm::CredentialClass::Acl, 1000), nullptr);
+  EXPECT_EQ(sessions.get(key, mm::CredentialClass::Guest, 1000), nullptr);
+  EXPECT_EQ(sessions.live(1000), 0u);
+}
+
+TEST(Sessions, TheSlotsAreReadableForTheConsoleAndHoldNoSecret) {
+  mm::SessionStore sessions;
+  sessions.put("c3d4", mm::CredentialClass::Acl, mm::kPermReadOnly, 5000);
+  int live = 0;
+  for (size_t i = 0; i < mm::SessionStore::kMaxSessions; i++) {
+    const mm::RepeaterSession* s = sessions.slot(i, 6000);
+    if (s == nullptr) continue;
+    live++;
+    EXPECT_STREQ(s->key, "c3d4");
+    EXPECT_EQ(s->loggedInAtMs, 5000u);
+    EXPECT_EQ(s->credentialClass, mm::CredentialClass::Acl);
+    EXPECT_STREQ(s->tier(), "read-only");
+    // What a session is: a key, a class, a role byte and a time, and nothing else - the struct
+    // is no bigger than those four fields and their padding.
+    EXPECT_LE(sizeof(mm::RepeaterSession), sizeof(s->key) + sizeof(s->credentialClass) + sizeof(s->permissions) +
+                                               sizeof(s->loggedInAtMs) + 3 /* alignment */);
+  }
+  EXPECT_EQ(live, 1);
+  EXPECT_EQ(sessions.slot(0, 5000 + mm::SessionStore::kLifetimeMs), nullptr) << "an expired slot is not shown";
+  EXPECT_EQ(sessions.slot(mm::SessionStore::kMaxSessions, 6000), nullptr);
+}
+
 TEST(Sessions, FourRepeatersFitAndTheFifthTakesAnExpiredSlot) {
   mm::SessionStore sessions;
   const char* keys[] = {"one", "two", "three", "four"};

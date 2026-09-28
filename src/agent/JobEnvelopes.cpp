@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <new>
 
 #include "Iso8601.h"
 #include "JsonWriter.h"
@@ -27,7 +28,8 @@ void copyText(const char* from, char* to, size_t cap) {
 
 }  // namespace
 
-const char* const kJobTypes[kJobTypeCount] = {"status", "telemetry", "neighbours", "trace"};
+const char* const kJobTypes[kJobTypeCount] = {"status", "telemetry", "neighbours", "config.read",
+                                              "trace",  "discover",  "acl.set"};
 
 bool isKnownJobType(const char* type) {
   if (type == nullptr) return false;
@@ -49,6 +51,21 @@ const char* outcomeName(Outcome o) {
   }
 }
 
+namespace {
+
+// JobTypes.CredentialClasses on the server, as a predicate.
+bool typeAllowsClass(const char* type, CredentialClass c) {
+  if (std::strcmp(type, "trace") == 0) return c == CredentialClass::None;
+  if (std::strcmp(type, "status") == 0 || std::strcmp(type, "telemetry") == 0) {
+    return c == CredentialClass::Guest || c == CredentialClass::Acl || c == CredentialClass::Admin;
+  }
+  if (std::strcmp(type, "neighbours") == 0) return c == CredentialClass::Acl || c == CredentialClass::Admin;
+  // discover, acl.set, config.read: the admin password, and nothing less.
+  return c == CredentialClass::Admin;
+}
+
+}  // namespace
+
 bool canRun(const ClaimedJob& job, char* why, size_t whyCap) {
   if (!isKnownJobType(job.type)) {
     if (why != nullptr && whyCap > 0) {
@@ -56,11 +73,21 @@ bool canRun(const ClaimedJob& job, char* why, size_t whyCap) {
     }
     return false;
   }
-  if (job.credentialClass == CredentialClass::Guest || job.credentialClass == CredentialClass::Admin) {
+  if (!typeAllowsClass(job.type, job.credentialClass)) {
+    if (why != nullptr && whyCap > 0) {
+      std::snprintf(why, whyCap, "a %s job cannot run at class %s on this firmware", job.type,
+                    credentialClassName(job.credentialClass));
+    }
+    return false;
+  }
+  if (job.credentialClass == CredentialClass::Guest && job.hasAclLevel) {
+    // The claim refuses to hand the guest password to an exit node that holds a grant on the
+    // repeater (task p4.1-60), and so does this board when a claim carries both anyway: a guest
+    // login from this key would rewrite the granted entry to guest.
     if (why != nullptr && whyCap > 0) {
       std::snprintf(why, whyCap,
-                    "this firmware logs in as itself and carries no password: class %s is not one it can ask for",
-                    credentialClassName(job.credentialClass));
+                    "this exit node holds a grant on this repeater and will not log in with the guest password, "
+                    "which would demote the entry (task p4.1-60)");
     }
     return false;
   }
@@ -92,13 +119,15 @@ size_t writeClaimRequest(int max, char* out, size_t cap) {
   return w.overflowed() ? 0 : w.length();
 }
 
-bool parseClaimResponse(const char* json, size_t len, ClaimedJob* jobs, int max, int& count, uint32_t& serverTime,
-                        char* err, size_t errCap) {
+bool parseClaimResponse(char* json, size_t len, ClaimedJob* jobs, int max, int& count, uint32_t& serverTime, char* err,
+                        size_t errCap) {
   count = 0;
   serverTime = 0;
-  // Two jobs with a path, an idempotency key and a label is about a kilobyte; ArduinoJson sizes
-  // its pool from what it actually reads, and this is the one reply of the protocol that is read
-  // rather than written here.
+  // Two jobs with a path, an idempotency key and a label is about a kilobyte; this is the one
+  // reply of the protocol that is read rather than written here. The input is a `char*`, which
+  // puts ArduinoJson in zero-copy mode: every string the document holds points into `json`
+  // itself and the pool keeps no copy, so a password in the claim is in the caller's buffer and
+  // in the job's credential and nowhere else once this returns.
   JsonDocument doc;
   const DeserializationError e = deserializeJson(doc, json, len);
   if (e) {
@@ -125,7 +154,11 @@ bool parseClaimResponse(const char* json, size_t len, ClaimedJob* jobs, int max,
 
   for (JsonObjectConst j : list) {
     if (count >= max) break;  // the server was asked for `max`; anything past it is not taken
-    ClaimedJob job;
+    // Built in place, in the caller's slot: a job holds a password, and a local copy of it on
+    // this stack frame would be one more thing to wipe.
+    ClaimedJob& job = jobs[count];
+    job.credential.wipe();
+    new (&job) ClaimedJob();
 
     JsonVariantConst id = j["id"];
     if (!id.is<long long>()) {
@@ -178,6 +211,42 @@ bool parseClaimResponse(const char* json, size_t len, ClaimedJob* jobs, int max,
         job.hasAclLevel = true;
         job.aclLevel = kPermReadOnly;
       }
+      // The passwords: the material of the job's class, straight from the buffer into the
+      // job's fixed credential (Credentials.h), and the buffer is the caller's to wipe.
+      job.credential.setAdminPassword(credential["adminPassword"].as<const char*>());
+      job.credential.setGuestPassword(credential["guestPassword"].as<const char*>());
+    }
+
+    // The payload, for the two types whose payload says something. Anything else - `{}` for
+    // the reads, a record this firmware does not know - is read by nobody.
+    JsonObjectConst payload = j["payload"];
+    if (!payload.isNull() && std::strcmp(job.type, "config.read") == 0) {
+      JsonArrayConst keys = payload["keys"];
+      if (!keys.isNull()) {
+        for (JsonVariantConst k : keys) {
+          const char* text = k.as<const char*>();
+          if (text == nullptr || text[0] == '\0') continue;
+          if (job.configKeyCount >= kMaxConfigKeys) {
+            say(err, errCap, "a config.read asks for more keys than this firmware can read in one job");
+            return false;
+          }
+          copyText(text, job.configKeys[job.configKeyCount], sizeof job.configKeys[0]);
+          job.configKeyCount++;
+        }
+        job.hasConfigKeys = job.configKeyCount > 0;
+      }
+    }
+    if (!payload.isNull() && std::strcmp(job.type, "acl.set") == 0) {
+      const char* key = payload["publicKey"].as<const char*>();
+      JsonVariantConst level = payload["level"];
+      if (key != nullptr && key[0] != '\0' && level.is<int>()) {
+        job.hasAclSet = true;
+        copyText(key, job.aclSetKey, sizeof job.aclSetKey);
+        for (char* p = job.aclSetKey; *p != '\0'; p++) {
+          if (*p >= 'A' && *p <= 'F') *p = static_cast<char>(*p - 'A' + 'a');
+        }
+        job.aclSetLevel = level.as<int>();
+      }
     }
 
     JsonObjectConst path = j["path"];
@@ -204,7 +273,7 @@ bool parseClaimResponse(const char* json, size_t len, ClaimedJob* jobs, int max,
       }
     }
 
-    jobs[count++] = job;
+    count++;
   }
   return true;
 }

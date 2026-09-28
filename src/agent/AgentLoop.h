@@ -18,8 +18,9 @@
 //   5xx, no reply
 //         backoff, 30 s doubling to ten minutes, reset by the first answer
 //
-// `jobTypes` is the four types JobRunner has a handler for - status, telemetry, neighbours and
-// trace - and routing sends nothing else, because it requires the type advertised.
+// `jobTypes` is the seven types JobRunner has a handler for - status, telemetry, neighbours,
+// config.read, trace, discover and acl.set - and routing sends nothing else, because it requires
+// the type advertised.
 
 #pragma once
 
