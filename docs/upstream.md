@@ -39,6 +39,25 @@ headers through `src/mesh/MeshCoreHeaders.h`, which declares them system
 headers so that `-Werror` stays about our code: a bump that adds a header we
 use adds it there.
 
+### What of MeshCore this firmware actually uses
+
+One file touches it, `src/mesh/AgentMesh.cpp`, and a bump re-reads these:
+
+| Ours | MeshCore's | What would break it |
+|---|---|---|
+| `AgentMesh : mesh::Mesh` | `src/Mesh.h` | a change to the dispatch callbacks' signatures |
+| the login | `Mesh::createAnonDatagram` + `PAYLOAD_TYPE_ANON_REQ`, read by `MyMesh::handleLoginReq` (`examples/simple_repeater/MyMesh.cpp:90-145`) | the layout of a login request or its reply |
+| a request | `Mesh::createDatagram(PAYLOAD_TYPE_REQ, …)`, read by `MyMesh::handleRequest` (same file, 211-378) | a `REQ_TYPE_*` code, or the shape of a reply |
+| a trace | `Mesh::createTrace` + `sendDirect`, answered in `Mesh::onRecvPacket`'s `PAYLOAD_TYPE_TRACE` arm | the flags byte's meaning (`1 << (flags & 3)`, which task p3.5-42 got wrong once) |
+| the replies | `onPeerDataRecv`, `onPeerPathRecv`, `onTraceRecv` | the arguments, or when they are called |
+| the parsers | `src/mesh/ReplyCodec.cpp`, against `RepeaterStats` (`examples/simple_repeater/MyMesh.h:44-60`) and the request handlers above | a field added in the middle of `RepeaterStats` rather than at its end |
+
+`BaseChatMesh` is deliberately **not** used: its contact table, its channels,
+its message ACKs and its reciprocal path returns are all paths that put a packet
+on the air, and this firmware sends one packet per transaction and nothing else.
+The four calls it would have given us are three lines each of the primitives
+above, which is what its own `sendLogin` and `sendRequest` are made of.
+
 ## Tier one — the weekly pull request (automatic)
 
 [`.github/workflows/upstream.yml`](../.github/workflows/upstream.yml), Monday
@@ -115,8 +134,10 @@ it changes too, and the server is the reference:
    under `tests/fixtures/companion/` are where the new reading is established
    and tested, and `tests/fixtures/contracts/` is regenerated if an envelope
    moved.
-2. **Here second.** `tools/sync-fixtures.ps1 -Commit <that commit>` brings the
-   fixtures across, and the firmware is brought to them.
+2. **Here second.** `tools/sync-fixtures.ps1 -Commit <that commit>` brings both
+   fixture sets across — the envelopes of `tests/fixtures/contracts` and the
+   transcribed frames of `tests/fixtures/companion`, which is what
+   `src/mesh/ReplyCodec.cpp` is held to — and the firmware is brought to them.
 
 The order is not negotiable: there is one dialect, it is the .NET agent's, and a
 firmware that invents a second one is a bug however well it works. See

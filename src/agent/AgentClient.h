@@ -1,9 +1,11 @@
 // The HTTPS client to meshmaster.dk: the three calls this firmware makes, with the certificate
 // chain verified.
 //
-//   GET  /agent/v1/config         once per WiFi connection, for the budget and the clock
-//   POST /agent/v1/heartbeat      every pollIntervalS, the self-description of EXIT-NODES §5
-//   POST /agent/v1/observations   a batch of adverts heard, client id and all
+//   GET  /agent/v1/config           once per WiFi connection, for the budget and the clock
+//   POST /agent/v1/heartbeat        every pollIntervalS, the self-description of EXIT-NODES §5
+//   POST /agent/v1/observations     a batch of adverts heard, client id and all
+//   POST /agent/v1/jobs/claim       when the heartbeat says jobs are waiting (task 03)
+//   POST /agent/v1/jobs/{id}/result one per job, once, with its client id
 //
 // How the server's certificate is checked, for every task after task 01:
 //   1. The chain is verified - the client is never told to accept an unverified one, and
@@ -27,6 +29,7 @@
 
 #include "ConfigReply.h"
 #include "Envelopes.h"
+#include "JobEnvelopes.h"
 #include "RateLimit.h"
 #include "net/Clock.h"
 #include "settings/Store.h"
@@ -77,6 +80,14 @@ class AgentClient {
 
   // POST /agent/v1/observations. `body` is what writeObservationBatch() made.
   bool postObservations(const char* body, size_t len, int& accepted, bool& duplicate);
+
+  // POST /agent/v1/jobs/claim `{"max":N}`. True when the server answered 200 and the reply
+  // parsed; `count` is how many jobs it handed over, which may be none.
+  bool claimJobs(ClaimedJob* jobs, int max, int& count);
+
+  // POST /agent/v1/jobs/{id}/result. `body` is what writeJobResult() made. A late result is
+  // taken all the same and a duplicate clientId stores nothing twice, so this is safe to retry.
+  bool postJobResult(long long jobId, const char* body, size_t len);
 
   bool hasConfig() const { return hasConfig_; }
   const AgentConfig& config() const { return config_; }

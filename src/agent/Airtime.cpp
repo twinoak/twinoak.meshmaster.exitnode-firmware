@@ -1,0 +1,87 @@
+#include "Airtime.h"
+
+#include <cstring>
+
+namespace mm {
+
+namespace {
+
+constexpr uint32_t kMinuteMs = 60000;
+
+// millis() wraps every 49 days; every comparison here is a signed difference, which is right
+// across the wrap.
+bool atOrAfter(uint32_t now, uint32_t then) { return static_cast<int32_t>(now - then) >= 0; }
+
+}  // namespace
+
+int neighbourPages(int neighbours) {
+  if (neighbours <= 0) return 1;
+  return (neighbours + kNeighboursPerPage - 1) / kNeighboursPerPage;
+}
+
+int transactionsFor(const char* type, CredentialClass credentialClass, int items) {
+  if (type == nullptr) return 1;
+  if (std::strcmp(type, "status") == 0) {
+    // The firmware version comes from a second request, and only this class needs it.
+    return credentialClass == CredentialClass::Acl ? 2 : 1;
+  }
+  if (std::strcmp(type, "neighbours") == 0) return neighbourPages(items);
+  return 1;
+}
+
+size_t AirtimeGate::inWindow(uint32_t nowMs) const {
+  size_t n = 0;
+  for (size_t i = 0; i < count_; i++) {
+    const uint32_t start = starts_[(first_ + i) % kMaxTracked];
+    if (nowMs - start < kMinuteMs) n++;
+  }
+  return n;
+}
+
+uint32_t AirtimeGate::waitMs(uint32_t nowMs) const {
+  uint32_t wait = 0;
+  if (hasLast_) {
+    const uint32_t gapMs = static_cast<uint32_t>(budget_.minGapSeconds > 0 ? budget_.minGapSeconds : 0) * 1000u;
+    const uint32_t due = last_ + gapMs;
+    if (!atOrAfter(nowMs, due)) wait = due - nowMs;
+  }
+
+  const int ceiling = budget_.maxTransactionsPerMinute > 0 ? budget_.maxTransactionsPerMinute : 1;
+  // The oldest start still inside the minute; everything older has already left the window.
+  size_t live = 0;
+  uint32_t oldest = 0;
+  for (size_t i = 0; i < count_; i++) {
+    const uint32_t start = starts_[(first_ + i) % kMaxTracked];
+    if (nowMs - start < kMinuteMs) {
+      if (live == 0) oldest = start;
+      live++;
+    }
+  }
+  if (live >= static_cast<size_t>(ceiling)) {
+    const uint32_t until = oldest + kMinuteMs;
+    if (!atOrAfter(nowMs, until)) {
+      const uint32_t window = until - nowMs;
+      if (window > wait) wait = window;
+    }
+  }
+  return wait;
+}
+
+void AirtimeGate::took(uint32_t nowMs) {
+  // Drop whatever has left the minute, so the ring never holds more than a minute of starts.
+  while (count_ > 0 && nowMs - starts_[first_] >= kMinuteMs) {
+    first_ = (first_ + 1) % kMaxTracked;
+    count_--;
+  }
+  if (count_ == kMaxTracked) {
+    first_ = (first_ + 1) % kMaxTracked;
+    count_--;
+  }
+  starts_[(first_ + count_) % kMaxTracked] = nowMs;
+  count_++;
+  last_ = nowMs;
+  hasLast_ = true;
+  transmissions_++;
+}
+
+}  // namespace mm

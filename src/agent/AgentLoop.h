@@ -5,9 +5,12 @@
 // between heartbeats POST /agent/v1/observations with the adverts the radio heard - a batch when
 // twenty are waiting or when the oldest has waited a minute, whichever comes first.
 //
+// Since task 03 a heartbeat that answers `jobsWaiting` is followed by a claim: up to two jobs,
+// run one at a time at the budget's pace, each result posted as its job ends (JobRunner.h).
+//
 // What the server's answers do here:
-//   200   the budget, the poll interval and the clock are taken; `jobsWaiting` is logged and
-//         ignored, because nothing can be claimed until task 03 has a handler
+//   200   the budget, the poll interval and the clock are taken, and `jobsWaiting` makes a claim
+//         due before the next heartbeat
 //   401   everything stops. The token was revoked or is wrong, and no amount of retrying fixes
 //         either; the console still works and the OLED says so, and a `set meshmaster.token`
 //         (or a reboot) is what starts the loop again
@@ -15,8 +18,8 @@
 //   5xx, no reply
 //         backoff, 30 s doubling to ten minutes, reset by the first answer
 //
-// Nothing here claims, leases or runs a job: that is task 03. `jobTypes` is therefore the empty
-// array, which is how the server knows to hand this exit node nothing.
+// `jobTypes` is the four types JobRunner has a handler for - status, telemetry, neighbours and
+// trace - and routing sends nothing else, because it requires the type advertised.
 
 #pragma once
 
@@ -26,6 +29,7 @@
 #include <cstdint>
 
 #include "AgentClient.h"
+#include "JobRunner.h"
 #include "Observations.h"
 #include "ServerPolicy.h"
 #include "mesh/AgentMesh.h"
@@ -44,9 +48,11 @@ class AgentLoop {
     uint32_t batches = 0;              // observation batches the server took
     uint32_t observationsPosted = 0;
     uint32_t observationsRefused = 0;  // a batch the server refused for good, and the ring dropped
+    uint32_t claimFailures = 0;        // a claim that did not come back
   };
 
-  void begin(SettingsStore& settings, AgentClient& server, AgentClock& clock, WifiLink& wifi, AgentMesh& mesh);
+  void begin(SettingsStore& settings, AgentClient& server, AgentClock& clock, WifiLink& wifi, AgentMesh& mesh,
+             JobRunner& jobs);
 
   // The board's own identity, as 64 lowercase hex, or nullptr while the radio has made none.
   void setIdentity(const char* publicKeyHex);
@@ -76,6 +82,7 @@ class AgentLoop {
   void doConfig();
   void doHeartbeat();
   void doObservations();
+  void doJobs();
   void buildHeartbeat(Heartbeat& hb) const;
   // Acts on what the answer means (ServerPolicy.h) and says which action that was.
   ServerAction noteFailure(const AgentClient::Call& call);
@@ -88,6 +95,7 @@ class AgentLoop {
   AgentClock* clock_ = nullptr;
   WifiLink* wifi_ = nullptr;
   AgentMesh* mesh_ = nullptr;
+  JobRunner* jobs_ = nullptr;
 
   ObservationRing ring_;
   Counters counters_;
@@ -104,6 +112,7 @@ class AgentLoop {
   AgentBudget budget_;          // AgentBudget.Default until the server says otherwise (begin())
   int pollIntervalS_ = 30;
   bool lastJobsWaiting_ = false;
+  bool claimDue_ = false;
 
   uint32_t lastHeartbeatAtMillis_ = 0;
   uint32_t lastHeartbeatAtEpoch_ = 0;

@@ -1,15 +1,17 @@
 // The MeshMaster agent firmware: a Heltec V3 that boots, takes its settings over the USB serial
 // console, joins WiFi, sets its clock, and is an exit node on meshmaster.dk - it heartbeats over
-// verified TLS and posts the adverts its radio hears, with `jobTypes: []` so the server hands it
-// nothing yet (task 02). No packet leaves the radio (src/mesh/AgentMesh.h).
+// verified TLS, posts the adverts its radio hears, and claims and answers the four read jobs of
+// EXIT-NODES §7: status, telemetry, neighbours and trace (task 03). What leaves the radio is one
+// packet per transaction and nothing else (src/mesh/AgentMesh.h).
 //
 // The pieces, each in its own file:
 //   settings/   the key table (host-portable) and the NVS store
 //   console/    the line parser (host-portable) and the console that acts on it
 //   net/        WiFi with backoff, and the clock (SNTP, the server as fallback)
 //   agent/      the TLS client, the root it verifies against, the envelopes and the reply
-//               structs (host-portable), the observation ring, and the loop that drives them
-//   mesh/       the mesh in companion role: hears adverts, forwards nothing, sends nothing
+//               structs (host-portable), the observation ring, the airtime budget, the session
+//               cache, the job runner, and the loop that drives them
+//   mesh/       the mesh in companion role: hears adverts, forwards nothing, and speaks a job
 //   ui/         the OLED's four lines
 //   Log.h       what the serial port prints besides the console's replies
 
@@ -25,6 +27,7 @@
 #include "agent/AgentClient.h"
 #include "agent/AgentLoop.h"
 #include "agent/Iso8601.h"
+#include "agent/JobRunner.h"
 #include "console/Console.h"
 #include "mesh/AgentMesh.h"
 #include "net/Clock.h"
@@ -43,6 +46,7 @@ mm::SettingsStore settings;
 mm::WifiLink wifi;
 mm::AgentClock agentClock;
 mm::AgentClient server;
+mm::JobRunner jobs;
 mm::AgentLoop agent;
 mm::Console console;
 mm::Oled oled;
@@ -154,6 +158,8 @@ void printStatus(Stream& out) {
   out.printf("server    %s\r\n", line);
   agent.describe(line, sizeof line);
   out.printf("heartbeat %s\r\n", line);
+  jobs.describe(line, sizeof line);
+  out.printf("jobs      %s\r\n", line);
 
   const mm::AgentClient::Outcome& o = server.last();
   out.printf("heap      free %lu, min ever %lu, largest block %lu", static_cast<unsigned long>(ESP.getFreeHeap()),
@@ -211,6 +217,19 @@ void printMesh(Stream& out) {
 // `server`: the heartbeat and the observation batches - the last, the next, and the counters
 // the heartbeat itself carries.
 void printServer(Stream& out) { agent.report(out); }
+
+// `jobs`: the budget in force, what has been claimed, and the last ten with their outcome and
+// their transaction count.
+void printJobs(Stream& out) { jobs.report(out); }
+
+// A job's exchange blocks: a transaction is a send and up to sixteen seconds of waiting, and the
+// budget's gap is twenty more. The console and the OLED are pumped through all of it, so a board
+// running a job is still a board a person can type at; the mesh is pumped by the runner itself.
+void pumpDuringAJob() {
+  rtc_clock.tick();
+  console.loop();
+  oled.loop();
+}
 
 void doReboot() {
   delay(100);
@@ -294,11 +313,13 @@ void setup() {
   agentClock.begin(rtc_clock);
   wifi.begin(settings);
   server.begin(settings, agentClock, meshmaster_agent_version());
-  agent.begin(settings, server, agentClock, wifi, the_mesh);
+  jobs.begin(the_mesh, server, agentClock, &pumpDuringAJob);
+  agent.begin(settings, server, agentClock, wifi, the_mesh, jobs);
   agent.setIdentity(public_key_hex[0] != 0 ? public_key_hex : nullptr);
   if (!server.configured()) LOG_I("server: not configured; set meshmaster.url and meshmaster.token");
 
-  mm::ConsoleHost host = {&printStatus, &printMesh, &printServer, &printWifi, &doReboot, &onSettingChanged, &onErased};
+  mm::ConsoleHost host = {&printStatus,  &printMesh, &printServer,      &printJobs,
+                          &printWifi,    &doReboot,  &onSettingChanged, &onErased};
   console.begin(Serial, settings, host);
   board.onBootComplete();
 }

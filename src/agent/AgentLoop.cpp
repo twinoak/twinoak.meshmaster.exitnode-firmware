@@ -43,18 +43,23 @@ bool elapsed(uint32_t now, uint32_t deadline) { return static_cast<int32_t>(now 
 }  // namespace
 
 void AgentLoop::begin(SettingsStore& settings, AgentClient& server, AgentClock& clock, WifiLink& wifi,
-                      AgentMesh& mesh) {
+                      AgentMesh& mesh, JobRunner& jobs) {
   settings_ = &settings;
   server_ = &server;
   clock_ = &clock;
   wifi_ = &wifi;
   mesh_ = &mesh;
+  jobs_ = &jobs;
   mesh_->setRing(&ring_);
   budget_.maxTransactionsPerMinute = kDefaultMaxTransactionsPerMinute;
   budget_.minGapSeconds = kDefaultMinGapSeconds;
+  jobs_->setBudget(budget_);
 }
 
-void AgentLoop::setIdentity(const char* publicKeyHex) { publicKey_ = publicKeyHex; }
+void AgentLoop::setIdentity(const char* publicKeyHex) {
+  publicKey_ = publicKeyHex;
+  jobs_->setIdentity(publicKeyHex);
+}
 
 void AgentLoop::onWifiUp() {
   // The first link is not a reconnection; every one after it is.
@@ -89,6 +94,12 @@ void AgentLoop::loop() {
   if (!heartbeatScheduled_) return;
   if (elapsed(now, nextHeartbeatAt_)) {
     doHeartbeat();
+    return;
+  }
+  // A claim before the batch: the server said work was waiting, and a job on the air is what
+  // this exit node is for. One claim per heartbeat that said so.
+  if (claimDue_) {
+    doJobs();
     return;
   }
   // The oldest pending entry carries the moment it was heard, so how long a batch has waited is
@@ -127,14 +138,17 @@ void AgentLoop::buildHeartbeat(Heartbeat& hb) const {
     hb.radio.sf = static_cast<int>(settings_->number(*findKey("radio.sf")));
     hb.radio.cr = static_cast<int>(settings_->number(*findKey("radio.cr")));
   }
-  hb.hasJobTypes = true;  // and none of them: nothing can be claimed until task 03
-  hb.jobTypeCount = 0;
+  // The four this firmware has a handler for: routing requires the type advertised, so this list
+  // is what the server may send and nothing else (task p3-53).
+  hb.hasJobTypes = true;
+  hb.jobTypes = kJobTypes;
+  hb.jobTypeCount = kJobTypeCount;
   hb.hasBudget = true;
   hb.budget = budget_;
   // The radio is the companion here: "connected" is "the SX1262 came up", and a board whose
   // radio did not is an exit node that hears nothing, which is what the alert of §10 is for.
   hb.companionConnected = publicKey_ != nullptr;
-  hb.queueDepth = 0;  // nothing is claimed yet
+  hb.queueDepth = jobs_->queueDepth();
   hb.board = boardName();
 }
 
@@ -204,6 +218,7 @@ void AgentLoop::doHeartbeat() {
   if (reply.budget.maxTransactionsPerMinute != budget_.maxTransactionsPerMinute ||
       reply.budget.minGapSeconds != budget_.minGapSeconds) {
     budget_ = reply.budget;
+    jobs_->setBudget(budget_);
     LOG_I("server: budget in force: %d/min, gap %d s", budget_.maxTransactionsPerMinute, budget_.minGapSeconds);
   }
   if (reply.pollIntervalS > 0 && reply.pollIntervalS != pollIntervalS_) {
@@ -212,11 +227,7 @@ void AgentLoop::doHeartbeat() {
   }
   nextHeartbeatAt_ = millis() + static_cast<uint32_t>(pollIntervalS_) * 1000u;
   lastJobsWaiting_ = reply.jobsWaiting;
-  if (reply.jobsWaiting) {
-    // Logged and ignored: there is no handler to claim for until task 03, and `jobTypes: []`
-    // tells the server as much - so this says a job exists that some other exit node will take.
-    LOG_I("server: the server says jobs are waiting; this firmware claims none yet (jobTypes is empty)");
-  }
+  if (reply.jobsWaiting) claimDue_ = true;
   LOG_D("server: heartbeat reply: serverTime %s, budget %d/min gap %d s, poll %d s, jobs waiting %s",
         reply.serverTime, reply.budget.maxTransactionsPerMinute, reply.budget.minGapSeconds, reply.pollIntervalS,
         reply.jobsWaiting ? "yes" : "no");
@@ -333,6 +344,21 @@ void AgentLoop::doObservations() {
   // de-duplicates on that id - so a batch it took whose answer was lost costs nothing twice.
 }
 
+void AgentLoop::doJobs() {
+  // One claim per heartbeat that said work was waiting. Whatever it hands over is run here and
+  // now, one transaction at a time at the budget's pace, and every result is posted as its job
+  // ends - which is why this call can take minutes at a budget of two a minute, and why the
+  // console and the OLED are pumped through it (JobRunner::idle).
+  claimDue_ = false;
+  const int ran = jobs_->claimAndRun();
+  if (ran < 0) {
+    counters_.claimFailures++;
+    noteFailure(server_->lastCall());
+    return;
+  }
+  succeeded();
+}
+
 void AgentLoop::report(Stream& out) const {
   const uint32_t now = millis();
   char when[24];
@@ -376,6 +402,9 @@ void AgentLoop::report(Stream& out) const {
   out.printf("pending   %u of %u in the ring, %lu dropped, %lu heard in all\r\n",
              static_cast<unsigned>(ring_.size()), static_cast<unsigned>(ObservationRing::kCapacity),
              static_cast<unsigned long>(ring_.dropped()), static_cast<unsigned long>(ring_.heard()));
+  out.printf("jobs      %lu claim(s), %lu job(s) run, %lu claim(s) unanswered; `jobs` prints the last ten\r\n",
+             static_cast<unsigned long>(jobs_->claims()), static_cast<unsigned long>(jobs_->ran()),
+             static_cast<unsigned long>(counters_.claimFailures));
   out.printf("errors    overheard %lu, wifiReconnects %lu, httpFailures %lu, observationsDropped %lu\r\n",
              static_cast<unsigned long>(mesh_->overheard()), static_cast<unsigned long>(counters_.wifiReconnects),
              static_cast<unsigned long>(counters_.httpFailures), static_cast<unsigned long>(ring_.dropped()));

@@ -13,6 +13,7 @@
 //   status                   identity, radio, firmware, WiFi, time, server, heap
 //   mesh                     the adverts heard: how many, and the last five with their names
 //   server                   the heartbeat and the observation batches: last, next, counters
+//   jobs                     the last ten jobs claimed: outcome, transactions, when
 //   wifi                     scan, and the link's state
 //   reboot
 //   erase confirm            forget every setting (the identity stays); "confirm" is the word
@@ -34,6 +35,7 @@ enum class Verb : unsigned char {
   Status,
   Mesh,    // the adverts heard
   Server,  // the heartbeat and the observation batches
+  Jobs,    // the last ten jobs claimed
   Wifi,
   Reboot,
   Erase,   // only ever produced with the confirmation word present
