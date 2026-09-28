@@ -23,6 +23,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 #include "Envelopes.h"
 #include "mesh/ReplyCodec.h"
@@ -69,5 +70,26 @@ size_t writeDiscoverResult(bool hasPath, const char* const* hops, int hopCount, 
                            const char* loggedInAs, char* out, size_t cap);
 
 size_t writeAclSetResult(const char* publicKey, int level, bool confirmed, const char* reply, char* out, size_t cap);
+
+//   CliResult(string Command, string? Reply) { Answered, IsHardError }
+//   AdvertRequestResult(bool Confirmed, string? Reply)
+//   ClockSyncResult(DateTime SetTo, long? DriftS, bool Confirmed, string? Reply)
+//   PasswordSetResult(string Field, bool Confirmed, bool Sent, string? Reply)
+//   RebootResult(bool Sent, string? Reply)
+//
+// (task 05; tasks p4-54 and p4-55). `reply` nullptr is silence and is left out. A cli's
+// `answered` and `isHardError` are the record's computed properties, written as System.Text.Json
+// writes them. `driftS` is what a firmware that says how far the clock was off would report; this
+// one does not, so a handler passes hasDriftS false and the field is left out. A password.set's
+// reply never carries the value: `password now: <set>` is the admin echo with the value taken
+// out (PasswordSetResult.AdminReplyRedacted).
+extern const char kPasswordSetAdminReplyRedacted[];
+
+size_t writeCliResult(const char* command, const char* reply, char* out, size_t cap);
+size_t writeAdvertRequestResult(bool confirmed, const char* reply, char* out, size_t cap);
+size_t writeClockSyncResult(uint32_t setTo, bool hasDriftS, long long driftS, bool confirmed, const char* reply, char* out,
+                            size_t cap);
+size_t writePasswordSetResult(const char* field, bool confirmed, bool sent, const char* reply, char* out, size_t cap);
+size_t writeRebootResult(bool sent, const char* reply, char* out, size_t cap);
 
 }  // namespace mm

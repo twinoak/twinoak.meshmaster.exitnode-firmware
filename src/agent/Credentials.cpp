@@ -40,31 +40,49 @@ void JobCredential::setGuestPassword(const char* text) {
   hasGuestPassword = guestPassword[0] != '\0';
 }
 
+void JobCredential::setNewPassword(const char* text) {
+  wipeBytes(newPassword, sizeof newPassword);
+  newPasswordCut = take(newPassword, text);
+  hasNewPassword = newPassword[0] != '\0';
+}
+
 void JobCredential::wipe() {
   wipeBytes(adminPassword, sizeof adminPassword);
   wipeBytes(guestPassword, sizeof guestPassword);
+  wipeBytes(newPassword, sizeof newPassword);
   hasAdminPassword = false;
   hasGuestPassword = false;
+  hasNewPassword = false;
   adminPasswordCut = false;
   guestPasswordCut = false;
+  newPasswordCut = false;
 }
 
 bool JobCredential::isWiped() const {
-  if (hasAdminPassword || hasGuestPassword || adminPasswordCut || guestPasswordCut) return false;
+  if (hasAdminPassword || hasGuestPassword || hasNewPassword || adminPasswordCut || guestPasswordCut || newPasswordCut) {
+    return false;
+  }
   for (size_t i = 0; i < sizeof adminPassword; i++) {
     if (adminPassword[i] != 0) return false;
   }
   for (size_t i = 0; i < sizeof guestPassword; i++) {
     if (guestPassword[i] != 0) return false;
   }
+  for (size_t i = 0; i < sizeof newPassword; i++) {
+    if (newPassword[i] != 0) return false;
+  }
   return true;
 }
 
 size_t redactLoginPayloadHex(const uint8_t* payload, size_t len, char* out, size_t cap) {
+  return redactPayloadHex(payload, len, kLoginPayloadClearBytes, out, cap);
+}
+
+size_t redactPayloadHex(const uint8_t* payload, size_t len, size_t clearBytes, char* out, size_t cap) {
   size_t n = 0;
   if (out == nullptr || cap == 0) return 0;
   for (size_t i = 0; i < len && payload != nullptr; i++) {
-    if (i < kLoginPayloadClearBytes) {
+    if (i < clearBytes) {
       if (n + 3 > cap) break;
       out[n++] = kHex[payload[i] >> 4];
       out[n++] = kHex[payload[i] & 0x0F];

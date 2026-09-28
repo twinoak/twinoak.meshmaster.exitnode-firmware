@@ -7,7 +7,7 @@
 // server: what is posted is held to the .NET agent's bytes by test/test_job_results and
 // test/test_config_read.
 //
-// Seven types. Four of them log in as this board and nothing else (task 03):
+// Thirteen types. Four of them log in as this board and nothing else (task 03):
 //
 //   status      REQ_TYPE_GET_STATUS, and at class `acl` the owner-info request too, for the
 //               firmware version the association's verify step records
@@ -28,13 +28,39 @@
 //               the access-list request last (admin only, 23 entries at most, its silence after
 //               keys were read tolerated: tasks p3.5-43, p4-49, p4-57)
 //
+// and six change a repeater (task 05; tasks p4-53, 54, 55, 57), every one of them one send per
+// command - a `set` sent twice is a change made twice - on an admin session, with the sender
+// timestamps strictly increasing (the RTC's unique second, which every tag and every CLI line of
+// this board come from):
+//
+//   config.apply  the plan's commands in order, each exactly once, every reply kept, stopped at
+//                 the first reply that is not what the line expects and at the first silence
+//                 (`not-sent` for the rest); a regions entry as its lines, the ones that expect
+//                 no reply sent without waiting and the terminator sent even when the sequence
+//                 dies; then the re-read of every touched key and `ver`. The policy is
+//                 agent/ConfigApply.h, which runs on a host; this file puts its lines on the air
+//   cli           one line as the server handed it, one reply, both recorded; the blocked list
+//                 is the server's, and this firmware refuses nothing but a malformed line
+//   advert.request  `advert` (the flood) or `advert.zerohop`, answered `OK - Advert sent`
+//   clock.sync    `time <unix>` from this board's clock, the reply recorded, a refusal
+//                 (`(ERR: clock cannot go backwards)`) recorded as the refusal it is
+//   password.set  `password <new>` or `set guest.password <new>` with the value the claim
+//                 carried, once; the admin echo compared with what was sent and recorded as
+//                 `<set>`, never the value; the restore **after** the password line, and the
+//                 session dropped whatever came back
+//   reboot        `reboot`, which the firmware never answers: `ok` as sent on silence, no
+//                 restore (there is no session after it, and before it a restore would make the
+//                 command unanswerable), the session dropped
+//
 // **Every admin session on a repeater where this exit node holds a grant ends with the restore**
 // (task p4.1-60): `setperm <own key> <granted level>` as the session's last command, because on
 // stock firmware the login table *is* the ACL and the admin login has just rewritten our entry
 // to admin. The level travels in the claim's `acl`; after the command the cache holds the
 // session at class `acl`, reusable by the next acl-class job and invisible to an admin-class
 // one. A blank login the repeater answered *above* the grant restores the same way, at once. An
-// `acl.set` on our own key sends no second `setperm`: the command is the level.
+// `acl.set` on our own key sends no second `setperm`: the command is the level. Two types cannot
+// end that way (task 60 as built): `password.set` restores after its password line and only then
+// drops the session, and `reboot` restores not at all.
 //
 // The pacing is the budget the heartbeat last carried (agent/Airtime.h): one transaction at a
 // time, the gap between two, the ceiling in a minute. A board has one thread, so a job's waiting
@@ -49,6 +75,7 @@
 
 #include "Airtime.h"
 #include "AgentClient.h"
+#include "ConfigApply.h"
 #include "ConfigRead.h"
 #include "JobEnvelopes.h"
 #include "Sessions.h"
@@ -128,6 +155,19 @@ class JobRunner {
   Outcome runDiscover(const ClaimedJob& job, Context& ctx, size_t& dataLen);
   Outcome runAclSet(const ClaimedJob& job, Context& ctx, size_t& dataLen);
   Outcome runConfigRead(const ClaimedJob& job, Context& ctx, size_t& dataLen);
+  // The writes (task 05).
+  Outcome runConfigApply(const ClaimedJob& job, Context& ctx, size_t& dataLen);
+  Outcome runCli(const ClaimedJob& job, Context& ctx, size_t& dataLen);
+  Outcome runAdvertRequest(const ClaimedJob& job, Context& ctx, size_t& dataLen);
+  Outcome runClockSync(const ClaimedJob& job, Context& ctx, size_t& dataLen);
+  Outcome runPasswordSet(const ClaimedJob& job, Context& ctx, size_t& dataLen);
+  Outcome runReboot(const ClaimedJob& job, Context& ctx, size_t& dataLen);
+  // The admin session every write needs: a login answered below admin is `unauthorized` at the
+  // login, and nothing is sent (a CLI line is answered to admin only on this firmware).
+  Outcome adminSession(const ClaimedJob& job, Context& ctx);
+  // The apply engine's lines on the air: agent/ConfigApply.h's exchange over this runner.
+  class ApplyOnTheAir;
+  friend class ApplyOnTheAir;
 
   // The pieces of a config read.
   Outcome readRegions(const ClaimedJob& job, Context& ctx, ConfigSnapshot& snapshot);
@@ -148,17 +188,24 @@ class JobRunner {
   Outcome request(const ClaimedJob& job, Context& ctx, const char* what, uint8_t reqType, const uint8_t* data,
                   uint8_t len);
   // One CLI line, the same way; the reply's text lands in the runner's own buffer. With `retry`
-  // false it is sent once whatever comes back, which is what a write needs.
-  Outcome cliLine(const ClaimedJob& job, Context& ctx, const char* what, const char* command, bool retry);
+  // false it is sent once whatever comes back, which is what a write needs. `timestamp` is the
+  // sender timestamp of the first attempt (0: the RTC's unique second, which a second attempt
+  // always takes); `sensitive` stars the frame's body in the frame log (a `password` line);
+  // `escape` is the one line that goes out past the lease, the region loader's terminator.
+  Outcome cliLine(const ClaimedJob& job, Context& ctx, const char* what, const char* command, bool retry,
+                  uint32_t timestamp = 0, bool sensitive = false, bool escape = false);
   // The common shape of the two: the send, the wait, the retry and the re-login.
   template <typename Send>
-  Outcome exchange(const ClaimedJob& job, Context& ctx, const char* what, bool retry, bool text, Send send);
+  Outcome exchange(const ClaimedJob& job, Context& ctx, const char* what, bool retry, bool text, Send send,
+                   bool escape = false);
   // The session's last command on a pair with a grant (task p4.1-60). Returns 1 when the
   // repeater confirmed the restore, 0 when it was sent and not confirmed (or could not be), -1
   // when there was nothing to restore.
   int restoreAcl(const ClaimedJob& job, Context& ctx, Outcome outcome);
-  // The budget's turn to speak, and the lease's. False when the lease ran out first.
-  bool spend(const ClaimedJob& job, Context& ctx);
+  // The budget's turn to speak, and the lease's. False when the lease ran out first - unless
+  // `escape`: the region loader's terminator waits for the budget and ignores the lease, because
+  // a repeater left in load mode reads every later CLI command as a region.
+  bool spend(const ClaimedJob& job, Context& ctx, bool escape = false);
   void idle(uint32_t ms);
   uint32_t requestWaitMs(const ClaimedJob& job) const;
   uint32_t loginWaitMs(const ClaimedJob& job) const;

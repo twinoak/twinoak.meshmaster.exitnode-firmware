@@ -16,6 +16,7 @@
 #include <string>
 
 #include "agent/Envelopes.h"
+#include "agent/JobEnvelopes.h"
 #include "version.h"
 
 #ifndef FIXTURES_DIR
@@ -34,11 +35,10 @@ std::string readFixture(const char* name) {
 }
 
 // The thirteen types of API §3, in the order MeshMaster.Contracts' JobTypes.All gives them -
-// which is the order the fixture carries. When meshmaster.dk adds a job type the fixture moves,
-// this list has to move with it, and that is the point.
-const char* const kAllJobTypes[] = {"status",   "telemetry", "neighbours",     "config.read", "config.apply",
-                                    "cli",      "trace",     "discover",       "advert.request",
-                                    "clock.sync", "password.set", "acl.set",    "reboot"};
+// which is the order the fixture carries. Since task 05 that is the firmware's own list,
+// kJobTypes: the heartbeat advertises every type, and this test holds the bytes it sends to the
+// fixture. When meshmaster.dk adds a job type the fixture moves, and so must the list.
+const char* const* const kAllJobTypes = mm::kJobTypes;
 
 std::string heartbeatJson(const mm::Heartbeat& hb) {
   char out[2048];
@@ -68,7 +68,7 @@ TEST(Heartbeat, TheSameInputMakesTheDotNetFixtureByteForByte) {
   hb.radio = {869.618, 62.5, 8, 8};
   hb.hasJobTypes = true;
   hb.jobTypes = kAllJobTypes;
-  hb.jobTypeCount = static_cast<int>(sizeof kAllJobTypes / sizeof kAllJobTypes[0]);
+  hb.jobTypeCount = mm::kJobTypeCount;
   hb.hasBudget = true;
   hb.budget.maxTransactionsPerMinute = 2;  // AgentBudget.Default
   hb.budget.minGapSeconds = 20;

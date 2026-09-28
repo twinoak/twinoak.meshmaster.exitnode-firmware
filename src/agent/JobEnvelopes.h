@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "ConfigApply.h"
 #include "ConfigRead.h"
 #include "Credentials.h"
 #include "mesh/ReplyCodec.h"
@@ -32,11 +33,12 @@ namespace mm {
 enum class Outcome : uint8_t { Ok, Failed, Unreachable, Unauthorized, Unsupported, Timeout };
 const char* outcomeName(Outcome o);
 
-// The seven types this firmware has a handler for, in the order JobTypes.All lists them: the
-// four reads of task 03 and, since task 04, the three that carry a password - discover, acl.set
-// and config.read. The heartbeat sends exactly this list, and routing sends nothing else (task
-// p3-53).
-constexpr int kJobTypeCount = 7;
+// The thirteen types this firmware has a handler for - every type of API §3 - in the order
+// JobTypes.All lists them: the four reads of task 03, the three of task 04 that carry a password
+// (discover, acl.set, config.read), and since task 05 the six that change a repeater
+// (config.apply, cli, advert.request, clock.sync, password.set, reboot). The heartbeat sends
+// exactly this list, and routing sends nothing else (task p3-53).
+constexpr int kJobTypeCount = 13;
 extern const char* const kJobTypes[kJobTypeCount];
 bool isKnownJobType(const char* type);
 
@@ -51,6 +53,12 @@ constexpr int kMaxClaimPathHops = 8;
 constexpr size_t kMaxHopHexLen = 6;  // three bytes of hash
 constexpr int kMaxGroupWith = 4;
 constexpr size_t kPublicKeyHexLen = 64;
+constexpr size_t kMaxCliCommandLen = 120;  // CliPayload.MaxLength: one line, and no command anybody types is near it
+constexpr size_t kMaxCredentialCandidateLen = 8;
+
+// PasswordSetPayload.Field: which password a password.set changes.
+enum class PasswordField : uint8_t { None, Admin, Guest };
+const char* passwordFieldName(PasswordField f);
 
 struct ClaimedJob {
   long long id = 0;
@@ -72,18 +80,31 @@ struct ClaimedJob {
   bool hasAclLevel = false;
   int aclLevel = 0;
 
-  // The passwords, when the claim carried one for the job's class (Credentials.h): a fixed
-  // buffer, wiped when the job ends.
+  // The passwords, when the claim carried one for the job's class (Credentials.h), and the new
+  // one a password.set sets: a fixed buffer, wiped when the job ends.
   JobCredential credential;
 
-  // The payload, for the two types whose payload says something: a config.read's `keys` (none
-  // means the default list) and an acl.set's `publicKey` and `level`.
+  // `credential.candidate` (task p4-55): `new` or `old` when the material is one of the two
+  // candidates of an unverified credential. The job then logs in afresh whatever the cache
+  // holds, because the server reads its outcome as the verdict on exactly this material. A
+  // word, not a value.
+  char credentialCandidate[kMaxCredentialCandidateLen + 1] = {0};
+
+  // The payload, for the types whose payload says something: a config.read's `keys` (none
+  // means the default list), an acl.set's `publicKey` and `level`, a config.apply's plan, a
+  // cli's `command`, an advert.request's `flood` and a password.set's `field`.
   bool hasConfigKeys = false;
   int configKeyCount = 0;
   char configKeys[kMaxConfigKeys][kMaxConfigKeyLen + 1] = {};
   bool hasAclSet = false;
   char aclSetKey[kPublicKeyHexLen + 1] = {0};
   int aclSetLevel = 0;
+  ConfigApplyPlan apply;
+  bool hasCliCommand = false;
+  bool cliCommandTooLong = false;
+  char cliCommand[kMaxCliCommandLen + 1] = {0};
+  bool advertFlood = true;  // AdvertRequestPayload.Flood defaults to true: the flood is what refreshes paths
+  PasswordField passwordField = PasswordField::None;
 
   // What reachability knows for this (agent, repeater): the hops to set as the contact's
   // out-path before sending. Absent while nothing has been learned, and then the mesh floods.
@@ -100,7 +121,8 @@ struct ClaimedJob {
 // Whether this firmware can run the job at all, and one sentence saying why not when it cannot:
 // a type without a handler, a class the type cannot use (JobTypes.CredentialClasses on the
 // server: status and telemetry at guest, acl or admin; neighbours at acl or admin; trace at
-// none; discover, acl.set and config.read at admin), a repeater with no key - and, belt beside
+// none; discover, acl.set, config.read and the six writes at admin), a repeater with no key -
+// and, belt beside
 // the claim's braces (task p4.1-60), the **guest password on a pair that holds a grant**: a
 // guest login from this key would rewrite the ACL entry to guest, so a claim that carries both
 // is refused here whatever the server decided. Every refusal is `unsupported` rather than

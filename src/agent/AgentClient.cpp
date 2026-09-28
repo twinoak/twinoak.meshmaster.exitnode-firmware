@@ -334,9 +334,11 @@ bool AgentClient::claimJobs(ClaimedJob* jobs, int max, int& count) {
   char request[32];
   const size_t requestLen = writeClaimRequest(max, request, sizeof request);
 
-  // Two jobs with a label, a path and an idempotency key is about a kilobyte; this is room for
-  // the claim the server may hand over and no more, and a longer one is cut and reported.
-  static char body[3072];
+  // Two jobs with a label, a path and an idempotency key is about a kilobyte, and a config.apply
+  // whose plan holds the region loader's sequence (task 05: forty-odd lines of fifty bytes each
+  // as JSON) is three more; this is room for the claim the server may hand over and no more,
+  // and a longer one is cut and reported.
+  static char body[6144];
   size_t bodyLen = 0;
   Call c;
   if (!call("POST", "/agent/v1/jobs/claim", request, requestLen, body, sizeof body, bodyLen, c)) {

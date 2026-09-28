@@ -1,5 +1,6 @@
 #include "JobResults.h"
 
+#include "CliReplies.h"
 #include "Iso8601.h"
 #include "JsonWriter.h"
 
@@ -194,6 +195,90 @@ size_t writeAclSetResult(const char* publicKey, int level, bool confirmed, const
   w.integer(level);
   w.key("confirmed");
   w.boolean(confirmed);
+  if (reply != nullptr) {
+    w.key("reply");
+    w.string(reply);
+  }
+  w.endObject();
+  return w.overflowed() ? 0 : w.length();
+}
+
+const char kPasswordSetAdminReplyRedacted[] = "password now: <set>";
+
+size_t writeCliResult(const char* command, const char* reply, char* out, size_t cap) {
+  JsonWriter w(out, cap);
+  w.beginObject();
+  w.key("command");
+  w.string(command);
+  if (reply != nullptr) {
+    w.key("reply");
+    w.string(reply);
+  }
+  w.key("answered");
+  w.boolean(reply != nullptr);
+  w.key("isHardError");
+  w.boolean(cliReplyIsHardError(reply));
+  w.endObject();
+  return w.overflowed() ? 0 : w.length();
+}
+
+size_t writeAdvertRequestResult(bool confirmed, const char* reply, char* out, size_t cap) {
+  JsonWriter w(out, cap);
+  w.beginObject();
+  w.key("confirmed");
+  w.boolean(confirmed);
+  if (reply != nullptr) {
+    w.key("reply");
+    w.string(reply);
+  }
+  w.endObject();
+  return w.overflowed() ? 0 : w.length();
+}
+
+size_t writeClockSyncResult(uint32_t setTo, bool hasDriftS, long long driftS, bool confirmed, const char* reply, char* out,
+                            size_t cap) {
+  JsonWriter w(out, cap);
+  char when[24];
+  w.beginObject();
+  w.key("setTo");
+  formatUtc(setTo, when, sizeof when);
+  w.string(when);
+  if (hasDriftS) {
+    w.key("driftS");
+    w.integer(driftS);
+  }
+  w.key("confirmed");
+  w.boolean(confirmed);
+  if (reply != nullptr) {
+    w.key("reply");
+    w.string(reply);
+  }
+  w.endObject();
+  return w.overflowed() ? 0 : w.length();
+}
+
+size_t writePasswordSetResult(const char* field, bool confirmed, bool sent, const char* reply, char* out, size_t cap) {
+  JsonWriter w(out, cap);
+  w.beginObject();
+  w.key("field");
+  w.string(field != nullptr ? field : "");
+  w.key("confirmed");
+  w.boolean(confirmed);
+  w.key("sent");
+  w.boolean(sent);
+  if (reply != nullptr) {
+    w.key("reply");
+    w.string(reply);
+  }
+  w.endObject();
+  return w.overflowed() ? 0 : w.length();
+}
+
+size_t writeRebootResult(bool sent, const char* reply, char* out, size_t cap) {
+  JsonWriter w(out, cap);
+  w.beginObject();
+  w.key("sent");
+  w.boolean(sent);
   if (reply != nullptr) {
     w.key("reply");
     w.string(reply);

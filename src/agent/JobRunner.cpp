@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "CliReplies.h"
 #include "Iso8601.h"
 #include "JobResults.h"
 #include "Log.h"
@@ -82,6 +83,14 @@ char g_cliReply[kMaxCliReplyLen + 1];       // the last CLI reply, as the repeat
 char g_regionListing[kMaxCliReplyLen + 1];  // the `region` reply, kept across `region default`
 char g_regionValue[kMaxConfigValueLen + 1];
 char g_command[kPublicKeyHexLen + 32];
+ConfigApplyOutcome g_applyOutcome;
+// The one line of this file that carries a secret: `password <new>` or `set guest.password
+// <new>`, built from the claim's credential right before the send and wiped right after it.
+char g_secretLine[kMaxCliCommandLen + 1];
+// How long a line that expects no reply is given to leave the radio before the next is queued:
+// the region loader resolves a line's parent by indent against a stack, so order matters, and
+// MeshCore's outbound queue is pumped by the loop this waits in.
+constexpr uint32_t kLineSettleMs = 250;
 
 int hexValue(char c) {
   if (c >= '0' && c <= '9') return c - '0';
@@ -169,13 +178,14 @@ uint32_t JobRunner::loginWaitMs(const ClaimedJob& job) const {
   return login > request ? login : request;
 }
 
-bool JobRunner::spend(const ClaimedJob& job, Context& ctx) {
-  if (leaseRanOut(job)) return false;
+bool JobRunner::spend(const ClaimedJob& job, Context& ctx, bool escape) {
+  if (!escape && leaseRanOut(job)) return false;
   uint32_t wait = gate_.waitMs(millis());
   if (wait > 0) {
     // A budget of two a minute means most of a job is waiting. Never wait past the lease: the
-    // server has moved the job on by then, and the air is better spent on the next one.
-    if (clock_->hasTime() && job.leaseUntil != 0 && clock_->now() + (wait + 999) / 1000 > job.leaseUntil) {
+    // server has moved the job on by then, and the air is better spent on the next one. The one
+    // exception is the line that ends a region load, which goes out whatever the lease says.
+    if (!escape && clock_->hasTime() && job.leaseUntil != 0 && clock_->now() + (wait + 999) / 1000 > job.leaseUntil) {
       g_log.add("the budget's next slot is past the lease");
       return false;
     }
@@ -183,7 +193,7 @@ bool JobRunner::spend(const ClaimedJob& job, Context& ctx) {
     gate_.addWait(wait);
     idle(wait);
   }
-  if (leaseRanOut(job)) return false;
+  if (!escape && leaseRanOut(job)) return false;
   gate_.took(millis());
   ctx.transactions++;
   return true;
@@ -312,10 +322,11 @@ Outcome JobRunner::ensureSession(const ClaimedJob& job, Context& ctx) {
 // ------------------------------------------------------------------ one exchange
 
 template <typename Send>
-Outcome JobRunner::exchange(const ClaimedJob& job, Context& ctx, const char* what, bool retry, bool text, Send send) {
+Outcome JobRunner::exchange(const ClaimedJob& job, Context& ctx, const char* what, bool retry, bool text, Send send,
+                            bool escape) {
   const int attempts = retry ? 2 : 1;
   for (int attempt = 1; attempt <= attempts; attempt++) {
-    if (!spend(job, ctx)) return Outcome::Timeout;
+    if (!spend(job, ctx, escape)) return Outcome::Timeout;
     const uint32_t started = millis();
     uint32_t tag = 0;
     const SendResult sent = send(tag);
@@ -351,14 +362,32 @@ Outcome JobRunner::request(const ClaimedJob& job, Context& ctx, const char* what
                   [&](uint32_t& tag) { return mesh_->sendRequest(reqType, data, len, tag); });
 }
 
-Outcome JobRunner::cliLine(const ClaimedJob& job, Context& ctx, const char* what, const char* command, bool retry) {
+Outcome JobRunner::cliLine(const ClaimedJob& job, Context& ctx, const char* what, const char* command, bool retry,
+                           uint32_t timestamp, bool sensitive, bool escape) {
   g_cliReply[0] = '\0';
-  // Each attempt is its own sender timestamp, strictly above the last (uniqueTime): the
-  // repeater answers an equal one with nothing and runs nothing, and drops a lower one.
-  return exchange(job, ctx, what, retry, true, [&](uint32_t& tag) {
-    tag = mesh_->uniqueTime();
-    return mesh_->sendCli(command, tag);
-  });
+  // Each attempt is its own sender timestamp, strictly above the last (uniqueTime, the one
+  // series every tag and every line of this board come from): the repeater answers an equal one
+  // with nothing and runs nothing, and drops a lower one. A caller that took the timestamp from
+  // that series already (the apply engine) hands it in for the first attempt.
+  return exchange(
+      job, ctx, what, retry, true,
+      [&](uint32_t& tag) {
+        tag = timestamp != 0 ? timestamp : mesh_->uniqueTime();
+        timestamp = 0;
+        return mesh_->sendCli(command, tag, sensitive);
+      },
+      escape);
+}
+
+Outcome JobRunner::adminSession(const ClaimedJob& job, Context& ctx) {
+  const Outcome session = ensureSession(job, ctx);
+  if (session != Outcome::Ok) return session;
+  if (ctx.sessionRole != kPermAdmin) {
+    g_log.add("logged in as %s: this firmware answers CLI commands to admin only, so nothing is sent",
+              permissionName(ctx.sessionRole));
+    return Outcome::Unauthorized;
+  }
+  return Outcome::Ok;
 }
 
 // ------------------------------------------------------------------ the restore (task p4.1-60)
@@ -927,6 +956,302 @@ Outcome JobRunner::runConfigRead(const ClaimedJob& job, Context& ctx, size_t& da
   return dataLen > 0 ? Outcome::Ok : Outcome::Failed;
 }
 
+// ------------------------------------------------------------------ config.apply (CONFIGURATION §5, tasks p4-53, p4-57)
+
+// The apply engine's exchange over this runner: one CLI line on the air per call, the sender
+// timestamp from the RTC's unique second, the regions read the config read has, and the job's
+// log. The engine decides what is sent and what a reply means; this puts it on the air once.
+class JobRunner::ApplyOnTheAir : public ApplyExchange {
+ public:
+  ApplyOnTheAir(JobRunner& runner, const ClaimedJob& job, Context& ctx) : runner_(runner), job_(job), ctx_(ctx) {}
+
+  Sent send(const ApplySend& s, char* reply, size_t cap) override {
+    reply[0] = '\0';
+    if (!s.awaitReply) {
+      // A line the firmware answers with nothing: sent, and the mesh pumped so it leaves the
+      // radio before the next one is queued behind it. One transaction, as the .NET agent
+      // counts it.
+      if (!runner_.spend(job_, ctx_, s.escape)) return Sent::LeaseOut;
+      const SendResult sent = runner_.mesh_->sendCli(s.line, s.timestamp);
+      if (sent == SendResult::Failed) {
+        g_log.add("%s: the packet could not be built", s.what);
+        return Sent::NotSent;
+      }
+      g_log.add("%s: sent (%s)", s.what, sent == SendResult::Direct ? "direct" : "flood");
+      runner_.idle(kLineSettleMs);
+      return Sent::Answered;
+    }
+    switch (runner_.cliLine(job_, ctx_, s.what, s.line, s.retry, s.timestamp, false, s.escape)) {
+      case Outcome::Ok:
+        std::snprintf(reply, cap, "%s", g_cliReply);
+        return Sent::Answered;
+      case Outcome::Unreachable: return Sent::NoReply;
+      case Outcome::Timeout: return Sent::LeaseOut;
+      case Outcome::Failed: return Sent::NotSent;
+      default:
+        // The session went and the re-login a retry makes was refused: nothing more will be
+        // answered on it, which to the sequence is the silence it is.
+        return Sent::NoReply;
+    }
+  }
+
+  uint32_t nextTimestamp() override { return runner_.mesh_->uniqueTime(); }
+
+  bool readRegions(ConfigSnapshot& snapshot) override { return runner_.readRegions(job_, ctx_, snapshot) == Outcome::Ok; }
+
+  void log(const char* line) override { g_log.add("%s", line); }
+
+ private:
+  JobRunner& runner_;
+  const ClaimedJob& job_;
+  Context& ctx_;
+};
+
+Outcome JobRunner::runConfigApply(const ClaimedJob& job, Context& ctx, size_t& dataLen) {
+  if (job.apply.refused) {
+    g_log.add("%s", job.apply.refusedWhy);
+    return Outcome::Failed;
+  }
+  if (job.apply.commandCount == 0) {
+    g_log.add("config.apply carries no plan: nothing to send");
+    return Outcome::Failed;
+  }
+  const Outcome session = adminSession(job, ctx);
+  if (session != Outcome::Ok) return session;
+
+  g_log.add("apply plan %s: %d command(s), single attempt, stop at the first refusal or silence",
+            job.apply.planHash[0] != '\0' ? job.apply.planHash : "(no hash)", job.apply.commandCount);
+  ApplyOnTheAir air(*this, job, ctx);
+  const ApplyRun run = mm::runConfigApply(job.apply, air, g_applyOutcome, g_snapshot);
+  dataLen = writeConfigApplyResult(job.apply, g_applyOutcome, g_snapshot, g_data, kDataCap);
+  if (dataLen == 0) return Outcome::Failed;
+  if (run == ApplyRun::Timeout) return Outcome::Timeout;
+  return run == ApplyRun::Ok ? Outcome::Ok : Outcome::Failed;
+}
+
+// ------------------------------------------------------------------ cli, advert.request, clock.sync (task p4-54)
+
+Outcome JobRunner::runCli(const ClaimedJob& job, Context& ctx, size_t& dataLen) {
+  if (!job.hasCliCommand || job.cliCommandTooLong) {
+    g_log.add("cli carries no command, more than one line, or one too long: nothing is sent");
+    return Outcome::Failed;
+  }
+  const Outcome session = adminSession(job, ctx);
+  if (session != Outcome::Ok) return session;
+
+  // Sent once, as it was given: the blocked list is the server's, enforced on the payload
+  // before the job exists, and an agent is not where a security rail lives.
+  char what[kMaxCliCommandLen + 8];
+  std::snprintf(what, sizeof what, "cli '%s'", job.cliCommand);
+  const Outcome sent = cliLine(job, ctx, what, job.cliCommand, false);
+  if (sent == Outcome::Ok) {
+    trimInPlace(g_cliReply);
+    const bool hardError = cliReplyIsHardError(g_cliReply);
+    g_log.add("the repeater %s '%s': %s", hardError ? "refused" : "answered", job.cliCommand, g_cliReply);
+    dataLen = writeCliResult(job.cliCommand, g_cliReply, g_data, kDataCap);
+    if (dataLen == 0) return Outcome::Failed;
+    return hardError ? Outcome::Failed : Outcome::Ok;
+  }
+  if (sent == Outcome::Unreachable) {
+    // For a `set` this is §5a's lost reply, and the server settles it against the next read.
+    g_log.add("no reply to '%s' - the command may or may not have run; not sent again", job.cliCommand);
+  }
+  dataLen = writeCliResult(job.cliCommand, nullptr, g_data, kDataCap);
+  return sent;
+}
+
+Outcome JobRunner::runAdvertRequest(const ClaimedJob& job, Context& ctx, size_t& dataLen) {
+  // `advert` floods (CommonCLI::handleCommand at d9296435, src/helpers/CommonCLI.cpp:195-198:
+  // sendSelfAdvertisement(1500, true), answered `OK - Advert sent`), which is what refreshes
+  // everyone's paths; `advert.zerohop` (191-194) reaches the direct neighbours only.
+  const char* command = job.advertFlood ? "advert" : "advert.zerohop";
+  const Outcome session = adminSession(job, ctx);
+  if (session != Outcome::Ok) return session;
+
+  char what[32];
+  std::snprintf(what, sizeof what, "cli '%s'", command);
+  const Outcome sent = cliLine(job, ctx, what, command, false);
+  if (sent == Outcome::Ok) {
+    trimInPlace(g_cliReply);
+    const bool confirmed = cliReplyIsConfirmed(g_cliReply);
+    g_log.add("'%s': %s", command, g_cliReply);
+    dataLen = writeAdvertRequestResult(confirmed, g_cliReply, g_data, kDataCap);
+    if (dataLen == 0) return Outcome::Failed;
+    return confirmed ? Outcome::Ok : Outcome::Failed;
+  }
+  if (sent == Outcome::Unreachable) {
+    g_log.add("no reply to '%s'; the advert may have gone out all the same, and the observations will say", command);
+  }
+  dataLen = writeAdvertRequestResult(false, nullptr, g_data, kDataCap);
+  return sent;
+}
+
+Outcome JobRunner::runClockSync(const ClaimedJob& job, Context& ctx, size_t& dataLen) {
+  // `time <unix>` (CommonCLI.cpp:217-227) rather than `clock sync` (199-208): both refuse to
+  // go backwards, but with `time` the value set is in the command line and in the result, not
+  // only in a frame field nobody stores. The value is this board's clock - SNTP, or the
+  // server's time until SNTP answers - and a board with no time yet has nothing to set.
+  if (!clock_->hasTime()) {
+    g_log.add("this board's clock is not set yet: nothing to set the repeater's from");
+    return Outcome::Failed;
+  }
+  const Outcome session = adminSession(job, ctx);
+  if (session != Outcome::Ok) return session;
+
+  const uint32_t setTo = clock_->now();
+  char command[24];
+  std::snprintf(command, sizeof command, "time %lu", static_cast<unsigned long>(setTo));
+  char what[40];
+  std::snprintf(what, sizeof what, "cli '%s'", command);
+  const Outcome sent = cliLine(job, ctx, what, command, false);
+  if (sent == Outcome::Ok) {
+    trimInPlace(g_cliReply);
+    const bool confirmed = cliReplyIsConfirmed(g_cliReply);
+    g_log.add("'%s' (%s): %s", command, clock_->sourceName(), g_cliReply);
+    dataLen = writeClockSyncResult(setTo, false, 0, confirmed, g_cliReply, g_data, kDataCap);
+    if (dataLen == 0) return Outcome::Failed;
+    return confirmed ? Outcome::Ok : Outcome::Failed;
+  }
+  if (sent == Outcome::Unreachable) g_log.add("no reply to '%s'", command);
+  dataLen = writeClockSyncResult(setTo, false, 0, false, nullptr, g_data, kDataCap);
+  return sent;
+}
+
+// ------------------------------------------------------------------ password.set (CONFIGURATION §7, task p4-55)
+
+Outcome JobRunner::runPasswordSet(const ClaimedJob& job, Context& ctx, size_t& dataLen) {
+  const char* field = passwordFieldName(job.passwordField);
+  if (job.passwordField == PasswordField::None) {
+    g_log.add("password.set names no credential field: nothing is sent");
+    dataLen = writePasswordSetResult("", false, false, nullptr, g_data, kDataCap);
+    return Outcome::Failed;
+  }
+  if (!job.credential.hasNewPassword) {
+    g_log.add("the claim carried no new password: nothing is sent");
+    dataLen = writePasswordSetResult(field, false, false, nullptr, g_data, kDataCap);
+    return Outcome::Failed;
+  }
+  if (job.credential.newPasswordCut) {
+    // The firmware keeps fifteen bytes (`char password[16]` in NodePrefs at d9296435): a value
+    // it would cut is a lock-out, because the server would store what was sent and the repeater
+    // what it kept.
+    g_log.add("the new password is longer than %u bytes and the firmware keeps %u: nothing is sent, because a cut-off "
+              "password is a lock-out",
+              static_cast<unsigned>(kMaxPasswordLen), static_cast<unsigned>(kMaxPasswordLen));
+    dataLen = writePasswordSetResult(field, false, false, nullptr, g_data, kDataCap);
+    return Outcome::Failed;
+  }
+  const Outcome session = adminSession(job, ctx);
+  if (session != Outcome::Ok) {
+    dataLen = writePasswordSetResult(field, false, false, nullptr, g_data, kDataCap);
+    return session;
+  }
+
+  // The command line as bytes - prefix and secret - built right before the send and wiped right
+  // after it; the log names the command without its value, and the frame log stars the body
+  // (`sensitive`). `password <new>` is CommonCLI.cpp:256-261 (admin), `set guest.password <new>`
+  // is handleSetCmd at 506-509 (guest); the first echoes what it stored, `password now: …`.
+  const bool admin = job.passwordField == PasswordField::Admin;
+  const char* what = admin ? "cli 'password <new>'" : "cli 'set guest.password <new>'";
+  std::snprintf(g_secretLine, sizeof g_secretLine, "%s%s", admin ? "password " : "set guest.password ",
+                job.credential.newPassword);
+  const Outcome sent = cliLine(job, ctx, what, g_secretLine, false, 0, true);
+  wipeBytes(g_secretLine, sizeof g_secretLine);
+
+  // What the reply means, decided while the reply is still here and before the restore's own
+  // reply overwrites it. The echo is compared with what was sent and never recorded: the result
+  // says `password now: <set>`, and the reply buffer is wiped once the comparison is made.
+  bool confirmed = false;
+  char recorded[kMaxCliReplyLen + 1] = {0};
+  bool hasRecorded = false;
+  if (sent == Outcome::Ok) {
+    trimInPlace(g_cliReply);
+    hasRecorded = true;
+    if (admin) {
+      const char* echo = "password now: ";
+      const size_t echoLen = std::strlen(echo);
+      if (std::strncmp(g_cliReply, echo, echoLen) == 0) {
+        confirmed = std::strcmp(g_cliReply + echoLen, job.credential.newPassword) == 0;
+        std::snprintf(recorded, sizeof recorded, "%s",
+                      confirmed ? kPasswordSetAdminReplyRedacted : "password now: <a different value>");
+        g_log.add(confirmed ? "the repeater confirmed the new admin password"
+                            : "the repeater stored a different admin password from the one sent (it may have cut it): not "
+                              "confirmed");
+      } else {
+        std::snprintf(recorded, sizeof recorded, "%s", g_cliReply);
+        g_log.add("the repeater answered 'password <new>' with: %s", g_cliReply);
+      }
+    } else {
+      confirmed = cliReplyIsConfirmed(g_cliReply);
+      std::snprintf(recorded, sizeof recorded, "%s", g_cliReply);
+      g_log.add("the repeater %s 'set guest.password <new>': %s", confirmed ? "confirmed" : "refused", g_cliReply);
+    }
+  } else if (sent == Outcome::Unreachable) {
+    g_log.add("no reply to '%s' - the password may or may not have changed; not sent again", what);
+  }
+  wipeBytes(g_cliReply, sizeof g_cliReply);
+
+  // The restore **after** the password line, on the same session (task p4.1-60 as built): the
+  // login table is the ACL, which a new password does not touch, so the entry can still be put
+  // back - and before the line it could not, because the entry *is* the session and a demoted
+  // session is not answered a CLI line. Only then is the cached session dropped, whatever came
+  // back: it was opened with a password that may no longer be valid, and a later job on it would
+  // be a login the server did not decide.
+  restoreAcl(job, ctx, sent);
+  sessions_.invalidate(job.repeaterKey);
+  ctx.hasSession = false;
+  g_log.add("the session is dropped: it was opened with a password that may no longer be valid");
+
+  const bool wasSent = sent == Outcome::Ok || sent == Outcome::Unreachable;
+  dataLen = writePasswordSetResult(field, confirmed, wasSent, hasRecorded ? recorded : nullptr, g_data, kDataCap);
+  if (dataLen == 0) return Outcome::Failed;
+  if (sent == Outcome::Ok) return confirmed ? Outcome::Ok : Outcome::Failed;
+  return sent;
+}
+
+// ------------------------------------------------------------------ reboot (task p4-54)
+
+Outcome JobRunner::runReboot(const ClaimedJob& job, Context& ctx, size_t& dataLen) {
+  const Outcome session = adminSession(job, ctx);
+  if (session != Outcome::Ok) {
+    dataLen = writeRebootResult(false, nullptr, g_data, kDataCap);
+    return session;
+  }
+
+  // The one admin type that cannot end with the restore (task p4.1-60 as built): there is no
+  // session after a reboot to send it on, and it cannot go before the reboot either - on stock
+  // firmware the entry *is* the session, so `setperm <own key> 1` first would leave a read-only
+  // session, and onPeerDataRecv drops a CLI line from anybody below admin without a word. The
+  // entry stays at admin until the next login from this key puts it back.
+  ctx.aclRestoreDone = true;
+  g_log.add("no restore on this session: the repeater is asked to reboot on it, and a restore before the command would "
+            "make the command unanswerable; the next login from this key puts the entry back (task 60)");
+
+  // `reboot` is `_board->reboot()`, which does not return (CommonCLI.cpp:185-186): silence is
+  // the expected answer, and the next status read confirms it by the uptime, on the server.
+  const Outcome sent = cliLine(job, ctx, "cli 'reboot'", "reboot", false);
+  if (sent == Outcome::Unreachable) {
+    sessions_.invalidate(job.repeaterKey);
+    ctx.hasSession = false;
+    g_log.add("reboot sent; the firmware does not answer one, so the next status read confirms it by the uptime");
+    dataLen = writeRebootResult(true, nullptr, g_data, kDataCap);
+    return dataLen > 0 ? Outcome::Ok : Outcome::Failed;
+  }
+  if (sent == Outcome::Ok) {
+    sessions_.invalidate(job.repeaterKey);
+    ctx.hasSession = false;
+    trimInPlace(g_cliReply);
+    const bool hardError = cliReplyIsHardError(g_cliReply);
+    g_log.add(hardError ? "the repeater refused 'reboot': %s" : "reboot sent, and the repeater said something before it went: %s",
+              g_cliReply);
+    dataLen = writeRebootResult(true, g_cliReply, g_data, kDataCap);
+    if (dataLen == 0) return Outcome::Failed;
+    return hardError ? Outcome::Failed : Outcome::Ok;
+  }
+  dataLen = writeRebootResult(false, nullptr, g_data, kDataCap);
+  return sent;
+}
+
 // ------------------------------------------------------------------ the runner
 
 Outcome JobRunner::runJob(const ClaimedJob& job, Context& ctx, size_t& dataLen) {
@@ -953,6 +1278,12 @@ Outcome JobRunner::runJob(const ClaimedJob& job, Context& ctx, size_t& dataLen) 
   if (std::strcmp(job.type, "discover") == 0) return runDiscover(job, ctx, dataLen);
   if (std::strcmp(job.type, "acl.set") == 0) return runAclSet(job, ctx, dataLen);
   if (std::strcmp(job.type, "config.read") == 0) return runConfigRead(job, ctx, dataLen);
+  if (std::strcmp(job.type, "config.apply") == 0) return runConfigApply(job, ctx, dataLen);
+  if (std::strcmp(job.type, "cli") == 0) return runCli(job, ctx, dataLen);
+  if (std::strcmp(job.type, "advert.request") == 0) return runAdvertRequest(job, ctx, dataLen);
+  if (std::strcmp(job.type, "clock.sync") == 0) return runClockSync(job, ctx, dataLen);
+  if (std::strcmp(job.type, "password.set") == 0) return runPasswordSet(job, ctx, dataLen);
+  if (std::strcmp(job.type, "reboot") == 0) return runReboot(job, ctx, dataLen);
   return Outcome::Unsupported;
 }
 
@@ -1036,13 +1367,23 @@ int JobRunner::claimAndRun() {
 
     Context ctx;
     ctx.job = &job;
+    if (job.credentialCandidate[0] != '\0') {
+      // The material is one of the two candidates of an unverified credential (task p4-55), and
+      // the server reads this job's outcome as the verdict on it: a session another job opened
+      // with another password would make that verdict a lie, so this job logs in afresh
+      // whatever the cache holds.
+      sessions_.invalidate(job.repeaterKey);
+      g_log.add("the claim carries the %s candidate of an unverified credential: logging in afresh with it",
+                job.credentialCandidate);
+    }
     size_t dataLen = 0;
     Outcome outcome = runJob(job, ctx, dataLen);
 
     // The session's last command (task p4.1-60): an admin session on a repeater where this exit
     // node holds a grant puts its own entry back to the granted level before the job is over,
-    // whatever the job came to. A config.read has sent it already, for its result's sake; an
-    // acl.set on our own key *is* the level and needs no second one.
+    // whatever the job came to. A config.read has sent it already, for its result's sake; a
+    // password.set has sent it after its password line and dropped the session; a reboot has
+    // said why it sends none; an acl.set on our own key *is* the level and needs no second one.
     if (std::strcmp(job.type, "acl.set") != 0) restoreAcl(job, ctx, outcome);
 
     // The password's job is over. Whatever the outcome, and before anything is posted.

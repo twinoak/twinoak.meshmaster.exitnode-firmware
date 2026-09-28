@@ -402,6 +402,60 @@ TEST(TraceResult, TheWholeRoundTripAndThisBoardsOwnHashAreWhatTheResultCarries) 
             "{\"prefix\":\"a1\",\"snr\":6.5},{\"prefix\":\"ff\",\"snr\":7.5}]}");
 }
 
+// The five small results of the writes (task 05; tasks p4-54, p4-55), each the bytes the
+// ContractsTests sample makes, and the shape of a silence.
+TEST(ControlResults, TheSameInputMakesEachDotNetFixtureByteForByte) {
+  char out[512];
+  size_t len = mm::writeCliResult("neighbors", "a1 42 7.25", out, sizeof out);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ(std::string(out, len), fixture("CliResult"));
+
+  len = mm::writeAdvertRequestResult(true, "OK - Advert sent", out, sizeof out);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ(std::string(out, len), fixture("AdvertRequestResult"));
+
+  len = mm::writeClockSyncResult(at("2026-09-23T14:05:06Z"), true, 87, true, "OK - clock set: 14:05 - 23/9/2026 UTC", out,
+                                 sizeof out);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ(std::string(out, len), fixture("ClockSyncResult"));
+
+  len = mm::writePasswordSetResult("guestPassword", true, true, "OK", out, sizeof out);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ(std::string(out, len), fixture("PasswordSetResult"));
+
+  len = mm::writeRebootResult(true, "rebooting", out, sizeof out);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ(std::string(out, len), fixture("RebootResult"));
+}
+
+TEST(ControlResults, ASilenceLeavesTheReplyOutAndSaysSo) {
+  char out[512];
+  size_t len = mm::writeCliResult("set advert.interval 120", nullptr, out, sizeof out);
+  EXPECT_EQ(std::string(out, len), "{\"command\":\"set advert.interval 120\",\"answered\":false,\"isHardError\":false}");
+  len = mm::writeCliResult("set flood.max 100", "Error, max 64", out, sizeof out);
+  EXPECT_EQ(std::string(out, len),
+            "{\"command\":\"set flood.max 100\",\"reply\":\"Error, max 64\",\"answered\":true,\"isHardError\":true}");
+  len = mm::writeAdvertRequestResult(false, nullptr, out, sizeof out);
+  EXPECT_EQ(std::string(out, len), "{\"confirmed\":false}");
+  // This firmware never reports a drift: the field is left out, as a null long is.
+  len = mm::writeClockSyncResult(at("2026-09-23T14:05:06Z"), false, 0, false, nullptr, out, sizeof out);
+  EXPECT_EQ(std::string(out, len), "{\"setTo\":\"2026-09-23T14:05:06Z\",\"confirmed\":false}");
+  len = mm::writeClockSyncResult(at("2026-09-23T14:05:06Z"), false, 0, false, "(ERR: clock cannot go backwards)", out, sizeof out);
+  EXPECT_EQ(std::string(out, len),
+            "{\"setTo\":\"2026-09-23T14:05:06Z\",\"confirmed\":false,\"reply\":\"(ERR: clock cannot go backwards)\"}");
+  // The admin echo never reaches the result as it came: `password now: <set>`, whose angle
+  // brackets System.Text.Json's default encoder writes as < and > (task 04's writer).
+  len = mm::writePasswordSetResult("adminPassword", true, true, mm::kPasswordSetAdminReplyRedacted, out, sizeof out);
+  EXPECT_EQ(std::string(out, len),
+            "{\"field\":\"adminPassword\",\"confirmed\":true,\"sent\":true,\"reply\":\"password now: \\u003Cset\\u003E\"}");
+  len = mm::writePasswordSetResult("adminPassword", false, true, nullptr, out, sizeof out);
+  EXPECT_EQ(std::string(out, len), "{\"field\":\"adminPassword\",\"confirmed\":false,\"sent\":true}");
+  len = mm::writePasswordSetResult("", false, false, nullptr, out, sizeof out);
+  EXPECT_EQ(std::string(out, len), "{\"field\":\"\",\"confirmed\":false,\"sent\":false}");
+  len = mm::writeRebootResult(true, nullptr, out, sizeof out);
+  EXPECT_EQ(std::string(out, len), "{\"sent\":true}") << "the normal case: the firmware never answers a reboot";
+}
+
 TEST(LoginBelowClassResult, ItSaysWhatWasGrantedAndWhatWasNeeded) {
   char out[128];
   const std::size_t len = mm::writeLoginBelowClassResult("guest", "read-only", out, sizeof out);

@@ -138,8 +138,9 @@ void AgentLoop::buildHeartbeat(Heartbeat& hb) const {
     hb.radio.sf = static_cast<int>(settings_->number(*findKey("radio.sf")));
     hb.radio.cr = static_cast<int>(settings_->number(*findKey("radio.cr")));
   }
-  // The seven this firmware has a handler for: routing requires the type advertised, so this
-  // list is what the server may send and nothing else (task p3-53).
+  // The thirteen this firmware has a handler for - every type of API §3 since task 05: routing
+  // requires the type advertised, so this list is what the server may send and nothing else
+  // (task p3-53).
   hb.hasJobTypes = true;
   hb.jobTypes = kJobTypes;
   hb.jobTypeCount = kJobTypeCount;
