@@ -11,6 +11,8 @@
 //   get <key>                print a setting; a secret prints "set" or "unset"
 //   get                      print every setting, one per line
 //   status                   identity, radio, firmware, WiFi, time, server, heap
+//   mesh                     the adverts heard: how many, and the last five with their names
+//   server                   the heartbeat and the observation batches: last, next, counters
 //   wifi                     scan, and the link's state
 //   reboot
 //   erase confirm            forget every setting (the identity stays); "confirm" is the word
@@ -30,6 +32,8 @@ enum class Verb : unsigned char {
   Get,     // one key
   GetAll,  // every key
   Status,
+  Mesh,    // the adverts heard
+  Server,  // the heartbeat and the observation batches
   Wifi,
   Reboot,
   Erase,   // only ever produced with the confirmation word present

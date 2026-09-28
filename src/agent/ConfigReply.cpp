@@ -100,6 +100,23 @@ bool parseHeartbeatReply(const char* json, size_t len, HeartbeatReply& out, char
   return true;
 }
 
+bool parseObservationsReply(const char* json, size_t len, ObservationsReply& out, char* err, size_t errCap) {
+  JsonDocument doc;
+  if (!parseDocument(json, len, doc, err, errCap)) return false;
+  JsonObjectConst obj = doc.as<JsonObjectConst>();
+
+  ObservationsReply r;
+  if (!takeInt(obj, "accepted", r.accepted, err, errCap)) return false;
+  JsonVariantConst dup = obj["duplicate"];
+  if (dup.isNull() || !dup.is<bool>()) {
+    say(err, errCap, "missing or not a boolean: duplicate");
+    return false;
+  }
+  r.duplicate = dup.as<bool>();
+  out = r;
+  return true;
+}
+
 bool parseAgentConfig(const char* json, size_t len, AgentConfig& out, char* err, size_t errCap) {
   JsonDocument doc;
   if (!parseDocument(json, len, doc, err, errCap)) return false;

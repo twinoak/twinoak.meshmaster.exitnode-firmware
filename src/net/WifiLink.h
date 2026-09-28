@@ -37,6 +37,11 @@ class WifiLink {
   // True once for every new connection - the edge the clock and the server client act on.
   bool takeConnectedEdge();
 
+  // How many links there have been, and how many dropped: the heartbeat's `wifiReconnects` is
+  // one less than the first, which is the number of times this board had to find the net again.
+  uint16_t connects() const { return connects_; }
+  uint16_t drops() const { return drops_; }
+
   // One line for `status`, e.g. "connected Twinoak 192.168.1.20 rssi -61 dBm (1 connect, 0 drops)".
   void describe(char* out, size_t cap) const;
 

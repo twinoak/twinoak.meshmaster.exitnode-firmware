@@ -32,6 +32,8 @@ const char* firmwareString() { return "meshmaster-agent " MESHMASTER_AGENT_VERSI
 
 const char* meshcorePin() { return MESHMASTER_MESHCORE_PIN; }
 
+const char* meshcoreTag() { return MESHMASTER_MESHCORE_TAG; }
+
 const char* boardName() { return MESHMASTER_BOARD; }
 
 }  // namespace mm

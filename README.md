@@ -34,12 +34,14 @@ only inside a container;
 [`tasks/RUNBOOK.md §2`](tasks/RUNBOOK.md) has the one-line `docker run` for it.
 
 The application is `src/`: the serial console and its settings, WiFi and the
-clock, the TLS client, the OLED, and the mesh in companion role — MeshCore's
-core, the Heltec V3 variant and its display driver are compiled from the pinned
-package beside it, and no example of upstream's is built. Four files of `src/`
-are host-portable (the key table, the console parser, the ISO-8601 helper and
-the config-reply parser) and are what the native tests exercise; the rest needs
-a board.
+clock, the TLS client and the agent loop, the OLED, and the mesh in companion
+role — MeshCore's core, the Heltec V3 variant and its display driver are
+compiled from the pinned package beside it, and no example of upstream's is
+built. Nine files of `src/` are host-portable (the key table, the console
+parser, the ISO-8601 helper, the config-reply parser, the envelopes this
+firmware sends, the observation ring, the rate limiter, the policy that reads
+the server's status codes and the version string) and are what the native tests
+exercise; the rest needs a board.
 
 ## Flashing it
 
@@ -85,7 +87,7 @@ frames    rx 3 (advert 2, grp-txt 1, txt 0, ack 0, path 0, trace 0, other 0), tx
 wifi      off, wifi.ssid is unset
 time      no time (sntp not started, no wifi)
 server    not configured (meshmaster.url unset, meshmaster.token unset)
-heap      free 231212, min ever 228004, largest block 110580
+heap      free 203980, min ever 200772, largest block 110580
 log       level info, frames off, oled on
 > set wifi.ssid Twinoak
 ok wifi.ssid
@@ -120,21 +122,83 @@ firmware  meshmaster-agent 0.0.0-dev on MeshCore companion-v1.17.1 (d9296435)
 board     heltec_v3, Power-on reset, up 0d 00:03:10
 identity  7f3a9c02e1b44d9a0f6c2b7d8e9a1c3f5d7b9e0a2c4e6f8a0b1c2d3e4f5a6b7c
 radio     869.618 MHz, bw 62.5 kHz, sf 8, cr 8, tx 22 dBm; companion role, no repeat
-frames    rx 9 (advert 6, grp-txt 3, txt 0, ack 0, path 0, trace 0, other 0), tx 0, noise floor -112 dBm, frame log off
+frames    rx 29 (advert 23, grp-txt 6, txt 0, ack 0, path 0, trace 0, other 0), tx 0, noise floor -112 dBm, frame log off
 wifi      connected to Twinoak, 192.168.1.20, rssi -61 dBm (1 connects, 0 drops)
 time      2026-09-28T12:03:14Z (sntp)
 server    https://meshmaster.dk: config ok at 12:03:14, agent 17 "Window at Grenaa", transport onboard, budget 2/min gap 20 s, poll 30 s, root ISRG Root X1
-heap      free 187432, min ever 180020, largest block 98304; after the tls call 187432
+heartbeat last at 12:03:16, 4 answered, poll 120 s; 20 observation(s) posted, 3 waiting, 0 dropped
+heap      free 160104, min ever 152280, largest block 90112; after the tls call 160104
 log       level info, frames off, oled on
+> mesh
+adverts   23 heard, 3 waiting to be posted (ring 64), 0 dropped, 0 undecodable
+frames    rx 29, tx 0, overheard 6 (counted, never read)
+last five newest first: key, name, role, hops, snr, rssi, heard
+  a1b2c3d4e5f6  Grenaa Chimney #1                repeater   0 hop(s)  snr 7.25  rssi -84  41 s ago
+> server
+state     running
+heartbeat last 12:03:16 (65 s ago), 4 answered; jobs waiting no
+next      in 55 s (poll 120 s, budget 2/min gap 20 s)
+batch     last 12:04:19, 20 item(s); 1 batch(es), 20 observation(s) posted
+pending   3 of 64 in the ring, 0 dropped, 23 heard in all
+errors    overheard 6, wifiReconnects 0, httpFailures 0, observationsDropped 0
+requests  6 in the last minute of the 120 the policy allows, 0 held back; 0 batch(es) refused
 ```
 
 Between the `set` lines and the second `status`, the log on the same port says
-`wifi: connected`, `clock: ... from sntp` and `server: config ok ...` as they
-happen. The value of a secret is typed once, echoes as asterisks, and is
-printed by nothing afterwards; the two `error:` lines are what a wrong value
-gets. Every `set` takes effect at once, so no reboot is part of provisioning.
-The session above is replayed by the native tests against the parser, reply for
-reply.
+`wifi: connected`, `clock: ... from sntp`, `server: config ok ...` and
+`observations: N posted` as they happen. The value of a secret is typed once,
+echoes as asterisks, and is printed by nothing afterwards; the two `error:`
+lines are what a wrong value gets. Every `set` takes effect at once, so no
+reboot is part of provisioning. The session above is replayed by the native
+tests against the parser, reply for reply.
+
+## What you should see on meshmaster.dk
+
+A provisioned board is an ordinary exit node with an extra word. Within one
+poll interval of the first heartbeat, `/exit-nodes` shows the row **online**,
+and where another exit node's transport column says `serial` or `tcp` this one
+says **onboard · Heltec V3** — the transport and the `board` its heartbeat
+reported ([UI §6](https://github.com/twinoak/meshmaster.dk/blob/master/spec/UI.md#6-exit-nodes)).
+
+Its page, `/exit-nodes/{id}`, is filled in from the heartbeat and from nothing
+else:
+
+- **Agent version** the firmware's own (`meshmaster-agent 0.1.0+abc1234`, or
+  `0.0.0-dev` from a local build), **Firmware** the MeshCore release this image
+  is built from (`companion-v1.17.1`) and **Board** `heltec_v3`. On a board
+  the companion firmware *is* the firmware, so the two lines together are the
+  string `status` prints.
+- **Companion key** the board's own identity, the 64 hex characters `status`
+  shows. It is made once from radio noise and kept in SPIFFS, so it survives a
+  reflash and an `erase confirm`; if it ever changes the server flags the exit
+  node and suspends admin routing through it until the owner confirms the new
+  key, which is
+  [EXIT-NODES §10](https://github.com/twinoak/meshmaster.dk/blob/master/spec/EXIT-NODES.md#10-exit-node-lifecycle-and-health)'s
+  *Replace* and is the reason `erase confirm` keeps the identity.
+- **Radio** `869.618 MHz, BW 62.5, SF8, CR8` — the `radio.*` settings, read
+  from the board and not from the registration form. A radio that differs from
+  the `network.radio` setting raises the page's warning, which is the point of
+  reporting it.
+- **Job types** empty, and **queue depth** 0: this milestone claims nothing, so
+  the routing procedure admits this exit node for no job and hands it none. A
+  heartbeat reply may still say jobs are waiting — that is a job some other
+  exit node will take, and the log says so once.
+- **Error counters** `overheard` (frames of the mesh's own chat this board
+  discarded unread — a large number is a busy public channel, not a fault),
+  `wifiReconnects`, `httpFailures` and `observationsDropped` (adverts the RAM
+  ring had to drop because the server or WiFi was away).
+
+And **Unknown nodes** fills up. Every advert the radio hears becomes one
+observation — the public key, the path and hop count it arrived by, the SNR and
+RSSI, and the name, position and role the advert carried — posted in batches of
+twenty, or every sixty seconds if fewer have come in. A key the register
+already knows teaches that (exit node, repeater) pair a path; a key it does not
+appears under `/unknown-nodes` with the hops it was heard at, ready to be
+adopted. At a window this starts within a few minutes.
+
+What the page will *not* show is anything the mesh said: a message is counted
+under `overheard` and dropped unread, and **`tx 0`** on the console is the
+other half of it — nothing this firmware does puts a packet on the air.
 
 ## Keeping up with MeshCore
 

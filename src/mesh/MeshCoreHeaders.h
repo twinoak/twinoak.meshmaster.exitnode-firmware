@@ -20,6 +20,7 @@
 
 #include <Mesh.h>
 #include <MeshCore.h>
+#include <helpers/AdvertDataHelpers.h>
 #include <helpers/ArduinoHelpers.h>
 #include <helpers/IdentityStore.h>
 #include <helpers/SimpleMeshTables.h>
