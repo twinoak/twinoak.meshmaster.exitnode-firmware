@@ -63,7 +63,10 @@ jobs:
         if: inputs.pin_tag != ''
         run: |
           set -euo pipefail
-          sha=$(git ls-remote --tags "$UPSTREAM" "refs/tags/${PIN_TAG}^{}" "refs/tags/${PIN_TAG}" | head -1 | cut -f1)
+          # The peeled ref first: for an annotated tag refs/tags/X is the tag object and
+          # refs/tags/X^{} is the commit, and a pin has to be a commit.
+          sha=$(git ls-remote --tags "$UPSTREAM" "refs/tags/${PIN_TAG}^{}" | cut -f1)
+          if [ -z "$sha" ]; then sha=$(git ls-remote --tags "$UPSTREAM" "refs/tags/${PIN_TAG}" | cut -f1); fi
           test -n "$sha"
           base="upstream/rehearsal-base-${PIN_TAG}"
           git checkout -B "$base"
