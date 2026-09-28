@@ -22,14 +22,15 @@ only thing that can go wrong is that our own code no longer compiles against
 theirs, which is exactly the thing CI can tell us by itself.
 
 The price is that a consumer of the package does not get everything a checkout
-of MeshCore's own tree gets, and three things had to be arranged by hand. They
+of MeshCore's own tree gets, and four things had to be arranged by hand. They
 are the places a bump re-reads:
 
 | What | Where | Why |
 |---|---|---|
-| the flag block | `platformio.ini`, `[esp32_base]` and `[env:heltec_v3]` | MeshCore's `[arduino_base]`, `[esp32_base]`, `[sensor_base]` and `variants/heltec_v3/platformio.ini` use paths relative to its own root, so they cannot be included from here; they are copied |
+| the flag block | `platformio.ini`, `[esp32_base]`, `[env:heltec_v3]` and `[env:heltec_v4]` | MeshCore's `[arduino_base]`, `[esp32_base]`, `[sensor_base]` and `variants/heltec_v3/platformio.ini` and `variants/heltec_v4/platformio.ini` use paths relative to its own root, so they cannot be included from here; they are copied |
 | the library versions | `platformio.ini`, `[libs]` | pinned exactly, where upstream uses ranges |
 | `lib/ed25519` | `tools/pio/meshcore_private_libs.py` | MeshCore keeps it as a *private* library of its project, which a package consumer does not get; the sources are compiled straight out of the pinned checkout and the include path is a `-I` in `platformio.ini` |
+| `boards/heltec_v4.json` | `boards/` here, unedited (`boards/README.md`) | PlatformIO reads `boards_dir` before it clones a dependency, so a `board =` cannot name a file inside one. The V3 needs none - its board is PlatformIO's own `esp32-s3-devkitc-1`. A bump re-copies this file and `diff`s it |
 
 Everything else — `src/`, `variants/` — the package gives us, and
 `build_as_lib.py` in MeshCore's own tree is what selects from it (our

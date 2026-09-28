@@ -7,6 +7,8 @@
 #include <cstdio>
 #include <cstring>
 
+#include "Backoff.h"
+#include "Health.h"
 #include "Iso8601.h"
 #include "Log.h"
 #include "version.h"
@@ -96,6 +98,12 @@ void AgentLoop::loop() {
     doHeartbeat();
     return;
   }
+  // The offline buffer before anything new: what waited is posted first, in order, with the
+  // timestamps and the client ids it was made with (EXIT-NODES §5).
+  if (jobs_->queueDepth() > 0) {
+    doPendingResults();
+    return;
+  }
   // A claim before the batch: the server said work was waiting, and a job on the air is what
   // this exit node is for. One claim per heartbeat that said so.
   if (claimDue_) {
@@ -172,22 +180,47 @@ ServerAction AgentLoop::noteFailure(const AgentClient::Call& call) {
       LOG_W("server: http %d; this request will not get better by being sent again", call.httpStatus);
       break;
     case ServerAction::BackOff:
-    default:
+    default: {
       counters_.httpFailures++;
+      counters_.consecutiveFailures++;
       backoffMs_ = nextBackoffMs(backoffMs_);
-      holdUntil_ = millis() + backoffMs_;
-      LOG_I("server: next attempt in %lu s", static_cast<unsigned long>(backoffMs_ / 1000));
+      // The sequence is 30 s, 60 s, 120 s ... ten minutes; what is waited is that plus or minus
+      // a quarter, so two boards that lost the server together drift apart (src/Backoff.h).
+      const uint32_t wait = withJitter(backoffMs_, esp_random());
+      holdUntil_ = millis() + wait;
+      LOG_I("server: next attempt in %lu s (the %lu s step, jittered)", static_cast<unsigned long>(wait / 1000),
+            static_cast<unsigned long>(backoffMs_ / 1000));
+      // A link that is up and a server that has not answered for an hour and a half is a stack
+      // that is wedged, not a server that is busy: the board restarts itself, having said why.
+      if (counters_.consecutiveFailures >= kRebootAfterFailures && wifi_ != nullptr && wifi_->connected()) {
+        char why[kMaxRebootWhyLen + 1];
+        std::snprintf(why, sizeof why, "%lu server calls in a row got no answer, with wifi up",
+                      static_cast<unsigned long>(counters_.consecutiveFailures));
+        healthRebootNow(why);
+      }
       break;
+    }
   }
   return action;
 }
 
 void AgentLoop::succeeded() {
   backoffMs_ = 0;
+  counters_.consecutiveFailures = 0;
   holdUntil_ = millis();
 }
 
+void AgentLoop::heartbeatIfOverdue() {
+  if (halted_ || inHeartbeat_ || server_ == nullptr || !server_->configured() || !heartbeatScheduled_) return;
+  if (wifi_ == nullptr || !wifi_->connected()) return;
+  const uint32_t now = millis();
+  if (!elapsed(now, holdUntil_) || !elapsed(now, nextHeartbeatAt_)) return;
+  LOG_D("server: the heartbeat is due inside a job; sending it from the job's own wait");
+  doHeartbeat();
+}
+
 void AgentLoop::doHeartbeat() {
+  inHeartbeat_ = true;
   Heartbeat hb;
   buildHeartbeat(hb);
   const ErrorCounter errors[] = {
@@ -195,12 +228,18 @@ void AgentLoop::doHeartbeat() {
       {"wifiReconnects", counters_.wifiReconnects},
       {"httpFailures", counters_.httpFailures},
       {"observationsDropped", ring_.dropped()},
+      // Task 06's two: what the RAM buffers had to throw away while the server was gone, and
+      // how many times this board restarted itself to clear a wedged stack (src/Health.h). The
+      // reboot count is in RTC memory, so it survives the restart it counts.
+      {"resultsDropped", jobs_->resultsDropped()},
+      {"reboots", selfReboots()},
   };
   hb.errors = errors;
   hb.errorCount = static_cast<int>(sizeof errors / sizeof errors[0]);
 
   HeartbeatReply reply;
   const bool ok = server_->postHeartbeat(hb, reply);
+  inHeartbeat_ = false;
   // Whatever happened, the next one is due an interval from now: a failure backs off on top.
   nextHeartbeatAt_ = millis() + static_cast<uint32_t>(pollIntervalS_) * 1000u;
   if (!ok) {
@@ -233,6 +272,22 @@ void AgentLoop::doHeartbeat() {
         reply.serverTime, reply.budget.maxTransactionsPerMinute, reply.budget.minGapSeconds, reply.pollIntervalS,
         reply.jobsWaiting ? "yes" : "no");
   succeeded();
+}
+
+void AgentLoop::doPendingResults() {
+  const int before = jobs_->queueDepth();
+  jobs_->flushResults();
+  const int after = jobs_->queueDepth();
+  if (after < before) {
+    counters_.resultsPosted += static_cast<uint32_t>(before - after);
+    LOG_I("jobs: %d result(s) that waited went through; %d still waiting", before - after, after);
+  }
+  if (after == 0) {
+    succeeded();
+    return;
+  }
+  // Still there: the same backoff the heartbeat uses, so the buffer is not hammered.
+  noteFailure(server_->lastCall());
 }
 
 uint32_t AgentLoop::epochOf(uint32_t heardAtMillis, uint32_t nowMs) const {
@@ -406,12 +461,49 @@ void AgentLoop::report(Stream& out) const {
   out.printf("jobs      %lu claim(s), %lu job(s) run, %lu claim(s) unanswered; `jobs` prints the last ten\r\n",
              static_cast<unsigned long>(jobs_->claims()), static_cast<unsigned long>(jobs_->ran()),
              static_cast<unsigned long>(counters_.claimFailures));
-  out.printf("errors    overheard %lu, wifiReconnects %lu, httpFailures %lu, observationsDropped %lu\r\n",
+  out.printf("errors    overheard %lu, wifiReconnects %lu, httpFailures %lu, observationsDropped %lu, "
+             "resultsDropped %lu, reboots %lu; `errors` has the rest\r\n",
              static_cast<unsigned long>(mesh_->overheard()), static_cast<unsigned long>(counters_.wifiReconnects),
-             static_cast<unsigned long>(counters_.httpFailures), static_cast<unsigned long>(ring_.dropped()));
+             static_cast<unsigned long>(counters_.httpFailures), static_cast<unsigned long>(ring_.dropped()),
+             static_cast<unsigned long>(jobs_->resultsDropped()), static_cast<unsigned long>(selfReboots()));
   out.printf("requests  %u in the last minute of the 120 the policy allows, %lu held back; %lu batch(es) refused\r\n",
              static_cast<unsigned>(server_->limiter().inWindow(now)), static_cast<unsigned long>(server_->limiter().held()),
              static_cast<unsigned long>(counters_.observationsRefused));
+}
+
+void AgentLoop::reportErrors(Stream& out) const {
+  // The six the heartbeat carries, first and by their wire names, so that a figure on the exit
+  // node's page can be found here without a translation.
+  out.println("heartbeat the six counters the heartbeat reports, by the names the server shows");
+  out.printf("  overheard            %lu  (mesh messages counted and dropped unread - a busy channel, not a fault)\r\n",
+             static_cast<unsigned long>(mesh_->overheard()));
+  out.printf("  wifiReconnects       %lu  (%u link(s) in all, %u drop(s))\r\n",
+             static_cast<unsigned long>(counters_.wifiReconnects), static_cast<unsigned>(wifi_->connects()),
+             static_cast<unsigned>(wifi_->drops()));
+  out.printf("  httpFailures         %lu  (%lu in a row now; %lu reboot(s) away from restarting)\r\n",
+             static_cast<unsigned long>(counters_.httpFailures),
+             static_cast<unsigned long>(counters_.consecutiveFailures),
+             static_cast<unsigned long>(counters_.consecutiveFailures >= kRebootAfterFailures
+                                            ? 0
+                                            : kRebootAfterFailures - counters_.consecutiveFailures));
+  out.printf("  observationsDropped  %lu  (adverts the ring overwrote; %u of %u waiting, %lu heard in all)\r\n",
+             static_cast<unsigned long>(ring_.dropped()), static_cast<unsigned>(ring_.size()),
+             static_cast<unsigned>(ObservationRing::kCapacity), static_cast<unsigned long>(ring_.heard()));
+  out.printf("  resultsDropped       %lu  (job results the buffer overwrote; %d waiting, %lu posted late)\r\n",
+             static_cast<unsigned long>(jobs_->resultsDropped()), jobs_->queueDepth(),
+             static_cast<unsigned long>(counters_.resultsPosted));
+  out.printf("  reboots              %lu  (restarts this firmware asked for; `reboots` says why)\r\n",
+             static_cast<unsigned long>(selfReboots()));
+  out.println("beside    counters the server does not get, for a person at the port");
+  out.printf("  claims unanswered    %lu\r\n", static_cast<unsigned long>(counters_.claimFailures));
+  out.printf("  results not taken    %lu  (at the first attempt)\r\n",
+             static_cast<unsigned long>(jobs_->postFailures()));
+  out.printf("  batches refused      %lu  (the server would not have them, ever)\r\n",
+             static_cast<unsigned long>(counters_.observationsRefused));
+  out.printf("  observations posted  %lu in %lu batch(es)\r\n",
+             static_cast<unsigned long>(counters_.observationsPosted), static_cast<unsigned long>(counters_.batches));
+  out.printf("  heartbeats answered  %lu\r\n", static_cast<unsigned long>(counters_.heartbeats));
+  out.printf("  undecodable adverts  %lu\r\n", static_cast<unsigned long>(mesh_->counters().advertsDropped));
 }
 
 void AgentLoop::describe(char* out, size_t cap) const {
@@ -434,6 +526,17 @@ void AgentLoop::describe(char* out, size_t cap) const {
 void AgentLoop::oledLine(char* out, size_t cap) const {
   if (halted_) {
     std::snprintf(out, cap, "token revoked/wrong");
+    return;
+  }
+  // Which of the two is missing, in one word each, because that is the question somebody
+  // standing at the window is asking (task 06). Line one already has the WiFi's own detail.
+  if (wifi_ != nullptr && !wifi_->connected() && server_->configured()) {
+    std::snprintf(out, cap, "no wifi: no server");
+    return;
+  }
+  if (counters_.consecutiveFailures > 0 && server_->configured()) {
+    const int32_t left = static_cast<int32_t>(holdUntil_ - millis());
+    std::snprintf(out, cap, "no server: retry %lus", static_cast<unsigned long>(left > 0 ? left / 1000 : 0));
     return;
   }
   if (!everHeartbeated_) {

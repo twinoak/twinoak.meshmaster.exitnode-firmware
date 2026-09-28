@@ -29,7 +29,9 @@ ServerAction actionFor(bool reachable, int httpStatus);
 uint32_t retryAfterMs(uint32_t retryAfterS);
 
 // The wait a failure earns: half a minute, doubling, never more than ten minutes. 0 in means
-// "the first failure since the last answer".
+// "the first failure since the last answer". This is the sequence, without jitter; what the loop
+// actually waits is this through `withJitter` (src/Backoff.h), so a hundred boards that lost the
+// same server do not come back at the same second (task 06).
 uint32_t nextBackoffMs(uint32_t previousMs);
 
 constexpr uint32_t kFirstBackoffMs = 30000;

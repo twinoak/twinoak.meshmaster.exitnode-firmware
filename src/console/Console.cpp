@@ -79,6 +79,9 @@ void Console::help() {
   io_->println("  server              the heartbeat and the observation batches, and the counters");
   io_->println("  jobs                the last ten jobs claimed: outcome, transactions, when");
   io_->println("  sessions            the repeater logins held: class, level, age (never a secret)");
+  io_->println("  errors              every counter the heartbeat carries, and the ones beside it");
+  io_->println("  reboots             why this board last restarted, and the four before that");
+  io_->println("  dump                the last 4 kB of the log, oldest first");
   io_->println("  wifi                scan for networks and show the link");
   io_->println("  reboot");
   io_->printf("  erase %s       forget every setting; the identity stays\r\n", kEraseWord);
@@ -148,6 +151,15 @@ void Console::runLine() {
       return;
     case Verb::Sessions:
       if (host_.sessions) host_.sessions(*io_);
+      return;
+    case Verb::Errors:
+      if (host_.errors) host_.errors(*io_);
+      return;
+    case Verb::Reboots:
+      if (host_.reboots) host_.reboots(*io_);
+      return;
+    case Verb::Dump:
+      if (host_.dump) host_.dump(*io_);
       return;
     case Verb::Wifi:
       if (host_.wifi) host_.wifi(*io_);

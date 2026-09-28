@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "LogRing.h"
 #include "agent/Iso8601.h"
 
 namespace mm {
@@ -63,13 +64,22 @@ void logf(LogLevel level, const char* fmt, ...) {
     std::snprintf(stamp, sizeof stamp, "+%lus", static_cast<unsigned long>(millis() / 1000));
   }
 
-  char line[240];
+  // Static, not automatic: this is called from inside a job's exchange and the Arduino loop task
+  // has 8 KB of stack. There is one task on this board - the loop - so there is one caller.
+  static char line[240];
+  static char full[288];
   va_list args;
   va_start(args, fmt);
   std::vsnprintf(line, sizeof line, fmt, args);
   va_end(args);
 
-  Serial.printf("[%s] %c %s\r\n", stamp, levelLetter(level), line);
+  const int n = std::snprintf(full, sizeof full, "[%s] %c %s\r\n", stamp, levelLetter(level), line);
+  const size_t len = n < 0 ? 0 : (static_cast<size_t>(n) < sizeof full ? static_cast<size_t>(n) : sizeof full - 1);
+  Serial.print(full);
+  // And the same bytes into the ring `dump` prints (LogRing.h): whatever redaction the line has
+  // had, it has had before this point - a line that could carry a secret here would already have
+  // carried it to the port.
+  logRing().add(full, len);
 }
 
 }  // namespace mm

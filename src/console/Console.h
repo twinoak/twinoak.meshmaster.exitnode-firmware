@@ -25,6 +25,9 @@ struct ConsoleHost {
   void (*server)(Stream& out);
   void (*jobs)(Stream& out);
   void (*sessions)(Stream& out);
+  void (*errors)(Stream& out);
+  void (*reboots)(Stream& out);
+  void (*dump)(Stream& out);
   void (*wifi)(Stream& out);
   void (*reboot)();
   void (*settingChanged)(const KeyDef& key);  // after a successful `set`, so it takes effect live

@@ -115,7 +115,7 @@ jobs:
       fail-fast: false
       matrix:
         # The same list as ci.yml. Adding a board is one line in both.
-        env: [heltec_v3]
+        env: [heltec_v3, heltec_v4]
     steps:
       - uses: actions/checkout@v4
         with:

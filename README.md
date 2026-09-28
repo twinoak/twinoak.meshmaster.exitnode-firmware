@@ -25,9 +25,18 @@ and nothing else — MeshCore comes as a pinned dependency and the toolchain
 downloads itself on the first build.
 
 ```bash
-pio run -e heltec_v3     # the board
+pio run -e heltec_v3     # the first board
+pio run -e heltec_v4     # the second: same firmware, MeshCore's V4 variant
 pio test -e native       # the tests that need no board
 ```
+
+The V4's board definition is the one thing of MeshCore's that is copied into
+this repository — PlatformIO reads `boards_dir` before it clones a dependency,
+so `board = heltec_v4` cannot name a file inside one
+([`boards/README.md`](boards/README.md)). A V4 out of the box transmits at
+**10 dBm**, not the V3's 22: its external PA is on for every transmission and
+upstream's own note says 10 at the chip is 22 dBm at the socket. The range
+`radio.tx` accepts is the same on both.
 
 On Windows `pio test -e native` needs a C++ compiler the machine usually has
 only inside a container;
@@ -37,15 +46,18 @@ The application is `src/`: the serial console and its settings, WiFi and the
 clock, the TLS client and the agent loop, the OLED, and the mesh in companion
 role — MeshCore's core, the Heltec V3 variant and its display driver are
 compiled from the pinned package beside it, and no example of upstream's is
-built. Nine files of `src/` are host-portable (the key table, the console
+built. The files of `src/` that are host-portable (the key table, the console
 parser, the ISO-8601 helper, the config-reply parser, the envelopes this
-firmware sends, the observation ring, the rate limiter, the policy that reads
-the server's status codes and the version string) and are what the native tests
+firmware sends, the job envelopes and results, the credential buffer, the
+config read, the apply engine and the CLI reply rules, the airtime budget, the
+session cache, the observation ring, the offline result buffer, the log ring,
+the rate limiter, the backoff, the reply codec, the policy that reads the
+server's status codes and the version string) are what the native tests
 exercise; the rest needs a board.
 
 ## Flashing it
 
-From a build on this machine, with the board on USB:
+From a build on this machine, with the board on USB (`-e heltec_v4` for a V4):
 
 ```bash
 pio run -e heltec_v3 -t upload            # add --upload-port COM5 if there is more than one port
@@ -68,7 +80,10 @@ workflow* on `release.yml` rehearses it and publishes nothing.
 
 Flashing does not touch the settings (NVS) or the identity (SPIFFS), so a board
 keeps its WiFi, its token and its key across updates. `erase confirm` on the
-console forgets the settings; the identity stays even then.
+console forgets the settings; the identity stays even then. What a reflash
+does lose is what was in RAM: results and observations this board had not
+posted yet, and the reboot log `reboots` prints
+([`docs/field.md`](docs/field.md)).
 
 ## Provisioning it
 
@@ -142,15 +157,21 @@ next      in 55 s (poll 120 s, budget 2/min gap 20 s)
 batch     last 12:04:19, 20 item(s); 1 batch(es), 20 observation(s) posted
 pending   3 of 64 in the ring, 0 dropped, 23 heard in all
 jobs      1 claim(s), 2 job(s) run, 0 claim(s) unanswered; `jobs` prints the last ten
-errors    overheard 6, wifiReconnects 0, httpFailures 0, observationsDropped 0
+errors    overheard 6, wifiReconnects 0, httpFailures 0, observationsDropped 0, resultsDropped 0, reboots 0; `errors` has the rest
 requests  8 in the last minute of the 120 the policy allows, 0 held back; 0 batch(es) refused
 > jobs
 budget    2/min, gap 20 s; 3 transaction(s) sent, 20 s waited for the budget
 claims    1 made, 2 job(s) run, 0 result(s) not taken first time
+buffer    0 result(s) waiting of 8, 0 of 12288 bytes; 0 dropped, 2 held in all
 types     status, telemetry, neighbours, config.read, config.apply, cli, trace, discover, advert.request, clock.sync, password.set, acl.set, reboot
 last ten  newest first: id, type, outcome, transactions, when
   12346    telemetry   ok            1 tx  12:05:11
   12345    status      ok            2 tx  12:04:48
+> reboots
+this boot Power-on reset, up 0d 00:05:41; watchdog 90 s on the loop task
+counted   0 restart(s) since the last power cut, 0 of them this firmware's own
+log       empty: the RTC memory did not survive, which is what a power cut looks like
+last five none remembered
 ```
 
 Between the `set` lines and the second `status`, the log on the same port says
@@ -166,8 +187,8 @@ tests against the parser, reply for reply.
 A provisioned board is an ordinary exit node with an extra word. Within one
 poll interval of the first heartbeat, `/exit-nodes` shows the row **online**,
 and where another exit node's transport column says `serial` or `tcp` this one
-says **onboard · Heltec V3** — the transport and the `board` its heartbeat
-reported ([UI §6](https://github.com/twinoak/meshmaster.dk/blob/master/spec/UI.md#6-exit-nodes)).
+says **onboard · Heltec V3** (or **Heltec V4**) — the transport and the `board`
+its heartbeat reported ([UI §6](https://github.com/twinoak/meshmaster.dk/blob/master/spec/UI.md#6-exit-nodes)).
 
 Its page, `/exit-nodes/{id}`, is filled in from the heartbeat and from nothing
 else:
@@ -206,8 +227,13 @@ else:
   terminator sent even when the sequence dies (`src/agent/ConfigApply.h`).
 - **Error counters** `overheard` (frames of the mesh's own chat this board
   discarded unread — a large number is a busy public channel, not a fault),
-  `wifiReconnects`, `httpFailures` and `observationsDropped` (adverts the RAM
-  ring had to drop because the server or WiFi was away).
+  `wifiReconnects`, `httpFailures`, `observationsDropped` (adverts the RAM
+  ring had to drop because the server or WiFi was away), `resultsDropped` (the
+  same for job results) and `reboots` (restarts this firmware asked for
+  itself, because the server had been unreachable against a live WiFi link for
+  an hour and a half). `errors` on the console prints all six with the
+  counters that never leave the board beside them, and `reboots` says why each
+  restart happened.
 
 And **Unknown nodes** fills up. Every advert the radio hears becomes one
 observation — the public key, the path and hop count it arrived by, the SNR and
@@ -254,7 +280,7 @@ that boots to an exit node that stays up, run unattended by
 | 03 | [the-read-jobs](tasks/phase-1/03-the-read-jobs.md) | status, telemetry, neighbours, trace |
 | 04 | [logins-and-the-config-read](tasks/phase-1/04-logins-and-the-config-read.md) | discover, acl.set, config.read; passwords in RAM only |
 | 05 | [the-writes](tasks/phase-1/05-the-writes.md) | config.apply, cli, advert.request, clock.sync, password.set, reboot |
-| 06 | [a-node-that-stays-up](tasks/phase-1/06-a-node-that-stays-up.md) | watchdog, reconnect, buffering, the field runbook, the Heltec V4 |
+| 06 | [a-node-that-stays-up](tasks/phase-1/06-a-node-that-stays-up.md) | watchdog, reconnect, buffering, [the field runbook](docs/field.md), the Heltec V4 |
 
 ## What a session can and cannot check
 
@@ -278,8 +304,9 @@ reading.
   another greps the modules it passes through for the NVS and file APIs); the
   serial log redacts as the .NET agent does, and `log.frames on` prints a login
   that carries a password, and a `password` line and its echo, with their
-  bodies as `*`. Flash encryption is documented as the owner's choice, not
-  assumed.
+  bodies as `*` (`src/agent/Credentials.h`). `dump` prints the log ring, which
+  holds the bytes the port already printed and no others. Flash encryption is
+  documented as the owner's choice, not assumed.
 - **Nothing the mesh says is logged as text.** Overheard channel and contact
   messages are counted and dropped, never printed; an advert's name is read on
   demand with `mesh` and never logged. `log.frames on` prints the bytes of a
@@ -288,6 +315,14 @@ reading.
   do.
 - **One send per command.** A `set` sent twice is a change made twice: single
   send, strictly increasing sender timestamps, the region loader's terminator.
+- **It stays up, and says why when it did not.** A task watchdog on the loop
+  that is also the network, a deliberate restart when the server has been
+  unreachable against a live link for an hour and a half, and the last five
+  reasons in RTC memory for `reboots` to print (`src/Health.h`). What the
+  server was away for is buffered in RAM — bounded, oldest dropped, counted,
+  and posted late with the bytes it was written with — and a job whose lease
+  ran out while it waited is not put on the air at all. Every bound and the
+  backoff's own sequence have a native test (`test/test_buffers`).
 - **The contract is the .NET agent's.** Every envelope is checked against
   `MeshMaster.Contracts`' fixtures, copied byte for byte into
   [`tests/fixtures/contracts/`](tests/fixtures/contracts/README.md), and every

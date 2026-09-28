@@ -250,10 +250,18 @@ TEST(Lines, TheArgumentlessVerbsParseWithATerminalsLineEnding) {
   EXPECT_EQ(Verb::Server, parseLine("server\r\n").command.verb);
   EXPECT_EQ(Verb::Jobs, parseLine("  jobs ").command.verb);
   EXPECT_EQ(Verb::Sessions, parseLine("sessions\r\n").command.verb);
+  // Task 06's three: the counters, why the board restarted, and the log ring.
+  EXPECT_EQ(Verb::Errors, parseLine("errors\r\n").command.verb);
+  EXPECT_EQ(Verb::Reboots, parseLine("  reboots  ").command.verb);
+  EXPECT_EQ(Verb::Dump, parseLine("dump\n").command.verb);
+  // `reboots` is not `reboot`, and typing one must never do the other.
+  EXPECT_EQ(Verb::Reboot, parseLine("reboot").command.verb);
+  EXPECT_EQ(Verb::Reboots, parseLine("reboots").command.verb);
 
   // Each of them takes no argument, and says so by name rather than "unknown command".
-  const char* const withAnArgument[] = {"help x", "status x", "mesh x",   "server x",
-                                        "jobs x", "sessions x", "wifi x", "reboot x"};
+  const char* const withAnArgument[] = {"help x",    "status x",  "mesh x",  "server x",  "jobs x",
+                                        "sessions x", "errors x", "reboots x", "dump x",  "wifi x",
+                                        "reboot x"};
   for (const char* line : withAnArgument) {
     const ParseResult r = parseLine(line);
     EXPECT_FALSE(r.ok) << line;

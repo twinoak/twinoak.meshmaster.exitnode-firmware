@@ -135,6 +135,19 @@ bool canRun(const ClaimedJob& job, char* why, size_t whyCap);
 // they are for is the session cache's own answer to the same question.
 bool sharesLogin(const ClaimedJob& a, const ClaimedJob& b);
 
+// Whether the lease this job was claimed under has run out (task 06). A claim's jobs are run one
+// at a time and a job is minutes of airtime, so a server that went away under a claim - or a
+// board that spent an hour on the one before - can reach a job the server has long since given
+// back to the queue. Such a job is **not run**: nothing goes on the air for a lease somebody
+// else may now hold, and the result is reported as `timeout` at no transaction. The result is
+// still posted, late if it must be: the server takes a late result and de-duplicates on the
+// client id (EXIT-NODES §5).
+//
+// `hasTime` is false while the board's clock is unset, and then no lease has run out: a board
+// with no clock cannot tell, and refusing every job would be worse than running one late.
+// `leaseUntil` of 0 is a claim that named no lease.
+bool leaseLapsed(uint32_t leaseUntil, bool hasTime, uint32_t nowEpoch);
+
 // POST /agent/v1/jobs/claim's body: `{"max":N}`.
 size_t writeClaimRequest(int max, char* out, size_t cap);
 

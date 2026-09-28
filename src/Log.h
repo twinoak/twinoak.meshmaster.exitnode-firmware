@@ -8,7 +8,9 @@
 //   - no secret is ever an argument: the token and the passphrase are read from NVS into the
 //     call that needs them and into nothing that is printed. There is no redactor here because
 //     there is nothing to redact - the .NET agent redacts its log against secrets it holds as
-//     strings; this firmware never holds one as a printable thing.
+//     strings; this firmware never holds one as a printable thing;
+//   - every line also goes into the four-kilobyte ring `dump` prints (LogRing.h), which is a
+//     board's answer to the Pi agent's journal: the same bytes the port carried, and no others.
 
 #pragma once
 
