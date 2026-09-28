@@ -298,6 +298,58 @@ bool AgentClient::postObservations(const char* requestBody, size_t len, int& acc
   return true;
 }
 
+bool AgentClient::claimJobs(ClaimedJob* jobs, int max, int& count) {
+  count = 0;
+  char request[32];
+  const size_t requestLen = writeClaimRequest(max, request, sizeof request);
+
+  // Two jobs with a label, a path and an idempotency key is about a kilobyte; this is room for
+  // the claim the server may hand over and no more, and a longer one is cut and reported.
+  static char body[3072];
+  size_t bodyLen = 0;
+  Call c;
+  if (!call("POST", "/agent/v1/jobs/claim", request, requestLen, body, sizeof body, bodyLen, c)) {
+    LOG_W("server: claim: no reply: %s", c.error);
+    return false;
+  }
+  if (!c.ok) {
+    LOG_W("server: claim: http %d", c.httpStatus);
+    if (bodyLen > 0) LOG_D("server: body (%u bytes): %.200s", static_cast<unsigned>(bodyLen), body);
+    return false;
+  }
+  uint32_t serverTime = 0;
+  char err[80];
+  if (!parseClaimResponse(body, bodyLen, jobs, max, count, serverTime, err, sizeof err)) {
+    lastCall_.ok = false;
+    std::snprintf(lastCall_.error, sizeof lastCall_.error, "http 200 but the claim did not parse: %s", err);
+    LOG_E("server: claim: %s", lastCall_.error);
+    return false;
+  }
+  int32_t difference = 0;
+  clock_->takeServerTime(serverTime, difference);
+  return true;
+}
+
+bool AgentClient::postJobResult(long long jobId, const char* requestBody, size_t len) {
+  char endpoint[48];
+  std::snprintf(endpoint, sizeof endpoint, "/agent/v1/jobs/%lld/result", jobId);
+
+  static char body[256];
+  size_t bodyLen = 0;
+  Call c;
+  if (!call("POST", endpoint, requestBody, len, body, sizeof body, bodyLen, c)) {
+    LOG_W("server: result for job %lld: no reply: %s", jobId, c.error);
+    return false;
+  }
+  if (!c.ok) {
+    LOG_W("server: result for job %lld: http %d", jobId, c.httpStatus);
+    if (bodyLen > 0) LOG_D("server: body (%u bytes): %.200s", static_cast<unsigned>(bodyLen), body);
+    return false;
+  }
+  LOG_D("server: result for job %lld taken: %.200s", jobId, body);
+  return true;
+}
+
 void AgentClient::describe(char* out, size_t cap) const {
   if (!configured()) {
     std::snprintf(out, cap, "not configured (%s%s%s)", url_[0] == '\0' ? "meshmaster.url unset" : "",

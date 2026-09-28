@@ -122,16 +122,17 @@ firmware  meshmaster-agent 0.0.0-dev on MeshCore companion-v1.17.1 (d9296435)
 board     heltec_v3, Power-on reset, up 0d 00:03:10
 identity  7f3a9c02e1b44d9a0f6c2b7d8e9a1c3f5d7b9e0a2c4e6f8a0b1c2d3e4f5a6b7c
 radio     869.618 MHz, bw 62.5 kHz, sf 8, cr 8, tx 22 dBm; companion role, no repeat
-frames    rx 29 (advert 23, grp-txt 6, txt 0, ack 0, path 0, trace 0, other 0), tx 0, noise floor -112 dBm, frame log off
+frames    rx 32 (advert 23, grp-txt 6, txt 0, ack 0, path 0, trace 0, other 3), tx 3, noise floor -112 dBm, frame log off
 wifi      connected to Twinoak, 192.168.1.20, rssi -61 dBm (1 connects, 0 drops)
 time      2026-09-28T12:03:14Z (sntp)
 server    https://meshmaster.dk: config ok at 12:03:14, agent 17 "Window at Grenaa", transport onboard, budget 2/min gap 20 s, poll 30 s, root ISRG Root X1
 heartbeat last at 12:03:16, 4 answered, poll 120 s; 20 observation(s) posted, 3 waiting, 0 dropped
+jobs      2 run, 3 transaction(s); last job 12346 telemetry ok after 1 tx
 heap      free 160104, min ever 152280, largest block 90112; after the tls call 160104
 log       level info, frames off, oled on
 > mesh
 adverts   23 heard, 3 waiting to be posted (ring 64), 0 dropped, 0 undecodable
-frames    rx 29, tx 0, overheard 6 (counted, never read)
+frames    rx 32, tx 3, overheard 6 (counted, never read)
 last five newest first: key, name, role, hops, snr, rssi, heard
   a1b2c3d4e5f6  Grenaa Chimney #1                repeater   0 hop(s)  snr 7.25  rssi -84  41 s ago
 > server
@@ -140,8 +141,16 @@ heartbeat last 12:03:16 (65 s ago), 4 answered; jobs waiting no
 next      in 55 s (poll 120 s, budget 2/min gap 20 s)
 batch     last 12:04:19, 20 item(s); 1 batch(es), 20 observation(s) posted
 pending   3 of 64 in the ring, 0 dropped, 23 heard in all
+jobs      1 claim(s), 2 job(s) run, 0 claim(s) unanswered; `jobs` prints the last ten
 errors    overheard 6, wifiReconnects 0, httpFailures 0, observationsDropped 0
-requests  6 in the last minute of the 120 the policy allows, 0 held back; 0 batch(es) refused
+requests  8 in the last minute of the 120 the policy allows, 0 held back; 0 batch(es) refused
+> jobs
+budget    2/min, gap 20 s; 3 transaction(s) sent, 20 s waited for the budget
+claims    1 made, 2 job(s) run, 0 result(s) not taken first time
+types     status, telemetry, neighbours, trace
+last ten  newest first: id, type, outcome, transactions, when
+  12346    telemetry   ok            1 tx  12:05:11
+  12345    status      ok            2 tx  12:04:48
 ```
 
 Between the `set` lines and the second `status`, the log on the same port says
@@ -179,10 +188,12 @@ else:
   from the board and not from the registration form. A radio that differs from
   the `network.radio` setting raises the page's warning, which is the point of
   reporting it.
-- **Job types** empty, and **queue depth** 0: this milestone claims nothing, so
-  the routing procedure admits this exit node for no job and hands it none. A
-  heartbeat reply may still say jobs are waiting — that is a job some other
-  exit node will take, and the log says so once.
+- **Job types** `status`, `telemetry`, `neighbours`, `trace` — the four this
+  firmware has a handler for — and **queue depth** 0. Routing requires the type
+  advertised, so the server sends these and nothing else; a job of any other
+  type, or one whose credential class needs a password, is answered
+  `unsupported` at no transaction, because a password login is a later task's
+  and this board logs in as itself or not at all.
 - **Error counters** `overheard` (frames of the mesh's own chat this board
   discarded unread — a large number is a busy public channel, not a fault),
   `wifiReconnects`, `httpFailures` and `observationsDropped` (adverts the RAM
@@ -196,9 +207,18 @@ already knows teaches that (exit node, repeater) pair a path; a key it does not
 appears under `/unknown-nodes` with the hops it was heard at, ready to be
 adopted. At a window this starts within a few minutes.
 
+And the jobs get answered. A repeater associated with this exit node, on its
+schedule or on a press of **Read now**, produces a claim of up to two jobs; each
+is one login and one request or two, paced by the budget the heartbeat carried,
+and its reading is on the repeater's page within a poll interval. The job's row
+shows the outcome, the transaction count, the path used and the round trip, and
+its `log` is the same text the console printed.
+
 What the page will *not* show is anything the mesh said: a message is counted
-under `overheard` and dropped unread, and **`tx 0`** on the console is the
-other half of it — nothing this firmware does puts a packet on the air.
+under `overheard` and dropped unread. The console's **`tx`** is the other half
+of it — it counts one packet per transaction and nothing else, so `jobs` and
+`status` have to agree, and a `tx` larger than the transactions `jobs` counted
+is the bug this rail exists to catch.
 
 ## Keeping up with MeshCore
 
@@ -248,13 +268,18 @@ reading.
   .NET agent does. Flash encryption is documented as the owner's choice, not
   assumed.
 - **Nothing the mesh says is logged as text.** Overheard channel and contact
-  messages are counted and dropped, never printed. `MESH_PACKET_LOGGING` and
-  `MESH_DEBUG` stay off, whatever upstream's examples do.
+  messages are counted and dropped, never printed; an advert's name is read on
+  demand with `mesh` and never logged. `log.frames on` prints the bytes of a
+  job's own frames — the login, the request, the reply — and of nothing else.
+  `MESH_PACKET_LOGGING` and `MESH_DEBUG` stay off, whatever upstream's examples
+  do.
 - **One send per command.** A `set` sent twice is a change made twice: single
   send, strictly increasing sender timestamps, the region loader's terminator.
 - **The contract is the .NET agent's.** Every envelope is checked against
   `MeshMaster.Contracts`' fixtures, copied byte for byte into
-  [`tests/fixtures/contracts/`](tests/fixtures/contracts/README.md), and a
+  [`tests/fixtures/contracts/`](tests/fixtures/contracts/README.md), and every
+  reply a repeater sends is read from the transcribed frames of
+  [`tests/fixtures/companion/`](tests/fixtures/companion/README.md). A
   difference is a bug in the firmware, not a second dialect.
 
 ## Licence

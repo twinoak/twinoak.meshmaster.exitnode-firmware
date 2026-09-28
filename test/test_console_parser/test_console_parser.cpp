@@ -246,6 +246,17 @@ TEST(Lines, TheArgumentlessVerbsParseWithATerminalsLineEnding) {
   EXPECT_EQ(Verb::Wifi, parseLine("  wifi  ").command.verb);
   EXPECT_EQ(Verb::Reboot, parseLine("reboot\n").command.verb);
   EXPECT_EQ(Verb::GetAll, parseLine("get").command.verb);
+  EXPECT_EQ(Verb::Mesh, parseLine("mesh").command.verb);
+  EXPECT_EQ(Verb::Server, parseLine("server\r\n").command.verb);
+  EXPECT_EQ(Verb::Jobs, parseLine("  jobs ").command.verb);
+
+  // Each of them takes no argument, and says so by name rather than "unknown command".
+  const char* const withAnArgument[] = {"help x", "status x", "mesh x", "server x", "jobs x", "wifi x", "reboot x"};
+  for (const char* line : withAnArgument) {
+    const ParseResult r = parseLine(line);
+    EXPECT_FALSE(r.ok) << line;
+    EXPECT_NE(std::string(r.error).find("takes no argument"), std::string::npos) << line << " said: " << r.error;
+  }
 }
 
 TEST(Lines, EraseNeedsItsConfirmationWord) {

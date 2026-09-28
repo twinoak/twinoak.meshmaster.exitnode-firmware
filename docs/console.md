@@ -21,7 +21,8 @@ test, so it is the session the console accepts, line for line.
 | `get` | print every setting, one per line, in the order of the table below; an unset key shows its fallback in brackets |
 | `status` | firmware, board and reset reason, the public key, the radio and its frame counters, WiFi, time and where it came from, the server's last answer, the heartbeat, the heap |
 | `mesh` | the adverts heard: how many, how many are waiting to be posted and how many the ring dropped, and the last five with their names, roles, hops, SNR and RSSI |
-| `server` | the exit node's loop: the last heartbeat and the next, the last observation batch, and the four counters the heartbeat itself carries |
+| `server` | the exit node's loop: the last heartbeat and the next, the last observation batch, the job counters, and the four error counters the heartbeat itself carries |
+| `jobs` | the airtime budget in force and what it has spent, how many claims were made, and the last ten jobs with their outcome, their transaction count and when they ended |
 | `wifi` | a blocking scan (a few seconds): every network with channel, RSSI and security, then the link's state |
 | `reboot` | restart |
 | `erase confirm` | forget every setting. The identity is not a setting and stays, so the exit node keeps its key on meshmaster.dk. Without the word, `erase` refuses and says what the word is |
@@ -44,7 +45,7 @@ that is not `https://`, a line over 200 characters, a control character.
 | `radio.cr` | 5..8 | 8 |
 | `radio.tx` | dBm, -9..22 | 22 |
 | `log.level` | `error`, `warn`, `info`, `debug` | `info` |
-| `log.frames` | `on`, `off`: one log line per received frame - payload type, route, hops, length, SNR, RSSI - and never a payload byte | `off` |
+| `log.frames` | `on`, `off`: one log line per frame, both directions. A frame of a job in flight - the login, the request, the reply, a trace - is printed as hex, header, path and payload; an advert and the mesh's own chat are the header line only, never their bytes | `off` |
 
 The radio's fallbacks are the Danish MeshCore channel, the one the field
 repeaters run; the ranges are MeshCore's own. A `set` takes effect at once:
@@ -94,10 +95,23 @@ the name, which is read on demand with `mesh`:
 [12:03:41] D advert: a1b2c3d4, repeater, hops 0, snr 7.25; 3 waiting to be posted
 ```
 
+A job is one line per step, and the same text goes to the server as the job's
+`log`:
+
+```
+[12:31:02] I jobs: 2 claimed
+[12:31:02] I jobs: job 12345 status for repeater 17 "Risskov Water Tower" (acl)
+[12:31:07] I jobs: job 12345: ok after 2 transaction(s)
+[12:31:27] I jobs: job 12346 telemetry for repeater 17 "Risskov Water Tower" (acl)
+[12:31:31] I jobs: job 12346: ok after 1 transaction(s)
+```
+
 What it never prints: the passphrase, the token (not in a reply, not in a log
-line, not in `status`), and anything the mesh says - frames are counted by type
-and dropped, and `log.frames on` prints a header line per frame with no payload
-byte in it.
+line, not in `status`), a repeater's password (this firmware holds none: its
+login carries the board's own key and nothing else), and anything the mesh
+*says* - an advert's name is read on demand with `mesh` and never logged, the
+mesh's own chat is counted by type and dropped unread, and `log.frames on`
+prints the bytes of a job's own frames and of nothing else.
 
 ## The OLED
 
@@ -145,9 +159,19 @@ with `token revoked/wrong`, and it stays there until the token is set again.
 6. The loop: `server` shows the last heartbeat, when the next is due, the poll
    interval the server answered (30 s or 120 s) and the counters. The exit
    node's page on meshmaster.dk goes *online* within one interval.
-7. The air: `mesh` after some minutes at a window shows adverts heard and the
-   last five with their names; `observations: N posted` follows in the log, and
-   the keys turn up under **Unknown nodes** on the server. `status` still shows
-   **`tx 0`** - this firmware sends nothing on the radio.
-8. Leave it: `status` after an hour shows frames received and `tx 0`, and the
-   heap figure has not moved.
+7. The air, still passive: `mesh` after some minutes at a window shows adverts
+   heard and the last five with their names; `observations: N posted` follows
+   in the log, and the keys turn up under **Unknown nodes** on the server. With
+   no repeater associated to this exit node, `status` still shows **`tx 0`**.
+8. The jobs. Associate a repeater with the board's key on meshmaster.dk (the
+   wizard, as with the Pi), then press **Read now** on its page. Within a poll
+   interval the log shows `jobs: 2 claimed` and a line per job; `jobs` on the
+   console shows them with their outcome and their transaction count, and the
+   repeater's page shows the reading. `status`'s `tx` is now the number of
+   transactions and nothing more: **one packet per transaction** is the rail,
+   and `jobs` is where the arithmetic is checked.
+9. `neighbours` and `trace` from the repeater's **Monitoring** tab: the first
+   costs one request per nine neighbours, the second none at all if no path is
+   known yet (`unreachable`, and the log says *run discover first*).
+10. Leave it: `status` after an hour shows frames received, a `tx` that matches
+    the transactions `jobs` counted, and a heap figure that has not moved.
