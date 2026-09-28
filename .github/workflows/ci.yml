@@ -1,6 +1,7 @@
 # Every pull request and every push to master, once per commit.
 #
-#   build (heltec_v3)   pio run -e heltec_v3, and the .bin as an artifact
+#   build (per board)   pio run -e <board> for every board of the matrix, and the .bin as an
+#                       artifact. heltec_v3 and heltec_v4 since task p1-06
 #   native tests        pio test -e native (the host tests: no board, no radio)
 #   fixtures            tools/sync-fixtures.ps1 -Verify - the contract fixtures and the
 #                       transcribed companion frames are still meshmaster.dk's bytes and nobody
@@ -42,7 +43,7 @@ jobs:
       fail-fast: false
       matrix:
         # One line per board. release.yml builds the same list.
-        env: [heltec_v3]
+        env: [heltec_v3, heltec_v4]
     steps:
       - uses: actions/checkout@v4
 

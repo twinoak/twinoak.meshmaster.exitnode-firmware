@@ -8,6 +8,15 @@
 // Since task 03 a heartbeat that answers `jobsWaiting` is followed by a claim: up to two jobs,
 // run one at a time at the budget's pace, each result posted as its job ends (JobRunner.h).
 //
+// Since task 06 the order inside one pass is the .NET agent's, in its own words
+// (docs/ops/agent.md §4): the heartbeat, then **the offline buffer** - anything that waited is
+// posted first, in order, with the timestamps it was made with - then the claim, then the
+// observation batch. And the wait after a failure carries jitter (src/Backoff.h), so a hundred
+// boards that lost the same server do not all come back at the same second; past
+// `kRebootAfterFailures` consecutive unanswered calls **with the WiFi link up**, the board
+// restarts itself and says why (src/Health.h), because a TLS stack that has failed for an hour
+// and a half against a live link is not going to recover by being asked again.
+//
 // What the server's answers do here:
 //   200   the budget, the poll interval and the clock are taken, and `jobsWaiting` makes a claim
 //         due before the next heartbeat
@@ -49,6 +58,8 @@ class AgentLoop {
     uint32_t observationsPosted = 0;
     uint32_t observationsRefused = 0;  // a batch the server refused for good, and the ring dropped
     uint32_t claimFailures = 0;        // a claim that did not come back
+    uint32_t resultsPosted = 0;        // results that went through from the offline buffer, late
+    uint32_t consecutiveFailures = 0;  // calls that got no answer since the last one that did
   };
 
   void begin(SettingsStore& settings, AgentClient& server, AgentClock& clock, WifiLink& wifi, AgentMesh& mesh,
@@ -58,6 +69,16 @@ class AgentLoop {
   void setIdentity(const char* publicKeyHex);
 
   void loop();
+
+  // One heartbeat, from inside a job (task 06). A claim is run to the end before `claimAndRun`
+  // returns and a job is paced by the airtime budget, so a config.read of twenty transactions at
+  // two a minute is ten minutes and a region load is thirteen - during which, before this, no
+  // heartbeat could go and the exit node's page went *quiet* and then *offline* while the board
+  // was working perfectly (the note tasks 03, 04 and 05 each left for this one). The job's own
+  // waits are where the time is, so the pump that keeps the console and the OLED alive through
+  // them sends the heartbeat that is due as well. Nothing else of the loop runs there: no claim,
+  // no batch, one blocking call inside a wait that was going to be spent waiting.
+  void heartbeatIfOverdue();
 
   // A new WiFi link: the config call is due again, and the heartbeat schedule starts over.
   void onWifiUp();
@@ -72,6 +93,9 @@ class AgentLoop {
   // `server` on the console: the last heartbeat, the next, the last batch, the counters.
   void report(Stream& out) const;
 
+  // `errors` on the console: every counter the heartbeat carries, and the ones beside them.
+  void reportErrors(Stream& out) const;
+
   // One line for `status`.
   void describe(char* out, size_t cap) const;
 
@@ -81,6 +105,7 @@ class AgentLoop {
  private:
   void doConfig();
   void doHeartbeat();
+  void doPendingResults();
   void doObservations();
   void doJobs();
   void buildHeartbeat(Heartbeat& hb) const;
@@ -102,6 +127,7 @@ class AgentLoop {
   const char* publicKey_ = nullptr;
 
   bool halted_ = false;         // a 401: nothing but the console from here
+  bool inHeartbeat_ = false;    // a heartbeat is on the wire: the job pump may not start another
   bool configDue_ = false;
   uint32_t configAt_ = 0;
   bool heartbeatScheduled_ = false;

@@ -2,10 +2,12 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <esp_system.h>
 
 #include <cstdio>
 #include <cstring>
 
+#include "Backoff.h"
 #include "Log.h"
 
 namespace mm {
@@ -78,12 +80,16 @@ void WifiLink::startAttempt() {
 }
 
 void WifiLink::scheduleRetry() {
-  backoffMs_ = backoffMs_ == 0 ? kFirstBackoffMs : backoffMs_ * 2;
-  if (backoffMs_ > kMaxBackoffMs) backoffMs_ = kMaxBackoffMs;
-  nextAttemptAt_ = millis() + backoffMs_;
+  // The sequence is the one the server loop backs off with (src/Backoff.h) at this link's own
+  // numbers, and the wait carries jitter: after a power cut every board in the house wakes at
+  // the same second, and a router that is still booting refuses them all together.
+  backoffMs_ = nextBackoffMs(backoffMs_, kFirstBackoffMs, kMaxBackoffMs);
+  waitMs_ = withJitter(backoffMs_, esp_random());
+  nextAttemptAt_ = millis() + waitMs_;
   state_ = State::Waiting;
   WiFi.disconnect(false, false);
-  LOG_W("wifi: not connected, next attempt in %lu s", static_cast<unsigned long>(backoffMs_ / 1000));
+  LOG_W("wifi: not connected, next attempt in %lu s (the %lu s step, jittered)",
+        static_cast<unsigned long>(waitMs_ / 1000), static_cast<unsigned long>(backoffMs_ / 1000));
 }
 
 void WifiLink::loop() {
@@ -155,7 +161,7 @@ void WifiLink::oledLine(char* out, size_t cap) const {
     case State::Off: std::snprintf(out, cap, "wifi: no ssid"); return;
     case State::Connecting: std::snprintf(out, cap, "wifi: connecting"); return;
     case State::Connected: std::snprintf(out, cap, "wifi %s", WiFi.localIP().toString().c_str()); return;
-    case State::Waiting: std::snprintf(out, cap, "wifi: retry %lus", static_cast<unsigned long>(backoffMs_ / 1000)); return;
+    case State::Waiting: std::snprintf(out, cap, "wifi: retry %lus", static_cast<unsigned long>(waitMs_ / 1000)); return;
   }
 }
 

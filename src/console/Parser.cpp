@@ -85,6 +85,18 @@ ParseResult parseLine(const char* line) {
     if (hasRest) return refuse("sessions takes no argument");
     return accept(Verb::Sessions);
   }
+  if (std::strcmp(verb, "errors") == 0) {
+    if (hasRest) return refuse("errors takes no argument");
+    return accept(Verb::Errors);
+  }
+  if (std::strcmp(verb, "reboots") == 0) {
+    if (hasRest) return refuse("reboots takes no argument");
+    return accept(Verb::Reboots);
+  }
+  if (std::strcmp(verb, "dump") == 0) {
+    if (hasRest) return refuse("dump takes no argument");
+    return accept(Verb::Dump);
+  }
   if (std::strcmp(verb, "wifi") == 0) {
     if (hasRest) return refuse("wifi takes no argument");
     return accept(Verb::Wifi);

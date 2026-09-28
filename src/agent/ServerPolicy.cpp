@@ -1,5 +1,7 @@
 #include "ServerPolicy.h"
 
+#include "Backoff.h"
+
 namespace mm {
 
 ServerAction actionFor(bool reachable, int httpStatus) {
@@ -27,9 +29,9 @@ uint32_t retryAfterMs(uint32_t retryAfterS) {
 }
 
 uint32_t nextBackoffMs(uint32_t previousMs) {
-  if (previousMs == 0) return kFirstBackoffMs;
-  const uint32_t doubled = previousMs >= kMaxBackoffMs ? kMaxBackoffMs : previousMs * 2;
-  return doubled > kMaxBackoffMs ? kMaxBackoffMs : doubled;
+  // The sequence is the one both backoffs of this firmware share (src/Backoff.h); what is
+  // waited is this number through withJitter(), so two boards that failed together drift apart.
+  return nextBackoffMs(previousMs, kFirstBackoffMs, kMaxBackoffMs);
 }
 
 }  // namespace mm

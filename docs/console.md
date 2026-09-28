@@ -24,8 +24,11 @@ test, so it is the session the console accepts, line for line.
 | `server` | the exit node's loop: the last heartbeat and the next, the last observation batch, the job counters, and the four error counters the heartbeat itself carries |
 | `jobs` | the airtime budget in force and what it has spent, how many claims were made, the thirteen job types this firmware advertises, and the last ten jobs with their outcome, their transaction count and when they ended |
 | `sessions` | the repeater logins the board holds: per repeater the first twelve characters of its key, the class the session serves, the level the repeater granted and its age. A session is a key, a class, a role byte and a time; no secret is in one, and none is printed |
+| `errors` | every counter the heartbeat carries, under the name the exit node's page shows it by, with what it means and the figures beside it that never leave the board |
+| `reboots` | why this board is running: this boot's reset reason, how many restarts there have been since the last power cut, and the last five with their reason, the time and the uptime they happened at. The log is in RTC memory, so it survives a watchdog reset and a `reboot`, and a power cut clears it |
+| `dump` | the last 4 kB of the log, oldest first, whole lines only — a board's answer to the Pi agent's journal. The same bytes the port printed and no others |
 | `wifi` | a blocking scan (a few seconds): every network with channel, RSSI and security, then the link's state |
-| `reboot` | restart |
+| `reboot` | restart; the reason is noted so that `reboots` after it says *asked for on the console* |
 | `erase confirm` | forget every setting. The identity is not a setting and stays, so the exit node keeps its key on meshmaster.dk. Without the word, `erase` refuses and says what the word is |
 
 A refusal is one line starting with `error:` and names what was wrong:
@@ -156,11 +159,19 @@ Line one is `wifi: no ssid`, `wifi: connecting`, `wifi: retry 20s` or the
 address; line two is `no time` until the clock is set; line four is the
 identity's first eight hex characters.
 
-Line three is the exit node's state. Until a heartbeat has been answered it is
-the config call's - `no server set`, `server: waiting`, `config ok HH:MM:SS`,
-`http <status>` or `tls/net failed`; after that it is the heartbeat and the
-adverts, `hb HH:MM` and a middle dot and the count. A refused token replaces it
-with `token revoked/wrong`, and it stays there until the token is set again.
+Line three is the exit node's state, and when something is missing it says
+**which of the two** it is: `no wifi: no server` while the link is down (line
+one has the link's own detail), `no server: retry 45s` while the link is up and
+meshmaster.dk is not answering, counting down to the next attempt. Otherwise:
+until a heartbeat has been answered it is the config call's - `no server set`,
+`server: waiting`, `config ok HH:MM:SS`, `http <status>` or `tls/net failed`;
+after that it is the heartbeat and the adverts, `hb HH:MM` and a middle dot and
+the count. A refused token replaces it with `token revoked/wrong`, and it stays
+there until the token is set again.
+
+The radio keeps running and hearing through all of it: the mesh is pumped by
+the same loop, the adverts go into the ring, and they are posted when the
+server comes back.
 
 ## The bench walk
 
@@ -250,3 +261,14 @@ with `token revoked/wrong`, and it stays there until the token is set again.
     two hex bytes and then stars. `jobs` counts **3** through an acl pair: the
     login, the password line, the restore. The next admin job logs in with the
     new password.
+18. Staying up (task 06). Pull the router's uplink for ten minutes with a job
+    in flight: the log backs off (`server: next attempt in 30 s (the 30 s
+    step, jittered)`, then 60, 120 …), the OLED's third line says
+    `no server: retry Ns`, `mesh` keeps counting adverts, and `jobs` shows the
+    result waiting under `buffer`. Plug it back in: `jobs: N result(s) that
+    waited went through` and the job's row on the server fills in, late and
+    complete. Pull the *WiFi* instead and the third line says `no wifi: no
+    server`. Then `errors` (every counter, and how many failures from a
+    restart), `reboots` (`Power-on reset` and an empty log on a board that has
+    just been plugged in), and `dump` (the last 4 kB of exactly what the port
+    printed - no secret can be in it that was not on the terminal already).

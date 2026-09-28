@@ -17,7 +17,10 @@
 //               cache, the job runner, and the loop that drives them
 //   mesh/       the mesh in companion role: hears adverts, forwards nothing, and speaks a job
 //   ui/         the OLED's four lines
-//   Log.h       what the serial port prints besides the console's replies
+//   Log.h       what the serial port prints besides the console's replies, and the 4 kB ring
+//               `dump` prints it back out of (LogRing.h)
+//   Health.h    the task watchdog, the deliberate reboot on a wedged stack, and why this board
+//               last restarted - kept in RTC memory, printed by `reboots` (task 06)
 
 #include <Arduino.h>
 #include <SPIFFS.h>
@@ -26,7 +29,9 @@
 #include <cstdio>
 #include <cstring>
 
+#include "Health.h"
 #include "Log.h"
+#include "LogRing.h"
 #include "mesh/MeshCoreHeaders.h"
 #include "agent/AgentClient.h"
 #include "agent/AgentLoop.h"
@@ -230,16 +235,79 @@ void printJobs(Stream& out) { jobs.report(out); }
 // session is a key, a class, a role byte and a time; no secret is in one.
 void printSessions(Stream& out) { jobs.reportSessions(out); }
 
+// `errors`: every counter the heartbeat carries, by the name the server shows it under, and the
+// ones beside them that only a person at the port ever sees.
+void printErrors(Stream& out) { agent.reportErrors(out); }
+
+// `reboots`: why this board restarted, the last five, from RTC memory - which a power cut clears
+// and a watchdog reset does not (src/Health.h).
+void printReboots(Stream& out) {
+  char uptime[32];
+  formatUptime(uptime, sizeof uptime);
+  out.printf("this boot %s, up %s; watchdog %lu s on the loop task\r\n", mm::bootReason(), uptime,
+             static_cast<unsigned long>(mm::kWatchdogSeconds));
+  out.printf("counted   %lu restart(s) since the last power cut, %lu of them this firmware's own\r\n",
+             static_cast<unsigned long>(mm::rebootsSeen()), static_cast<unsigned long>(mm::selfReboots()));
+  if (!mm::rtcLogSurvived()) {
+    out.println("log       empty: the RTC memory did not survive, which is what a power cut looks like");
+  }
+  if (mm::rebootCount() == 0) {
+    out.println("last five none remembered");
+    return;
+  }
+  out.println("last five newest first: when, uptime at the time, why");
+  char when[24];
+  for (int i = 0; i < mm::rebootCount(); i++) {
+    const mm::RebootRecord& r = mm::rebootAt(i);
+    if (r.atEpoch != 0) {
+      mm::formatClock(r.atEpoch, when, sizeof when);
+    } else {
+      std::snprintf(when, sizeof when, "no clock");
+    }
+    out.printf("  %-10s after %lud %02lu:%02lu:%02lu  %s\r\n", when,
+               static_cast<unsigned long>(r.uptimeS / 86400), static_cast<unsigned long>((r.uptimeS / 3600) % 24),
+               static_cast<unsigned long>((r.uptimeS / 60) % 60), static_cast<unsigned long>(r.uptimeS % 60), r.why);
+  }
+}
+
+// `dump`: the last 4 kB of the log, oldest first, whole lines only. The same bytes the port
+// carried, which is the whole of the redaction - a line that could carry a secret here would
+// already have carried it to a terminal (src/LogRing.h).
+void dumpSink(void* ctx, const char* text, size_t len) {
+  Stream* out = static_cast<Stream*>(ctx);
+  out->write(reinterpret_cast<const uint8_t*>(text), len);
+}
+
+void printDump(Stream& out) {
+  const mm::LogRing& ring = mm::logRing();
+  out.printf("log       %u of %u bytes, %lu line(s) written, %lu overwritten\r\n",
+             static_cast<unsigned>(ring.size()), static_cast<unsigned>(mm::LogRing::kCapacity),
+             static_cast<unsigned long>(ring.lines()), static_cast<unsigned long>(ring.dropped()));
+  if (ring.empty()) {
+    out.println("---- nothing logged yet ----");
+    return;
+  }
+  out.println("---- the log, oldest first ----");
+  ring.forEachChunk(&out, &dumpSink);
+  out.println("---- end ----");
+}
+
 // A job's exchange blocks: a transaction is a send and up to sixteen seconds of waiting, and the
 // budget's gap is twenty more. The console and the OLED are pumped through all of it, so a board
 // running a job is still a board a person can type at; the mesh is pumped by the runner itself.
 void pumpDuringAJob() {
   rtc_clock.tick();
+  mm::healthTick();  // a thirteen-minute region load must not look like a wedged board
   console.loop();
   oled.loop();
+  // And the heartbeat that fell due while the job was waiting for the budget (task 06): a claim
+  // is run to the end before the loop gets its turn back, and a board that is working hard is
+  // not a board the server should be marking *quiet*.
+  agent.heartbeatIfOverdue();
 }
 
 void doReboot() {
+  mm::healthNoteReboot("asked for on the console");
   delay(100);
   board.reboot();
 }
@@ -298,6 +366,10 @@ void setup() {
   LOG_I("%s", mm::firmwareString());
   LOG_I("board: %s, %s", mm::boardName(), board.getResetReasonString(board.getResetReason()));
 
+  // The watchdog, and the reason this board is starting again (src/Health.h). Early, because
+  // everything after it can be the thing that has to be survived.
+  mm::healthBegin(&clockForLog, board.getResetReasonString(board.getResetReason()));
+
   display_ok = display.begin();
   if (display_ok) {
     oled.begin(&display, &user_btn, &fillOled);
@@ -326,13 +398,15 @@ void setup() {
   agent.setIdentity(public_key_hex[0] != 0 ? public_key_hex : nullptr);
   if (!server.configured()) LOG_I("server: not configured; set meshmaster.url and meshmaster.token");
 
-  mm::ConsoleHost host = {&printStatus, &printMesh, &printServer,      &printJobs, &printSessions,
-                          &printWifi,   &doReboot,  &onSettingChanged, &onErased};
+  mm::ConsoleHost host = {&printStatus,  &printMesh,    &printServer, &printJobs,
+                          &printSessions, &printErrors,  &printReboots, &printDump,
+                          &printWifi,     &doReboot,     &onSettingChanged, &onErased};
   console.begin(Serial, settings, host);
   board.onBootComplete();
 }
 
 void loop() {
+  mm::healthTick();
   if (radio_ok) the_mesh.loop();
   rtc_clock.tick();
   wifi.loop();

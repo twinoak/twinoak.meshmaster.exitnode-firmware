@@ -121,6 +121,11 @@ bool sharesLogin(const ClaimedJob& a, const ClaimedJob& b) {
   return false;
 }
 
+bool leaseLapsed(uint32_t leaseUntil, bool hasTime, uint32_t nowEpoch) {
+  if (leaseUntil == 0 || !hasTime) return false;
+  return nowEpoch >= leaseUntil;
+}
+
 size_t writeClaimRequest(int max, char* out, size_t cap) {
   JsonWriter w(out, cap);
   w.beginObject();

@@ -9,6 +9,18 @@
 
 namespace mm {
 
+// The transmit power a board starts at, which is the one setting whose fallback is the board's
+// and not the channel's. A Heltec V3 drives its antenna from the SX1262 alone, so its 22 dBm is
+// 22 dBm at the socket; a Heltec V4 has an external PA that is on for every transmission
+// (MeshCore's variants/heltec_v4/LoRaFEMControl.cpp, setTxModeEnable), and upstream's own note
+// beside `LORA_TX_POWER=10` in variants/heltec_v4/platformio.ini reads "if it is configured as
+// 10 here, the final output will be 22 dbm". So the V4 environment defines this as 10 and a
+// board out of the box is legal on both. The *range* is the same on both - MeshCore's own
+// -9..MAX_LORA_TX_POWER, and MAX_LORA_TX_POWER is 22 for each - so only the fallback moves.
+#ifndef MESHMASTER_TX_DBM_DEFAULT
+#define MESHMASTER_TX_DBM_DEFAULT "22"
+#endif
+
 // The Danish MeshCore channel is the fallback for the radio: 869.618 MHz, 62.5 kHz, SF 8, CR 8,
 // which is what the field repeaters run and what the heartbeat fixture carries
 // (tests/fixtures/contracts/AgentHeartbeat.json). The bench sets them like it sets a repeater's.
@@ -23,7 +35,7 @@ const KeyDef kKeys[kKeyCount] = {
     {"radio.bw", "radio_bw", ValueKind::Float, "62.5", 7.8f, 500.0f, 0, 0, "kHz"},
     {"radio.sf", "radio_sf", ValueKind::Int, "8", 5, 12, 0, 0, "spreading factor, 5..12"},
     {"radio.cr", "radio_cr", ValueKind::Int, "8", 5, 8, 0, 0, "coding rate, 5..8"},
-    {"radio.tx", "radio_tx", ValueKind::Int, "22", -9, 22, 0, 0, "transmit power in dBm, -9..22"},
+    {"radio.tx", "radio_tx", ValueKind::Int, MESHMASTER_TX_DBM_DEFAULT, -9, 22, 0, 0, "transmit power in dBm, -9..22"},
     {"log.level", "log_level", ValueKind::Level, "info", 0, 0, 0, 0, "error | warn | info | debug"},
     {"log.frames", "log_frames", ValueKind::OnOff, "off", 0, 0, 0, 0, "on | off: one line per received frame, header only, never the payload"},
 };

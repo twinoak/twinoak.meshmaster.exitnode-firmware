@@ -15,6 +15,9 @@
 //   server                   the heartbeat and the observation batches: last, next, counters
 //   jobs                     the last ten jobs claimed: outcome, transactions, when
 //   sessions                 the repeater logins held: class, level, age (never a secret)
+//   errors                   every counter the heartbeat carries, and the ones beside it
+//   reboots                  why this board last restarted, and the four before that
+//   dump                     the last 4 kB of the log, oldest first
 //   wifi                     scan, and the link's state
 //   reboot
 //   erase confirm            forget every setting (the identity stays); "confirm" is the word
@@ -38,6 +41,9 @@ enum class Verb : unsigned char {
   Server,  // the heartbeat and the observation batches
   Jobs,      // the last ten jobs claimed
   Sessions,  // the repeater logins held
+  Errors,    // the counters
+  Reboots,   // why this board restarted, the last five
+  Dump,      // the last 4 kB of the log ring
   Wifi,
   Reboot,
   Erase,   // only ever produced with the confirmation word present

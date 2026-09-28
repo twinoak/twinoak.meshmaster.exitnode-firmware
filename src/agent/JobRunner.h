@@ -78,6 +78,7 @@
 #include "ConfigApply.h"
 #include "ConfigRead.h"
 #include "JobEnvelopes.h"
+#include "ResultBuffer.h"
 #include "Sessions.h"
 #include "mesh/AgentMesh.h"
 #include "net/Clock.h"
@@ -106,14 +107,21 @@ class JobRunner {
   // Every job's credential is wiped when the job ends, whatever it came to.
   int claimAndRun();
 
-  // A result whose POST did not get through is kept and retried; this is how many are waiting,
-  // which is the heartbeat's `queueDepth`.
-  int queueDepth() const { return pendingLen_ > 0 ? 1 : 0; }
+  // The offline buffer (task 06): results the server did not take are kept and posted later,
+  // oldest first, with the timestamps and the client ids they were made with. Called by the
+  // agent loop after every heartbeat the server answered - "the offline buffer is posted first,
+  // in order" (EXIT-NODES §5, docs/ops/agent.md §4). Safe to call with nothing waiting.
+  void flushResults();
+
+  // How many results are waiting to be posted, which is the heartbeat's `queueDepth`.
+  int queueDepth() const { return static_cast<int>(results_.count()); }
 
   const AirtimeGate& gate() const { return gate_; }
+  const ResultBuffer& results() const { return results_; }
   uint32_t claims() const { return claims_; }
   uint32_t ran() const { return ran_; }
   uint32_t postFailures() const { return postFailures_; }
+  uint32_t resultsDropped() const { return results_.dropped(); }
 
   // `jobs` on the console: the last ten with their outcome and their transactions.
   void report(Stream& out) const;
@@ -213,7 +221,8 @@ class JobRunner {
   void randomBytes(uint8_t* out, size_t len);
   void remember(const ClaimedJob& job, Outcome outcome, int transactions, bool posted);
   bool post(long long jobId, const char* body, size_t len);
-  void flushPending();
+  // Every remembered job with this id is marked posted, once its result has gone through.
+  void markPosted(long long jobId);
 
   AgentMesh* mesh_ = nullptr;
   AgentClient* server_ = nullptr;
@@ -231,10 +240,10 @@ class JobRunner {
   uint32_t ran_ = 0;
   uint32_t postFailures_ = 0;
 
-  // The one result whose POST has not got through yet. Its client id never changes, so the
-  // server de-duplicates it however many times it arrives (API §3).
-  long long pendingJobId_ = 0;
-  size_t pendingLen_ = 0;
+  // The results whose POST has not got through yet, oldest first. Each keeps the client id it
+  // was written with, so the server de-duplicates it however many times it arrives (API §3), and
+  // the buffer is bounded and drops from the oldest end (ResultBuffer.h).
+  ResultBuffer results_;
 };
 
 }  // namespace mm

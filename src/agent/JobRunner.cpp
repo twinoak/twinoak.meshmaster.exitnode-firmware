@@ -68,7 +68,6 @@ constexpr size_t kBodyCap = 6656;  // the data, the envelope and the log
 ClaimedJob g_jobs[kClaimMax];
 char g_data[kDataCap];
 char g_body[kBodyCap];
-char g_pending[kBodyCap];
 JobLog g_log;
 Neighbour g_neighbours[kMaxNeighbours];
 LppReading g_readings[kMaxLppReadings];
@@ -161,8 +160,7 @@ void JobRunner::idle(uint32_t ms) {
 }
 
 bool JobRunner::leaseRanOut(const ClaimedJob& job) const {
-  if (job.leaseUntil == 0 || !clock_->hasTime()) return false;
-  return clock_->now() >= job.leaseUntil;
+  return leaseLapsed(job.leaseUntil, clock_->hasTime(), clock_->now());
 }
 
 uint32_t JobRunner::requestWaitMs(const ClaimedJob& job) const {
@@ -1256,6 +1254,17 @@ Outcome JobRunner::runReboot(const ClaimedJob& job, Context& ctx, size_t& dataLe
 
 Outcome JobRunner::runJob(const ClaimedJob& job, Context& ctx, size_t& dataLen) {
   dataLen = 0;
+  // The lease first, before anything is decided about the job (task 06). A claim's jobs are run
+  // one at a time and each is minutes of airtime, so the second of a pair - or every job of a
+  // claim the server went away under - can be reached after the lease the server gave it has
+  // run out. Nothing is put on the air for a lease somebody else may hold now: the job is
+  // `timeout` at no transaction, and the result is posted, late if it must be.
+  if (leaseLapsed(job.leaseUntil, clock_->hasTime(), clock_->now())) {
+    g_log.add("the lease ran out before this job started, so nothing was sent: the server has given it back to the "
+              "queue and this result is the record of that");
+    LOG_W("jobs: job %lld %s: the lease had already run out; nothing was sent", job.id, job.type);
+    return Outcome::Timeout;
+  }
   char why[200] = {0};
   if (!canRun(job, why, sizeof why)) {
     g_log.add("%s", why);
@@ -1288,32 +1297,49 @@ Outcome JobRunner::runJob(const ClaimedJob& job, Context& ctx, size_t& dataLen) 
 }
 
 bool JobRunner::post(long long jobId, const char* body, size_t len) {
-  if (server_->postJobResult(jobId, body, len)) return true;
-  postFailures_++;
+  // Anything already waiting goes first, so the server sees the results in the order they were
+  // made; a failure there leaves this one behind the queue rather than in front of it.
+  flushResults();
+  if (results_.empty()) {
+    if (server_->postJobResult(jobId, body, len)) return true;
+    postFailures_++;
+  }
   // Kept with its client id and retried: the server de-duplicates on that id, and a late result
-  // is still taken (API §3).
-  if (len < sizeof g_pending) {
-    std::memcpy(g_pending, body, len);
-    g_pending[len] = '\0';
-    pendingJobId_ = jobId;
-    pendingLen_ = len;
-    LOG_W("jobs: the result of job %lld was not taken; it is kept and sent again", jobId);
+  // is still taken (API §3). The buffer is RAM and bounded, so a long outage drops the oldest
+  // and counts it - a board has no journal (EXIT-NODES §5).
+  const uint32_t droppedBefore = results_.dropped();
+  if (results_.push(jobId, body, len)) {
+    LOG_W("jobs: the result of job %lld was not taken; it is kept (%u waiting) and sent again", jobId,
+          static_cast<unsigned>(results_.count()));
+  } else {
+    LOG_E("jobs: the result of job %lld is larger than the whole offline buffer and is lost", jobId);
+  }
+  if (results_.dropped() > droppedBefore) {
+    LOG_W("jobs: the offline buffer is full; %lu result(s) dropped in all, oldest first",
+          static_cast<unsigned long>(results_.dropped()));
   }
   return false;
 }
 
-void JobRunner::flushPending() {
-  if (pendingLen_ == 0) return;
-  const long long jobId = pendingJobId_;
-  if (!server_->postJobResult(jobId, g_pending, pendingLen_)) {
-    postFailures_++;
-    return;
-  }
-  LOG_I("jobs: the kept result of job %lld went through", jobId);
-  pendingLen_ = 0;
-  pendingJobId_ = 0;
+void JobRunner::markPosted(long long jobId) {
   for (int i = 0; i < recentCount_; i++) {
     if (recent_[i].id == jobId) recent_[i].posted = true;
+  }
+}
+
+void JobRunner::flushResults() {
+  while (!results_.empty()) {
+    long long jobId = 0;
+    size_t len = 0;
+    const char* body = results_.oldest(jobId, len);
+    if (body == nullptr) return;
+    if (!server_->postJobResult(jobId, body, len)) {
+      postFailures_++;
+      return;
+    }
+    LOG_I("jobs: the kept result of job %lld went through", jobId);
+    results_.popOldest();
+    markPosted(jobId);
   }
 }
 
@@ -1331,7 +1357,7 @@ void JobRunner::remember(const ClaimedJob& job, Outcome outcome, int transaction
 }
 
 int JobRunner::claimAndRun() {
-  flushPending();
+  flushResults();
 
   // Whatever a previous claim left: no password outlives its job, and none waits for the next.
   for (int i = 0; i < kClaimMax; i++) g_jobs[i].credential.wipe();
@@ -1449,10 +1475,20 @@ void JobRunner::report(Stream& out) const {
   out.printf("claims    %lu made, %lu job(s) run, %lu result(s) not taken first time\r\n",
              static_cast<unsigned long>(claims_), static_cast<unsigned long>(ran_),
              static_cast<unsigned long>(postFailures_));
+  out.printf("buffer    %u result(s) waiting of %u, %u of %u bytes; %lu dropped, %lu held in all\r\n",
+             static_cast<unsigned>(results_.count()), static_cast<unsigned>(ResultBuffer::kMaxResults),
+             static_cast<unsigned>(results_.bytes()), static_cast<unsigned>(ResultBuffer::kCapacityBytes),
+             static_cast<unsigned long>(results_.dropped()), static_cast<unsigned long>(results_.held()));
   out.print("types     ");
   for (int i = 0; i < kJobTypeCount; i++) out.printf("%s%s", i > 0 ? ", " : "", kJobTypes[i]);
   out.print("\r\n");
-  if (pendingLen_ > 0) out.printf("pending   the result of job %lld is waiting to be sent\r\n", pendingJobId_);
+  if (!results_.empty()) {
+    long long jobId = 0;
+    size_t len = 0;
+    results_.oldest(jobId, len);
+    out.printf("pending   the result of job %lld is the next to go, %u byte(s)\r\n", jobId,
+               static_cast<unsigned>(len));
+  }
   if (recentCount_ == 0) {
     out.println("last ten  none yet");
     return;
