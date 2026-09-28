@@ -50,6 +50,17 @@ mornings and on demand:
    every native test still passes.** A person merges it, or nobody does if
    auto-merge is ever turned on for the `meshcore` label.
 
+**One click before CI runs.** The pull request is opened by
+`github-actions[bot]` with the workflow's own `GITHUB_TOKEN`, and GitHub holds
+workflows on such a pull request as *action required* rather than starting them
+— its guard against a workflow that sets itself off. So the run waits for
+**Approve and run** on the Actions tab (or
+`gh api -X POST repos/twinoak/meshmaster-agent-firmware/actions/runs/<id>/approve`),
+and that click is the same click as reading the bump. What would remove it is a
+personal access token in a repository secret for `gh pr create` to use instead
+of the built-in one; that is Thomas's to decide, and one button a month is
+cheaper than a credential to rotate.
+
 Only one bump is open at a time: if `upstream/<tag>` is already on `origin`,
 the workflow leaves it alone.
 
