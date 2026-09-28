@@ -31,9 +31,13 @@ are the places a bump re-reads:
 | the library versions | `platformio.ini`, `[libs]` | pinned exactly, where upstream uses ranges |
 | `lib/ed25519` | `tools/pio/meshcore_private_libs.py` | MeshCore keeps it as a *private* library of its project, which a package consumer does not get; the sources are compiled straight out of the pinned checkout and the include path is a `-I` in `platformio.ini` |
 
-Everything else — `src/`, `variants/`, `examples/` — the package gives us, and
+Everything else — `src/`, `variants/` — the package gives us, and
 `build_as_lib.py` in MeshCore's own tree is what selects from it (our
-`MC_VARIANT`, `BUILD_EXAMPLE` and `MC_UI_FLAVOR` defines drive it).
+`MC_VARIANT` and `DISPLAY_CLASS` defines drive it; no example of upstream's is
+built since task 01, the application is `src/`). Our sources reach MeshCore's
+headers through `src/mesh/MeshCoreHeaders.h`, which declares them system
+headers so that `-Werror` stays about our code: a bump that adds a header we
+use adds it there.
 
 ## Tier one — the weekly pull request (automatic)
 

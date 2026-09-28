@@ -33,21 +33,108 @@ On Windows `pio test -e native` needs a C++ compiler the machine usually has
 only inside a container;
 [`tasks/RUNBOOK.md §2`](tasks/RUNBOOK.md) has the one-line `docker run` for it.
 
-**Today the build is MeshCore's stock `companion_radio` example** for the
-board — a green build to start from, not our firmware. Task 01 replaces it with
-our application in `src/`.
+The application is `src/`: the serial console and its settings, WiFi and the
+clock, the TLS client, the OLED, and the mesh in companion role — MeshCore's
+core, the Heltec V3 variant and its display driver are compiled from the pinned
+package beside it, and no example of upstream's is built. Four files of `src/`
+are host-portable (the key table, the console parser, the ISO-8601 helper and
+the config-reply parser) and are what the native tests exercise; the rest needs
+a board.
 
 ## Flashing it
 
+From a build on this machine, with the board on USB:
+
+```bash
+pio run -e heltec_v3 -t upload            # add --upload-port COM5 if there is more than one port
+pio device monitor -b 115200              # the console; Ctrl+C leaves it
+```
+
+From CI's artifact (`firmware-heltec_v3-<sha>`, the application image alone),
+onto a board that already has a bootloader and partition table — that is, any
+board that has been flashed once by either line above:
+
+```bash
+esptool.py --chip esp32s3 --port COM5 --baud 921600 write_flash 0x10000 firmware.bin
+```
+
 A release publishes, per board, a **merged** image for a board out of the box
 (bootloader + partition table + application, flashed at `0x0`) and the
-application image alone beside it, with `SHA256SUMS` and the one `esptool` line
-to use. A tag `vX.Y.Z` on a commit CI has passed is what makes one; *Run
+application image alone beside it, with `SHA256SUMS` and the one `esptool`
+line to use. A tag `vX.Y.Z` on a commit CI has passed is what makes one; *Run
 workflow* on `release.yml` rehearses it and publishes nothing.
 
-The board is provisioned over its USB serial console — `set`, then `save` — not
-over a captive portal. Its token comes from the exit node's registration page
-on meshmaster.dk and is kept in NVS.
+Flashing does not touch the settings (NVS) or the identity (SPIFFS), so a board
+keeps its WiFi, its token and its key across updates. `erase confirm` on the
+console forgets the settings; the identity stays even then.
+
+## Provisioning it
+
+Over the USB serial console — 115 200 baud, one command per line, a `>` prompt,
+[`docs/console.md`](docs/console.md) for every command and key — not over a
+captive portal. The token comes from the exit node's registration page on
+meshmaster.dk (`/exit-nodes/new`) and is kept in NVS. A board from nothing:
+
+```console
+> status
+firmware  meshmaster-agent 0.0.0-dev on MeshCore companion-v1.17.1 (d9296435)
+board     heltec_v3, Power-on reset, up 0d 00:00:41
+identity  7f3a9c02e1b44d9a0f6c2b7d8e9a1c3f5d7b9e0a2c4e6f8a0b1c2d3e4f5a6b7c
+radio     869.618 MHz, bw 62.5 kHz, sf 8, cr 8, tx 22 dBm; companion role, no repeat
+frames    rx 3 (advert 2, grp-txt 1, txt 0, ack 0, path 0, trace 0, other 0), tx 0, noise floor -112 dBm, frame log off
+wifi      off, wifi.ssid is unset
+time      no time (sntp not started, no wifi)
+server    not configured (meshmaster.url unset, meshmaster.token unset)
+heap      free 231212, min ever 228004, largest block 110580
+log       level info, frames off, oled on
+> set wifi.ssid Twinoak
+ok wifi.ssid
+> set wifi.pass ********************
+ok wifi.pass
+> set meshmaster.url https://meshmaster.dk
+ok meshmaster.url
+> set meshmaster.token mma_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+ok meshmaster.token
+> get meshmaster.token
+meshmaster.token set
+> get wifi.pass
+wifi.pass set
+> get
+wifi.ssid Twinoak
+wifi.pass set
+meshmaster.url https://meshmaster.dk
+meshmaster.token set
+radio.freq unset (869.618)
+radio.bw unset (62.5)
+radio.sf unset (8)
+radio.cr unset (8)
+radio.tx unset (22)
+log.level unset (info)
+log.frames unset (off)
+> set radio.tx 23
+error: radio.tx: out of range, -9..22
+> set meshmaster.url http://meshmaster.dk
+error: meshmaster.url: the scheme must be https://
+> status
+firmware  meshmaster-agent 0.0.0-dev on MeshCore companion-v1.17.1 (d9296435)
+board     heltec_v3, Power-on reset, up 0d 00:03:10
+identity  7f3a9c02e1b44d9a0f6c2b7d8e9a1c3f5d7b9e0a2c4e6f8a0b1c2d3e4f5a6b7c
+radio     869.618 MHz, bw 62.5 kHz, sf 8, cr 8, tx 22 dBm; companion role, no repeat
+frames    rx 9 (advert 6, grp-txt 3, txt 0, ack 0, path 0, trace 0, other 0), tx 0, noise floor -112 dBm, frame log off
+wifi      connected to Twinoak, 192.168.1.20, rssi -61 dBm (1 connects, 0 drops)
+time      2026-09-28T12:03:14Z (sntp)
+server    https://meshmaster.dk: config ok at 12:03:14, agent 17 "Window at Grenaa", transport onboard, budget 2/min gap 20 s, poll 30 s, root ISRG Root X1
+heap      free 187432, min ever 180020, largest block 98304; after the tls call 187432
+log       level info, frames off, oled on
+```
+
+Between the `set` lines and the second `status`, the log on the same port says
+`wifi: connected`, `clock: ... from sntp` and `server: config ok ...` as they
+happen. The value of a secret is typed once, echoes as asterisks, and is
+printed by nothing afterwards; the two `error:` lines are what a wrong value
+gets. Every `set` takes effect at once, so no reboot is part of provisioning.
+The session above is replayed by the native tests against the parser, reply for
+reply.
 
 ## Keeping up with MeshCore
 
@@ -88,8 +175,9 @@ reading.
 
 - **TLS is verified.** The server's certificate chain is checked against a
   bundled root (ISRG Root X1 for meshmaster.dk's Let's Encrypt chain, and the
-  ESP32 certificate bundle beside it); `setInsecure()` and its cousins never
-  appear in the tree, and a test greps for them.
+  ESP32 core's certificate bundle beside it); the client is never told to
+  accept an unverified chain, and a native test greps the tree for the calls
+  and flags that would tell it so (`test/test_tls_policy`).
 - **Secrets stay where they are.** The agent token lives in NVS and is printed
   by no command (`get meshmaster.token` says *set*); a repeater's password lives
   in RAM for the job and is overwritten after; the serial log redacts as the
