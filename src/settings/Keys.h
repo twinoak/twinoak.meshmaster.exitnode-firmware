@@ -65,4 +65,8 @@ void replyForSet(const KeyDef& key, char* out, size_t cap);
 // The parsed numeric value of a Float/Int key (the value has passed validateValue).
 float numericValue(const char* value);
 
+// The same at double precision, which is what the heartbeat's radio block needs: the record's
+// fields are doubles on the .NET side, and 869.618 carried through a float is 869.617981.
+double numericValueDouble(const char* value);
+
 }  // namespace mm

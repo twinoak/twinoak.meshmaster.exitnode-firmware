@@ -34,6 +34,9 @@ class SettingsStore {
   // The numeric value in force for a Float/Int key: stored, else the fallback.
   float number(const KeyDef& key);
 
+  // The same at double precision, for the heartbeat's radio block (Keys.h).
+  double numberDouble(const KeyDef& key);
+
   bool put(const KeyDef& key, const char* value);
 
   // Forget every setting. The identity is not a setting and stays.

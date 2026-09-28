@@ -1,14 +1,15 @@
-// The MeshMaster agent firmware, task 01: a Heltec V3 that boots, takes its settings over the
-// USB serial console, joins WiFi, sets its clock, and makes one authenticated HTTPS call to
-// meshmaster.dk (GET /agent/v1/config) with the certificate chain verified. The radio is
-// initialised so the identity exists, and no packet leaves (src/mesh/AgentMesh.h).
+// The MeshMaster agent firmware: a Heltec V3 that boots, takes its settings over the USB serial
+// console, joins WiFi, sets its clock, and is an exit node on meshmaster.dk - it heartbeats over
+// verified TLS and posts the adverts its radio hears, with `jobTypes: []` so the server hands it
+// nothing yet (task 02). No packet leaves the radio (src/mesh/AgentMesh.h).
 //
 // The pieces, each in its own file:
 //   settings/   the key table (host-portable) and the NVS store
 //   console/    the line parser (host-portable) and the console that acts on it
 //   net/        WiFi with backoff, and the clock (SNTP, the server as fallback)
-//   agent/      the TLS client, the root it verifies against, the reply structs (host-portable)
-//   mesh/       the mesh in companion role: counts frames, sends nothing
+//   agent/      the TLS client, the root it verifies against, the envelopes and the reply
+//               structs (host-portable), the observation ring, and the loop that drives them
+//   mesh/       the mesh in companion role: hears adverts, forwards nothing, sends nothing
 //   ui/         the OLED's four lines
 //   Log.h       what the serial port prints besides the console's replies
 
@@ -22,6 +23,7 @@
 #include "Log.h"
 #include "mesh/MeshCoreHeaders.h"
 #include "agent/AgentClient.h"
+#include "agent/AgentLoop.h"
 #include "agent/Iso8601.h"
 #include "console/Console.h"
 #include "mesh/AgentMesh.h"
@@ -41,6 +43,7 @@ mm::SettingsStore settings;
 mm::WifiLink wifi;
 mm::AgentClock agentClock;
 mm::AgentClient server;
+mm::AgentLoop agent;
 mm::Console console;
 mm::Oled oled;
 
@@ -55,12 +58,9 @@ bool radio_ok = false;
 bool identity_ok = false;
 bool display_ok = false;
 
-// The config call: once per WiFi connection, retried with backoff until it succeeds.
-bool configDue = false;
-uint32_t configAt = 0;
-uint32_t configBackoffMs = 0;
-constexpr uint32_t kConfigFirstBackoffMs = 30000;
-constexpr uint32_t kConfigMaxBackoffMs = 10 * 60000;
+// The identity as 64 lowercase hex, made once at boot: what the heartbeat sends as
+// companionPublicKey and what `status` prints.
+char public_key_hex[2 * PUB_KEY_SIZE + 1] = {0};
 
 uint32_t clockForLog() { return agentClock.now(); }
 
@@ -104,11 +104,7 @@ void setUpIdentity() {
 }
 
 void publicKeyHex(char* out, size_t cap) {
-  if (!identity_ok || cap < 65) {
-    std::snprintf(out, cap, "none");
-    return;
-  }
-  mesh::Utils::toHex(out, the_mesh.self_id.pub_key, PUB_KEY_SIZE);
+  std::snprintf(out, cap, "%s", public_key_hex[0] != 0 ? public_key_hex : "none");
 }
 
 // ---- the console's commands -----------------------------------------------------------------
@@ -156,6 +152,8 @@ void printStatus(Stream& out) {
   out.printf("time      %s\r\n", line);
   server.describe(line, sizeof line);
   out.printf("server    %s\r\n", line);
+  agent.describe(line, sizeof line);
+  out.printf("heartbeat %s\r\n", line);
 
   const mm::AgentClient::Outcome& o = server.last();
   out.printf("heap      free %lu, min ever %lu, largest block %lu", static_cast<unsigned long>(ESP.getFreeHeap()),
@@ -170,14 +168,53 @@ void printStatus(Stream& out) {
 
 void printWifi(Stream& out) { wifi.scan(out); }
 
+// `mesh`: what the radio has heard. The names are printed here and in no log line - this is the
+// one place a person reads them, and they come from strangers, so they are the bounded, valid
+// UTF-8 the ring kept (src/agent/Observations.h).
+void printMesh(Stream& out) {
+  if (!radio_ok) {
+    out.println("radio     init failed: nothing is being heard");
+    return;
+  }
+  const mm::MeshCounters& c = the_mesh.counters();
+  const mm::ObservationRing& ring = agent.ring();
+  out.printf("adverts   %" PRIu32 " heard, %u waiting to be posted (ring %u), %" PRIu32 " dropped, %" PRIu32
+             " undecodable\r\n",
+             c.adverts, static_cast<unsigned>(ring.size()), static_cast<unsigned>(mm::ObservationRing::kCapacity),
+             ring.dropped(), c.advertsDropped);
+  out.printf("frames    rx %" PRIu32 ", tx %" PRIu32 ", overheard %" PRIu32 " (counted, never read)\r\n", c.rx, c.tx,
+             the_mesh.overheard());
+  if (the_mesh.recentCount() == 0) {
+    out.println("last five none yet");
+    return;
+  }
+  out.println("last five newest first: key, name, role, hops, snr, rssi, heard");
+  const uint32_t now = millis();
+  for (int i = 0; i < the_mesh.recentCount(); i++) {
+    const mm::HeardAdvert& a = the_mesh.recent(i);
+    char key[2 * PUB_KEY_SIZE + 1];
+    mesh::Utils::toHex(key, a.publicKey, PUB_KEY_SIZE);
+    const char* role = mm::roleName(a.advType);
+    out.printf("  %.12s  %-32s %-10s %u hop(s)  snr %.2f  rssi %d  %lu s ago\r\n", key,
+               a.name[0] != 0 ? a.name : "(no name)", role != nullptr ? role : "unknown",
+               static_cast<unsigned>(a.hops), static_cast<double>(a.snrQ4) / 4.0,
+               a.rssi == mm::kNoRssi ? 0 : a.rssi, static_cast<unsigned long>((now - a.heardAtMillis) / 1000));
+    if (a.hasPosition) {
+      out.printf("                %ld.%06ld, %ld.%06ld\r\n", static_cast<long>(a.latE6 / 1000000),
+                 static_cast<long>(a.latE6 < 0 ? -(a.latE6 % 1000000) : a.latE6 % 1000000),
+                 static_cast<long>(a.lonE6 / 1000000),
+                 static_cast<long>(a.lonE6 < 0 ? -(a.lonE6 % 1000000) : a.lonE6 % 1000000));
+    }
+  }
+}
+
+// `server`: the heartbeat and the observation batches - the last, the next, and the counters
+// the heartbeat itself carries.
+void printServer(Stream& out) { agent.report(out); }
+
 void doReboot() {
   delay(100);
   board.reboot();
-}
-
-void scheduleConfigCall(uint32_t delayMs) {
-  configDue = true;
-  configAt = millis() + delayMs;
 }
 
 void onSettingChanged(const mm::KeyDef& key) {
@@ -185,8 +222,7 @@ void onSettingChanged(const mm::KeyDef& key) {
     wifi.reconfigure();
   } else if (std::strncmp(key.name, "meshmaster.", 11) == 0) {
     server.reconfigure();
-    configBackoffMs = 0;
-    if (wifi.connected()) scheduleConfigCall(0);
+    agent.reconfigure();
   } else if (std::strncmp(key.name, "radio.", 6) == 0) {
     if (radio_ok) applyRadioSettings();
   } else if (std::strncmp(key.name, "log.", 4) == 0) {
@@ -197,7 +233,7 @@ void onSettingChanged(const mm::KeyDef& key) {
 void onErased() {
   applyLogSettings();
   server.reconfigure();
-  configDue = false;
+  agent.reconfigure();
   wifi.reconfigure();
   if (radio_ok) applyRadioSettings();
 }
@@ -207,7 +243,7 @@ void onErased() {
 void fillOled(char lines[mm::Oled::kLines][mm::Oled::kCols]) {
   wifi.oledLine(lines[0], mm::Oled::kCols);
   agentClock.oledLine(lines[1], mm::Oled::kCols);
-  server.oledLine(lines[2], mm::Oled::kCols);
+  agent.oledLine(lines[2], mm::Oled::kCols);
   if (identity_ok) {
     char key[80];
     publicKeyHex(key, sizeof key);
@@ -249,9 +285,8 @@ void setup() {
     setUpIdentity();
     applyRadioSettings();
     the_mesh.begin();
-    char key[80];
-    publicKeyHex(key, sizeof key);
-    LOG_I("identity: %s", key);
+    if (identity_ok) mesh::Utils::toHex(public_key_hex, the_mesh.self_id.pub_key, PUB_KEY_SIZE);
+    LOG_I("identity: %s", public_key_hex[0] != 0 ? public_key_hex : "none");
   } else {
     LOG_E("radio: init failed; the console works, the mesh does not");
   }
@@ -259,9 +294,11 @@ void setup() {
   agentClock.begin(rtc_clock);
   wifi.begin(settings);
   server.begin(settings, agentClock, meshmaster_agent_version());
+  agent.begin(settings, server, agentClock, wifi, the_mesh);
+  agent.setIdentity(public_key_hex[0] != 0 ? public_key_hex : nullptr);
   if (!server.configured()) LOG_I("server: not configured; set meshmaster.url and meshmaster.token");
 
-  mm::ConsoleHost host = {&printStatus, &printWifi, &doReboot, &onSettingChanged, &onErased};
+  mm::ConsoleHost host = {&printStatus, &printMesh, &printServer, &printWifi, &doReboot, &onSettingChanged, &onErased};
   console.begin(Serial, settings, host);
   board.onBootComplete();
 }
@@ -274,21 +311,12 @@ void loop() {
 
   if (wifi.takeConnectedEdge()) {
     agentClock.startSntp();
-    configBackoffMs = 0;
-    scheduleConfigCall(1500);  // a moment for DNS and SNTP to get going
+    agent.onWifiUp();
   }
 
-  if (configDue && wifi.connected() && static_cast<int32_t>(millis() - configAt) >= 0) {
-    configDue = false;
-    if (server.configured()) {
-      if (!server.fetchConfig()) {
-        configBackoffMs = configBackoffMs == 0 ? kConfigFirstBackoffMs : configBackoffMs * 2;
-        if (configBackoffMs > kConfigMaxBackoffMs) configBackoffMs = kConfigMaxBackoffMs;
-        LOG_I("server: next attempt in %lu s", static_cast<unsigned long>(configBackoffMs / 1000));
-        scheduleConfigCall(configBackoffMs);
-      }
-    }
-  }
+  // The config call, the heartbeat every pollIntervalS and the observation batches between them:
+  // one blocking call at a time, and nothing at all after a 401 (src/agent/AgentLoop.h).
+  agent.loop();
 
   console.loop();
   oled.loop();

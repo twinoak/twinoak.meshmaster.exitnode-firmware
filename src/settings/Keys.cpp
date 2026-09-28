@@ -229,4 +229,13 @@ float numericValue(const char* value) {
   return 0;
 }
 
+double numericValueDouble(const char* value) {
+  if (value == nullptr || *value == 0) return 0;
+  char* end = nullptr;
+  errno = 0;
+  const double v = std::strtod(value, &end);
+  if (errno != 0 || end == value || *end != 0 || std::isnan(v) || std::isinf(v)) return 0;
+  return v;
+}
+
 }  // namespace mm

@@ -69,6 +69,14 @@ ParseResult parseLine(const char* line) {
     if (hasRest) return refuse("status takes no argument");
     return accept(Verb::Status);
   }
+  if (std::strcmp(verb, "mesh") == 0) {
+    if (hasRest) return refuse("mesh takes no argument");
+    return accept(Verb::Mesh);
+  }
+  if (std::strcmp(verb, "server") == 0) {
+    if (hasRest) return refuse("server takes no argument");
+    return accept(Verb::Server);
+  }
   if (std::strcmp(verb, "wifi") == 0) {
     if (hasRest) return refuse("wifi takes no argument");
     return accept(Verb::Wifi);

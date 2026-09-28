@@ -41,6 +41,12 @@ float SettingsStore::number(const KeyDef& key) {
   return numericValue(buf);
 }
 
+double SettingsStore::numberDouble(const KeyDef& key) {
+  char buf[kMaxValueLen + 1];
+  effective(key, buf, sizeof buf);
+  return numericValueDouble(buf);
+}
+
 bool SettingsStore::put(const KeyDef& key, const char* value) {
   if (!open_ || value == nullptr) return false;
   return prefs_.putString(key.nvs, value) > 0;

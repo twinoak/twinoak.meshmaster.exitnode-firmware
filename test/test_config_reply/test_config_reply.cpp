@@ -128,6 +128,24 @@ TEST(Iso8601, ParsesTheServersShapesAndRefusesOthers) {
   EXPECT_FALSE(mm::parseUtc(nullptr, t));
 }
 
+TEST(ObservationsReply, TheAnswerToABatchIsHowManyWereTakenAndWhetherItWasSeenBefore) {
+  const char* json = R"({"accepted":17,"duplicate":false})";
+  mm::ObservationsReply r;
+  char err[128] = {0};
+  ASSERT_TRUE(mm::parseObservationsReply(json, std::strlen(json), r, err, sizeof err)) << err;
+  EXPECT_EQ(17, r.accepted);
+  EXPECT_FALSE(r.duplicate);
+
+  const char* again = R"({"accepted":0,"duplicate":true})";
+  ASSERT_TRUE(mm::parseObservationsReply(again, std::strlen(again), r, err, sizeof err)) << err;
+  EXPECT_EQ(0, r.accepted);
+  EXPECT_TRUE(r.duplicate);
+
+  const char* missing = R"({"accepted":0})";
+  EXPECT_FALSE(mm::parseObservationsReply(missing, std::strlen(missing), r, err, sizeof err));
+  EXPECT_STREQ("missing or not a boolean: duplicate", err);
+}
+
 TEST(Iso8601, FormatsRoundTrip) {
   char out[32];
   mm::formatUtc(1790172001u, out, sizeof out);

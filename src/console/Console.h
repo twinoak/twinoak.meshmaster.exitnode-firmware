@@ -21,6 +21,8 @@ namespace mm {
 // What the console needs from the rest of the firmware, as plain function pointers.
 struct ConsoleHost {
   void (*status)(Stream& out);
+  void (*mesh)(Stream& out);
+  void (*server)(Stream& out);
   void (*wifi)(Stream& out);
   void (*reboot)();
   void (*settingChanged)(const KeyDef& key);  // after a successful `set`, so it takes effect live
