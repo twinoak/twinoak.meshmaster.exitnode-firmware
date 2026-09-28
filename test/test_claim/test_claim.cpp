@@ -279,7 +279,7 @@ TEST(Claim, AJobThisFirmwareCannotRunIsRecognisedBeforeAnythingIsSent) {
   }
 
   mm::ClaimedJob unknown = jobs[1];
-  std::snprintf(unknown.type, sizeof unknown.type, "cli");
+  std::snprintf(unknown.type, sizeof unknown.type, "config.write");
   EXPECT_FALSE(mm::canRun(unknown, why, sizeof why));
   EXPECT_NE(std::string(why).find("no handler"), std::string::npos) << why;
 
@@ -289,23 +289,139 @@ TEST(Claim, AJobThisFirmwareCannotRunIsRecognisedBeforeAnythingIsSent) {
   EXPECT_NE(std::string(why).find("public key"), std::string::npos) << why;
 }
 
-TEST(Claim, TheSevenTypesAreTheOnesThisFirmwareAdvertises) {
-  ASSERT_EQ(mm::kJobTypeCount, 7);
-  EXPECT_STREQ(mm::kJobTypes[0], "status");
-  EXPECT_STREQ(mm::kJobTypes[1], "telemetry");
-  EXPECT_STREQ(mm::kJobTypes[2], "neighbours");
-  EXPECT_STREQ(mm::kJobTypes[3], "config.read");
-  EXPECT_STREQ(mm::kJobTypes[4], "trace");
-  EXPECT_STREQ(mm::kJobTypes[5], "discover");
-  EXPECT_STREQ(mm::kJobTypes[6], "acl.set");
-  for (int i = 0; i < mm::kJobTypeCount; i++) EXPECT_TRUE(mm::isKnownJobType(mm::kJobTypes[i]));
-  // The writes are task 05's: routing does not send them here, and a claim that carried one
-  // anyway would be answered `unsupported` rather than run.
-  EXPECT_FALSE(mm::isKnownJobType("config.apply"));
-  EXPECT_FALSE(mm::isKnownJobType("cli"));
-  EXPECT_FALSE(mm::isKnownJobType("password.set"));
-  EXPECT_FALSE(mm::isKnownJobType("reboot"));
+// Every type of API §3, in JobTypes.All's order - which is the order AgentHeartbeat.json carries
+// them, so test_envelopes holds the heartbeat's bytes to the fixture with this very list.
+TEST(Claim, TheThirteenTypesAreTheOnesThisFirmwareAdvertisesInTheFixturesOrder) {
+  ASSERT_EQ(mm::kJobTypeCount, 13);
+  const char* expected[] = {"status",   "telemetry",      "neighbours", "config.read",  "config.apply", "cli",   "trace",
+                            "discover", "advert.request", "clock.sync", "password.set", "acl.set",      "reboot"};
+  for (int i = 0; i < mm::kJobTypeCount; i++) {
+    EXPECT_STREQ(mm::kJobTypes[i], expected[i]) << i;
+    EXPECT_TRUE(mm::isKnownJobType(mm::kJobTypes[i]));
+  }
+  EXPECT_FALSE(mm::isKnownJobType("config.write"));
   EXPECT_FALSE(mm::isKnownJobType(nullptr));
+}
+
+// The six writes run at admin and at nothing less (JobTypes.CredentialClasses).
+TEST(Claim, TheWritesRunAtAdminAlone) {
+  std::string reply = recordedClaim();
+  mm::ClaimedJob jobs[mm::kClaimMax];
+  int count = 0;
+  uint32_t serverTime = 0;
+  char err[96] = {0};
+  ASSERT_TRUE(mm::parseClaimResponse(&reply[0], reply.size(), jobs, mm::kClaimMax, count, serverTime, err, sizeof err))
+      << err;
+  char why[200] = {0};
+  for (const char* type : {"config.apply", "cli", "advert.request", "clock.sync", "password.set", "reboot"}) {
+    mm::ClaimedJob job = jobs[1];
+    std::snprintf(job.type, sizeof job.type, "%s", type);
+    EXPECT_FALSE(mm::canRun(job, why, sizeof why)) << type << " at acl";
+    job.credentialClass = mm::CredentialClass::Guest;
+    EXPECT_FALSE(mm::canRun(job, why, sizeof why)) << type << " at guest";
+    job.credentialClass = mm::CredentialClass::Admin;
+    EXPECT_TRUE(mm::canRun(job, why, sizeof why)) << type << " at admin: " << why;
+  }
+}
+
+// The writes' payloads (task 05), each the contract fixture: ConfigApplyPayload.json's plan,
+// CliPayload.json's command, AdvertRequestPayload.json's flood, PasswordSetPayload.json's field
+// - and the new password beside the login material in the credential, never in the payload.
+TEST(Claim, TheWritesPayloadsAreRead) {
+  const std::string head = "{\"serverTime\":\"2026-09-18T10:00:03Z\",\"jobs\":[";
+  const std::string common =
+      ",\"repeater\":{\"id\":17,\"label\":\"x\",\"publicKey\":\"a1b2\"},\"credentialClass\":\"admin\","
+      "\"leaseUntil\":\"2026-09-18T10:02:03Z\",\"timeouts\":{\"perHopMs\":4000,\"loginMs\":8000},\"payload\":";
+
+  std::string reply = head + "{\"id\":30,\"type\":\"config.apply\"" + common + fixture("ConfigApplyPayload") +
+                      ",\"credential\":{\"adminPassword\":\"hunter2\",\"acl\":1}}," + "{\"id\":31,\"type\":\"cli\"" + common +
+                      fixture("CliPayload") + ",\"credential\":{\"adminPassword\":\"hunter2\"}}]}";
+  mm::ClaimedJob jobs[mm::kClaimMax];
+  int count = 0;
+  uint32_t serverTime = 0;
+  char err[96] = {0};
+  ASSERT_TRUE(mm::parseClaimResponse(&reply[0], reply.size(), jobs, mm::kClaimMax, count, serverTime, err, sizeof err))
+      << err;
+  ASSERT_EQ(count, 2);
+
+  const mm::ConfigApplyPlan& plan = jobs[0].apply;
+  EXPECT_FALSE(plan.refused) << plan.refusedWhy;
+  ASSERT_EQ(plan.commandCount, 2);
+  EXPECT_STREQ(plan.commands[0].key, "advert.interval");
+  EXPECT_STREQ(plan.commands[0].command, "set advert.interval 240");
+  EXPECT_EQ(plan.commands[0].lineCount, 0) << "a plain set: one line, expecting OK";
+  EXPECT_STREQ(plan.commands[1].key, "repeat");
+  EXPECT_STREQ(plan.commands[1].command, "set repeat on");
+  EXPECT_STREQ(plan.planHash, "3f2a9c0d1e4b5a6f7c8d9e0f1a2b3c4d");
+  EXPECT_TRUE(jobs[0].hasAclLevel) << "the granted level rides beside the admin password";
+
+  EXPECT_TRUE(jobs[1].hasCliCommand);
+  EXPECT_STREQ(jobs[1].cliCommand, "neighbors");
+  EXPECT_FALSE(jobs[1].cliCommandTooLong);
+  EXPECT_FALSE(jobs[1].apply.refused) << "a job that is not an apply carries no plan and refuses nothing";
+
+  // An apply's regions entry: its lines, with what each expects and the one that escapes.
+  std::string regions =
+      head + "{\"id\":32,\"type\":\"config.apply\"" + common +
+      "{\"commands\":[{\"key\":\"regions\",\"command\":\"region load\",\"lines\":[{\"line\":\"region load\",\"expect\":null,"
+      "\"escape\":false},{\"line\":\" dk F\",\"expect\":null,\"escape\":false},{\"line\":\" \",\"expect\":\"OK - loaded\","
+      "\"escape\":true},{\"line\":\"region default dk\",\"expect\":\"default scope is now\"},{\"line\":\"region save\","
+      "\"expect\":\"OK\"}]}],\"planHash\":\"abc\"}" +
+      ",\"credential\":{\"adminPassword\":\"hunter2\"}}]}";
+  ASSERT_TRUE(mm::parseClaimResponse(&regions[0], regions.size(), jobs, mm::kClaimMax, count, serverTime, err, sizeof err))
+      << err;
+  ASSERT_EQ(count, 1);
+  ASSERT_EQ(jobs[0].apply.commandCount, 1);
+  ASSERT_EQ(jobs[0].apply.commands[0].lineCount, 5);
+  EXPECT_STREQ(jobs[0].apply.lineText(0), "region load");
+  EXPECT_EQ(jobs[0].apply.lineExpect(0), nullptr);
+  EXPECT_STREQ(jobs[0].apply.lineText(2), " ");
+  EXPECT_STREQ(jobs[0].apply.lineExpect(2), "OK - loaded");
+  EXPECT_TRUE(jobs[0].apply.lines[2].escape);
+  EXPECT_STREQ(jobs[0].apply.lineExpect(3), "default scope is now");
+  EXPECT_FALSE(jobs[0].apply.lines[3].escape);
+
+  // advert.request's flood (true when absent), password.set's field and the new password, and
+  // the candidate word of an unverified credential.
+  std::string small = head + "{\"id\":33,\"type\":\"advert.request\"" + common + fixture("AdvertRequestPayload") +
+                      ",\"credential\":{\"adminPassword\":\"hunter2\"}}," + "{\"id\":34,\"type\":\"password.set\"" + common +
+                      fixture("PasswordSetPayload") +
+                      ",\"credential\":{\"adminPassword\":\"hunter2\",\"newPassword\":\"Rotated-1\",\"candidate\":\"new\"}}]}";
+  ASSERT_TRUE(mm::parseClaimResponse(&small[0], small.size(), jobs, mm::kClaimMax, count, serverTime, err, sizeof err))
+      << err;
+  ASSERT_EQ(count, 2);
+  EXPECT_TRUE(jobs[0].advertFlood);
+  EXPECT_EQ(jobs[1].passwordField, mm::PasswordField::Admin);
+  EXPECT_STREQ(mm::passwordFieldName(jobs[1].passwordField), "adminPassword");
+  EXPECT_TRUE(jobs[1].credential.hasNewPassword);
+  EXPECT_STREQ(jobs[1].credential.newPassword, "Rotated-1");
+  EXPECT_FALSE(jobs[1].credential.newPasswordCut);
+  EXPECT_STREQ(jobs[1].credentialCandidate, "new");
+  EXPECT_STREQ(jobs[0].credentialCandidate, "");
+
+  std::string zerohop = head + "{\"id\":35,\"type\":\"advert.request\"" + common + "{\"flood\":false}" +
+                        ",\"credential\":{\"adminPassword\":\"hunter2\"}}," + "{\"id\":36,\"type\":\"password.set\"" + common +
+                        "{\"field\":\"guestPassword\"},\"credential\":{\"adminPassword\":\"hunter2\",\"newPassword\":\"sixteen-chars-xx\"}}]}";
+  ASSERT_TRUE(mm::parseClaimResponse(&zerohop[0], zerohop.size(), jobs, mm::kClaimMax, count, serverTime, err, sizeof err))
+      << err;
+  EXPECT_FALSE(jobs[0].advertFlood);
+  EXPECT_EQ(jobs[1].passwordField, mm::PasswordField::Guest);
+  EXPECT_TRUE(jobs[1].credential.newPasswordCut) << "sixteen bytes: the firmware keeps fifteen, and the runner refuses to send it";
+
+  // A plan this firmware cannot hold is refused by name, inside the job: the claim still parses.
+  std::string big = head + "{\"id\":37,\"type\":\"config.apply\"" + common + "{\"commands\":[";
+  for (int i = 0; i <= mm::kMaxApplyCommands; i++) {
+    big += std::string(i > 0 ? "," : "") + "{\"key\":\"k" + std::to_string(i) + "\",\"command\":\"set k 1\"}";
+  }
+  big += "]},\"credential\":{\"adminPassword\":\"hunter2\"}}]}";
+  ASSERT_TRUE(mm::parseClaimResponse(&big[0], big.size(), jobs, mm::kClaimMax, count, serverTime, err, sizeof err)) << err;
+  EXPECT_TRUE(jobs[0].apply.refused);
+  EXPECT_NE(std::string(jobs[0].apply.refusedWhy).find("more than"), std::string::npos) << jobs[0].apply.refusedWhy;
+
+  std::string none = head + "{\"id\":38,\"type\":\"config.apply\"" + common + "{}" + ",\"credential\":{\"adminPassword\":\"hunter2\"}}]}";
+  ASSERT_TRUE(mm::parseClaimResponse(&none[0], none.size(), jobs, mm::kClaimMax, count, serverTime, err, sizeof err)) << err;
+  EXPECT_TRUE(jobs[0].apply.refused);
+  EXPECT_NE(std::string(jobs[0].apply.refusedWhy).find("no plan"), std::string::npos);
 }
 
 // The two payloads that say something (task 04): a config.read's keys and an acl.set's entry.

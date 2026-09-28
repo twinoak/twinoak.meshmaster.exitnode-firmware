@@ -278,6 +278,48 @@ TEST(Credential, TheLoginFrameIsPrintedWithItsBodyAsStars) {
   EXPECT_EQ(text.find("ab"), std::string::npos) << "not one byte of the body is printed";
 }
 
+// The value a password.set sets lives in the same buffer, under the same rules (task 05).
+TEST(Credential, TheNewPasswordIsHeldBesideTheOthersAndWipedWithThem) {
+  mm::JobCredential c;
+  c.setAdminPassword("hunter2");
+  c.setNewPassword("Rotated-1");
+  EXPECT_TRUE(c.hasNewPassword);
+  EXPECT_STREQ(c.newPassword, "Rotated-1");
+  EXPECT_FALSE(c.newPasswordCut);
+  EXPECT_FALSE(c.isWiped());
+  c.wipe();
+  EXPECT_TRUE(c.isWiped());
+  for (size_t i = 0; i < sizeof c.newPassword; i++) EXPECT_EQ(c.newPassword[i], 0) << i;
+  EXPECT_FALSE(c.hasNewPassword);
+
+  // Sixteen bytes: the firmware keeps fifteen (`char password[16]`), and a cut-off password is a
+  // lock-out, so the flag is what the runner refuses on before anything is sent.
+  c.setNewPassword("sixteen-chars-xx");
+  EXPECT_TRUE(c.newPasswordCut);
+  EXPECT_EQ(std::strlen(c.newPassword), mm::kMaxPasswordLen);
+  c.setNewPassword("");
+  EXPECT_FALSE(c.hasNewPassword);
+  c.setNewPassword(nullptr);
+  EXPECT_FALSE(c.hasNewPassword);
+  EXPECT_FALSE(c.newPasswordCut);
+}
+
+// A `password` line on the air is a TXT_MSG datagram: the destination's hash, our hash, and the
+// MAC and cipher of the text (Mesh::createDatagram at d9296435). The frame log prints the two
+// hashes as hex and one star per byte after them.
+TEST(Credential, ThePasswordLineFrameIsPrintedWithItsBodyAsStars) {
+  std::vector<uint8_t> payload;
+  payload.push_back(0xEF);  // the repeater's hash
+  payload.push_back(0x7F);  // ours
+  for (int i = 0; i < 2 + 32; i++) payload.push_back(0xCD);  // the MAC and two blocks
+  char out[256];
+  const size_t len = mm::redactPayloadHex(payload.data(), payload.size(), mm::kDatagramClearBytes, out, sizeof out);
+  const std::string text(out, len);
+  EXPECT_EQ(text, "ef7f" + std::string(34, '*'));
+  EXPECT_EQ(text.find("cd"), std::string::npos);
+  EXPECT_EQ(mm::kDatagramClearBytes, 2u);
+}
+
 TEST(Credential, TheRedactionIsBoundedAndNeverCutsAHexPairInHalf) {
   std::vector<uint8_t> payload(60, 0x5A);
   char out[24];

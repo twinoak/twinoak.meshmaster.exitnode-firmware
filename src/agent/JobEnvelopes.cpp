@@ -28,8 +28,18 @@ void copyText(const char* from, char* to, size_t cap) {
 
 }  // namespace
 
-const char* const kJobTypes[kJobTypeCount] = {"status", "telemetry", "neighbours", "config.read",
-                                              "trace",  "discover",  "acl.set"};
+const char* const kJobTypes[kJobTypeCount] = {"status",       "telemetry", "neighbours", "config.read",    "config.apply",
+                                              "cli",          "trace",     "discover",   "advert.request", "clock.sync",
+                                              "password.set", "acl.set",   "reboot"};
+
+const char* passwordFieldName(PasswordField f) {
+  switch (f) {
+    case PasswordField::Admin: return "adminPassword";
+    case PasswordField::Guest: return "guestPassword";
+    case PasswordField::None:
+    default: return "";
+  }
+}
 
 bool isKnownJobType(const char* type) {
   if (type == nullptr) return false;
@@ -60,7 +70,8 @@ bool typeAllowsClass(const char* type, CredentialClass c) {
     return c == CredentialClass::Guest || c == CredentialClass::Acl || c == CredentialClass::Admin;
   }
   if (std::strcmp(type, "neighbours") == 0) return c == CredentialClass::Acl || c == CredentialClass::Admin;
-  // discover, acl.set, config.read: the admin password, and nothing less.
+  // discover, acl.set, config.read, and everything that writes: the admin password, and nothing
+  // less.
   return c == CredentialClass::Admin;
 }
 
@@ -212,9 +223,12 @@ bool parseClaimResponse(char* json, size_t len, ClaimedJob* jobs, int max, int& 
         job.aclLevel = kPermReadOnly;
       }
       // The passwords: the material of the job's class, straight from the buffer into the
-      // job's fixed credential (Credentials.h), and the buffer is the caller's to wipe.
+      // job's fixed credential (Credentials.h), and the buffer is the caller's to wipe. The new
+      // password of a password.set travels here too, never in the payload (task p4-55).
       job.credential.setAdminPassword(credential["adminPassword"].as<const char*>());
       job.credential.setGuestPassword(credential["guestPassword"].as<const char*>());
+      job.credential.setNewPassword(credential["newPassword"].as<const char*>());
+      copyText(credential["candidate"].as<const char*>(), job.credentialCandidate, sizeof job.credentialCandidate);
     }
 
     // The payload, for the two types whose payload says something. Anything else - `{}` for
@@ -247,6 +261,56 @@ bool parseClaimResponse(char* json, size_t len, ClaimedJob* jobs, int max, int& 
         }
         job.aclSetLevel = level.as<int>();
       }
+    }
+
+    // The writes' payloads (task 05). A plan this firmware cannot hold is refused inside the
+    // plan, by name, and the job is reported `failed` at no transaction rather than the whole
+    // claim being refused: the other job of the claim is not this one's business.
+    job.apply.clear();
+    if (std::strcmp(job.type, "config.apply") == 0) {
+      JsonArrayConst commands = payload.isNull() ? JsonArrayConst() : payload["commands"].as<JsonArrayConst>();
+      if (commands.isNull() || commands.size() == 0) {
+        job.apply.refuse("config.apply carries no plan: nothing to send");
+      } else {
+        for (JsonObjectConst c : commands) {
+          if (!job.apply.addCommand(c["key"].as<const char*>(), c["command"].as<const char*>())) break;
+          JsonArrayConst lines = c["lines"];
+          if (lines.isNull()) continue;
+          bool ok = true;
+          for (JsonObjectConst l : lines) {
+            JsonVariantConst expect = l["expect"];
+            const char* expectText = expect.is<const char*>() ? expect.as<const char*>() : nullptr;
+            if (!job.apply.addLine(l["line"].as<const char*>(), expectText, l["escape"] | false)) {
+              ok = false;
+              break;
+            }
+          }
+          if (!ok) break;
+        }
+      }
+      if (!payload.isNull()) copyText(payload["planHash"].as<const char*>(), job.apply.planHash, sizeof job.apply.planHash);
+    }
+    if (!payload.isNull() && std::strcmp(job.type, "cli") == 0) {
+      const char* command = payload["command"].as<const char*>();
+      if (command != nullptr) {
+        while (*command == ' ' || *command == '\t') command++;
+        size_t n = std::strlen(command);
+        while (n > 0 && (command[n - 1] == ' ' || command[n - 1] == '\t' || command[n - 1] == '\r' || command[n - 1] == '\n')) n--;
+        if (n > 0) {
+          job.hasCliCommand = true;
+          job.cliCommandTooLong = n > kMaxCliCommandLen;
+          std::snprintf(job.cliCommand, sizeof job.cliCommand, "%.*s",
+                        static_cast<int>(n > kMaxCliCommandLen ? kMaxCliCommandLen : n), command);
+        }
+      }
+    }
+    if (!payload.isNull() && std::strcmp(job.type, "advert.request") == 0) {
+      job.advertFlood = payload["flood"] | true;
+    }
+    if (!payload.isNull() && std::strcmp(job.type, "password.set") == 0) {
+      const char* field = payload["field"].as<const char*>();
+      if (field != nullptr && std::strcmp(field, "adminPassword") == 0) job.passwordField = PasswordField::Admin;
+      if (field != nullptr && std::strcmp(field, "guestPassword") == 0) job.passwordField = PasswordField::Guest;
     }
 
     JsonObjectConst path = j["path"];

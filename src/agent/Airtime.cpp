@@ -32,7 +32,15 @@ int transactionsFor(const char* type, CredentialClass credentialClass, int items
     // it did not. A named list is priced as if it held `regions`, which is the ceiling.
     return items > 0 ? items + kConfigReadExtraCount + 1 : configReadTransactions(nullptr, 0);
   }
-  // discover is one at best and three at worst; acl.set, telemetry and a trace are one.
+  if (std::strcmp(type, "config.apply") == 0) {
+    // n + m + 1 (TransactionCosts.For, task p4-53): the plan's n commands, the re-read of the m
+    // keys that were sent - n when every command went out - and `ver`. `items` is the plan's
+    // command count; unknown is priced as one command.
+    const int n = items > 0 ? items : 1;
+    return 2 * n + 1;
+  }
+  // discover is one at best and three at worst; acl.set, telemetry and a trace are one - and so
+  // are the writes (tasks p4-54, p4-55): one command, one reply, sent once.
   return 1;
 }
 

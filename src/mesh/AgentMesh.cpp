@@ -78,7 +78,7 @@ bool AgentMesh::takeRssi(const mesh::Packet* pkt, float& rssi) {
   return false;
 }
 
-void AgentMesh::logFrame(const char* direction, const mesh::Packet* pkt, bool withHex, bool redactBody) {
+void AgentMesh::logFrame(const char* direction, const mesh::Packet* pkt, bool withHex, size_t clearBytes) {
   if (!frameLog_) return;
   const uint8_t type = pkt->getPayloadType();
   const char* route = pkt->isRouteFlood() ? "flood" : (pkt->isRouteDirect() ? "direct" : "other");
@@ -91,12 +91,13 @@ void AgentMesh::logFrame(const char* direction, const mesh::Packet* pkt, bool wi
   // The frame as hex, both directions, for the raw-exchange log - the board's version of the
   // .NET agent's --log-frames. What is never printed: an advert's bytes (a stranger's name is
   // in them, and `mesh` is where a person reads one) and the mesh's own chat. A login that
-  // carries a password is printed with its encrypted body as one `*` per byte
-  // (agent/Credentials.h): the ACL login's body is our key and a timestamp and is printed whole.
+  // carries a password, a `password` line and the reply that echoes it are printed with their
+  // encrypted bodies as one `*` per byte (agent/Credentials.h): the ACL login's body is our key
+  // and a timestamp and is printed whole.
   char payload[2 * MAX_PACKET_PAYLOAD + 1];
   char path[2 * MAX_PATH_SIZE + 1];
-  if (redactBody) {
-    redactLoginPayloadHex(pkt->payload, pkt->payload_len, payload, sizeof payload);
+  if (clearBytes > 0) {
+    redactPayloadHex(pkt->payload, pkt->payload_len, clearBytes, payload, sizeof payload);
   } else {
     hexLine(pkt->payload, pkt->payload_len, payload, sizeof payload);
   }
@@ -131,7 +132,10 @@ mesh::DispatcherAction AgentMesh::onRecvPacket(mesh::Packet* pkt) {
   const bool textAwaited = awaiting_ == Awaiting::Text;
   const bool jobFrame = type == PAYLOAD_TYPE_RESPONSE || type == PAYLOAD_TYPE_PATH || type == PAYLOAD_TYPE_TRACE ||
                         (type == PAYLOAD_TYPE_TXT_MSG && textAwaited);
-  logFrame("rx", pkt, jobFrame && waiting_);
+  // The reply to a `password` line echoes the value: on the air it is ciphertext, and it is
+  // printed as the .NET agent prints it, its code and stars.
+  const bool sensitive = type == PAYLOAD_TYPE_TXT_MSG && textAwaited && sensitiveAwait_;
+  logFrame("rx", pkt, jobFrame && waiting_, sensitive ? kDatagramClearBytes : 0);
 
   // Everything but an advert - and, while a job is waiting for its reply, a RESPONSE, a PATH, a
   // TRACE or the awaited TXT_MSG - is counted and released here, before MeshCore's own dispatch:
@@ -262,9 +266,9 @@ const uint8_t* AgentMesh::sharedSecret() {
   return peerSecret_;
 }
 
-SendResult AgentMesh::dispatch(mesh::Packet* pkt, bool redactBody) {
+SendResult AgentMesh::dispatch(mesh::Packet* pkt, size_t clearBytes) {
   if (pkt == nullptr) return SendResult::Failed;
-  logFrame("tx", pkt, true, redactBody);
+  logFrame("tx", pkt, true, clearBytes);
   if (haveOutPath_) {
     sendDirect(pkt, outPath_, outPathLen_);
     return SendResult::Direct;
@@ -296,7 +300,7 @@ SendResult AgentMesh::sendLogin(const char* password, uint32_t& tag) {
   // The one plaintext copy of the password this file ever holds, gone before the packet is on
   // the air; the packet's own body is ciphertext.
   wipeBytes(temp, sizeof temp);
-  return dispatch(pkt, len > 0);
+  return dispatch(pkt, len > 0 ? kLoginPayloadClearBytes : 0);
 }
 
 SendResult AgentMesh::sendRequest(uint8_t reqType, const uint8_t* data, uint8_t len, uint32_t& tag) {
@@ -309,8 +313,9 @@ SendResult AgentMesh::sendRequest(uint8_t reqType, const uint8_t* data, uint8_t 
   return dispatch(createDatagram(PAYLOAD_TYPE_REQ, peer_, sharedSecret(), temp, 5u + len));
 }
 
-SendResult AgentMesh::sendCli(const char* text, uint32_t timestamp) {
+SendResult AgentMesh::sendCli(const char* text, uint32_t timestamp, bool sensitive) {
   if (!peerSet_ || text == nullptr) return SendResult::Failed;
+  sensitiveAwait_ = sensitive;
   const size_t len = std::strlen(text);
   // Mesh::createDatagram refuses a plaintext past MAX_PACKET_PAYLOAD - MAC - (block - 1).
   if (len == 0 || len + 5u > MAX_PACKET_PAYLOAD - 16u - 15u) return SendResult::Failed;
@@ -322,7 +327,11 @@ SendResult AgentMesh::sendCli(const char* text, uint32_t timestamp) {
   std::memcpy(temp, &timestamp, 4);
   temp[4] = static_cast<uint8_t>(kTxtTypeCliData << 2);
   std::memcpy(&temp[5], text, len);
-  return dispatch(createDatagram(PAYLOAD_TYPE_TXT_MSG, peer_, sharedSecret(), temp, 5u + len));
+  mesh::Packet* pkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, peer_, sharedSecret(), temp, 5u + len);
+  // A `password` line: the one plaintext copy this file holds is gone before the packet is on
+  // the air, and the frame is printed as its two hashes and stars.
+  if (sensitive) wipeBytes(temp, sizeof temp);
+  return dispatch(pkt, sensitive ? kDatagramClearBytes : 0);
 }
 
 SendResult AgentMesh::sendDiscovery(uint32_t& tag) {
@@ -379,12 +388,14 @@ bool AgentMesh::await(Awaiting what, uint32_t tag, uint32_t timeoutMs, void (*pu
     if (reply_.kind != MeshReply::Kind::None) {
       waiting_ = false;
       awaiting_ = Awaiting::None;
+      sensitiveAwait_ = false;
       return true;
     }
     delay(1);
   }
   waiting_ = false;
   awaiting_ = Awaiting::None;
+  sensitiveAwait_ = false;
   return false;
 }
 

@@ -1,9 +1,11 @@
 // The MeshMaster agent firmware: a Heltec V3 that boots, takes its settings over the USB serial
 // console, joins WiFi, sets its clock, and is an exit node on meshmaster.dk - it heartbeats over
 // verified TLS, posts the adverts its radio hears, and claims and answers the jobs of EXIT-NODES
-// §7 that read and log in: status, telemetry, neighbours and trace (task 03), and discover,
-// acl.set and config.read, which carry a repeater's password for the length of the job and
-// nothing longer (task 04, src/agent/Credentials.h). What leaves the radio is one packet per
+// §7: the reads that log in as this board - status, telemetry, neighbours and trace (task 03) -
+// discover, acl.set and config.read, which carry a repeater's password for the length of the
+// job and nothing longer (task 04, src/agent/Credentials.h), and the six that change a repeater
+// - config.apply, cli, advert.request, clock.sync, password.set, reboot - each one send per
+// command (task 05, src/agent/ConfigApply.h). What leaves the radio is one packet per
 // transaction and nothing else (src/mesh/AgentMesh.h).
 //
 // The pieces, each in its own file:

@@ -22,7 +22,7 @@ test, so it is the session the console accepts, line for line.
 | `status` | firmware, board and reset reason, the public key, the radio and its frame counters, WiFi, time and where it came from, the server's last answer, the heartbeat, the heap |
 | `mesh` | the adverts heard: how many, how many are waiting to be posted and how many the ring dropped, and the last five with their names, roles, hops, SNR and RSSI |
 | `server` | the exit node's loop: the last heartbeat and the next, the last observation batch, the job counters, and the four error counters the heartbeat itself carries |
-| `jobs` | the airtime budget in force and what it has spent, how many claims were made, the seven job types this firmware advertises, and the last ten jobs with their outcome, their transaction count and when they ended |
+| `jobs` | the airtime budget in force and what it has spent, how many claims were made, the thirteen job types this firmware advertises, and the last ten jobs with their outcome, their transaction count and when they ended |
 | `sessions` | the repeater logins the board holds: per repeater the first twelve characters of its key, the class the session serves, the level the repeater granted and its age. A session is a key, a class, a role byte and a time; no secret is in one, and none is printed |
 | `wifi` | a blocking scan (a few seconds): every network with channel, RSSI and security, then the link's state |
 | `reboot` | restart |
@@ -46,7 +46,7 @@ that is not `https://`, a line over 200 characters, a control character.
 | `radio.cr` | 5..8 | 8 |
 | `radio.tx` | dBm, -9..22 | 22 |
 | `log.level` | `error`, `warn`, `info`, `debug` | `info` |
-| `log.frames` | `on`, `off`: one log line per frame, both directions. A frame of a job in flight - the login, the request, a CLI line and its reply, a trace - is printed as hex, header, path and payload; a login that carries a password is printed with its encrypted body as one `*` per byte, which is the .NET agent's redaction of `CMD_SEND_LOGIN`; an advert and the mesh's own chat are the header line only, never their bytes | `off` |
+| `log.frames` | `on`, `off`: one log line per frame, both directions. A frame of a job in flight - the login, the request, a CLI line and its reply, a trace - is printed as hex, header, path and payload; a login that carries a password, and the `password` line of a rotation and the reply that echoes it, are printed with their encrypted bodies as one `*` per byte, which is the .NET agent's redaction of `CMD_SEND_LOGIN` and of a sensitive CLI line; an advert and the mesh's own chat are the header line only, never their bytes | `off` |
 
 The radio's fallbacks are the Danish MeshCore channel, the one the field
 repeaters run; the ranges are MeshCore's own. A `set` takes effect at once:
@@ -117,11 +117,25 @@ command (`restore: cli 'setperm <own key> 1': ok`, then `the ACL entry of this
 exit node's key is back at read-only, as granted; the session is now read-only
 (task 60)`). A password is never an argument of any of those lines.
 
+The writes (task 05) say what they sent and what came back, and the .NET agent's
+words for it: `apply plan 3f2a…: 2 command(s), single attempt, stop at the first
+refusal or silence`, then one line per command (`'set advert.interval 120' try
+1: ok`, or `flood.max: the repeater answered 'set flood.max 100' with 'Error,
+max 64', and this line wanted 'OK'`), the re-read (`re-read 'get
+advert.interval' try 1: ok`), and `applied 1 of 3 command(s) as the repeater
+answered them; re-read 2 of 2 touched key(s)`; a `cli` says `the repeater
+answered 'neighbors': …`; a `reboot` says `no restore on this session … (task
+60)` and then `reboot sent; the firmware does not answer one`; a `password.set`
+says `cli 'password <new>' try 1: ok`, `the repeater confirmed the new admin
+password`, the restore, and `the session is dropped`.
+
 What it never prints: the passphrase, the token (not in a reply, not in a log
-line, not in `status`), a repeater's password (the claim carries one for a
-`discover`, an `acl.set` or a `config.read`; it lives in one fixed buffer for
-the job, is zeroed when the job ends, reaches no log line and no NVS key, and
-`log.frames on` prints the login that carried it with the body as stars), and
+line, not in `status`), a repeater's password (the claim carries one for every
+admin job - a `discover`, an `acl.set`, a `config.read`, and the six writes -
+and the new one of a `password.set` beside it; each lives in one fixed buffer
+for the job, is zeroed when the job ends, reaches no log line and no NVS key,
+and `log.frames on` prints the login that carried it, the `password` line and
+the echo that answers it with their bodies as stars), and
 anything the mesh *says* - an advert's name is read on demand with `mesh` and
 never logged, the mesh's own chat is counted by type and dropped unread, and
 `log.frames on` prints the bytes of a job's own frames and of nothing else.
@@ -205,3 +219,34 @@ with `token revoked/wrong`, and it stays there until the token is set again.
 13. A night of probes with the association `active`: `sessions` in the morning
     shows a read-only session or none, never an admin one, and the association
     on the server has not moved to `needs-regrant`.
+14. The first apply through the board (task 05; meshmaster.dk's
+    `tasks/phase-4/FIRST-APPLY.md`, step one): one harmless key,
+    `advert.interval`, from the Configuration tab. The log shows the plan line,
+    `'set advert.interval 120' try 1: ok`, the re-read of that key and `ver`,
+    `applied 1 of 1`, and the restore last; `jobs` counts **5**: the login, the
+    set, the two gets, the restore. `get advert.interval` on the repeater's own
+    console must say what MeshMaster says.
+15. The refusal, then the partial plan (FIRST-APPLY steps two and three): `set
+    advert.interval 15` from the CLI console passes the server's blocked list
+    and comes back `Error: interval range is 60-240 minutes`, which the job
+    records verbatim and reports `failed`; a plan whose second command the
+    repeater refuses leaves the third `not-sent` and reads back the two that
+    were sent. With `log.frames on`, every `set` prints exactly **once** as a
+    `frame tx txt` line, and the timestamps in those frames (the first four
+    payload bytes are ciphertext; read the job's log instead) are never repeated.
+16. The small jobs from the repeater's **Ask the repeater** row: `advert`
+    (`OK - Advert sent`, and the board hears the advert within the minute -
+    `mesh` shows it), `time <unix>` (`OK - clock set: HH:MM - D/M/Y UTC`, or
+    `(ERR: clock cannot go backwards)` recorded as the refusal it is; the value
+    sent is this board's clock, so `status` must show a time from SNTP first).
+    **Reboot** only with the cable in: the job is `ok` as *sent* on silence, the
+    log says why no restore was sent, and the next status read confirms it by
+    the uptime on the server.
+17. A rotation on a test repeater (`docs/ops/credentials.md` §6 on
+    meshmaster.dk): `cli 'password <new>' try 1: ok`, `the repeater confirmed
+    the new admin password`, then `restore: cli 'setperm <own key> 1': ok`
+    **after** it, then `the session is dropped`; `sessions` shows none for that
+    repeater. With `log.frames on` the `password` frame and its reply print as
+    two hex bytes and then stars. `jobs` counts **3** through an acl pair: the
+    login, the password line, the restore. The next admin job logs in with the
+    new password.

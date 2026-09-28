@@ -26,7 +26,9 @@
 // of a job - never an advert's bytes (a stranger's name is in them) and never the mesh's own
 // chat (README.md: nothing the mesh says is logged as text). A login that carries a password is
 // printed with its encrypted body replaced by one `*` per byte (agent/Credentials.h), which is
-// the .NET agent's redaction of CMD_SEND_LOGIN: nothing made from a password reaches the port.
+// the .NET agent's redaction of CMD_SEND_LOGIN, and a `password` line and the reply that echoes
+// it (task 05) are printed the same way, hashes and then stars: nothing made from a password
+// reaches the port.
 
 #pragma once
 
@@ -144,8 +146,9 @@ class AgentMesh : public mesh::Mesh {
   // the sender timestamp the repeater judges replays by, and must be strictly above the last
   // one it saw from this key (MyMesh::onPeerDataRecv at d9296435 answers an equal one with
   // nothing and does not run the command) - uniqueTime() is that series. The reply is a TXT_MSG
-  // of the repeater's own and is awaited with awaitText().
-  SendResult sendCli(const char* text, uint32_t timestamp);
+  // of the repeater's own and is awaited with awaitText(). `sensitive` is a line made from a
+  // password: its frame, and the reply awaited for it, are printed with their bodies as stars.
+  SendResult sendCli(const char* text, uint32_t timestamp, bool sensitive = false);
 
   // The path-discovery request as the companion's CMD_SEND_PATH_DISCOVERY_REQ makes it
   // (examples/companion_radio/MyMesh.cpp:1602-1630 at d9296435): a base-telemetry REQ, always
@@ -207,11 +210,13 @@ class AgentMesh : public mesh::Mesh {
   bool takeRssi(const mesh::Packet* pkt, float& rssi);
   void remember(const HeardAdvert& advert);
   const uint8_t* sharedSecret();
-  SendResult dispatch(mesh::Packet* pkt, bool redactBody = false);
+  // `clearBytes` is how much of the payload is printed as hex before the stars: 0 is the whole
+  // frame, kLoginPayloadClearBytes a login with a password, kDatagramClearBytes a `password` line.
+  SendResult dispatch(mesh::Packet* pkt, size_t clearBytes = 0);
   bool await(Awaiting what, uint32_t tag, uint32_t timeoutMs, void (*pump)());
   void takeResponse(mesh::Packet* pkt, const uint8_t* data, size_t len, bool viaPath);
   void takeText(mesh::Packet* pkt, const uint8_t* data, size_t len);
-  void logFrame(const char* direction, const mesh::Packet* pkt, bool withHex, bool redactBody = false);
+  void logFrame(const char* direction, const mesh::Packet* pkt, bool withHex, size_t clearBytes = 0);
 
   MeshCounters counters_;
   ObservationRing* ring_ = nullptr;
@@ -235,6 +240,7 @@ class AgentMesh : public mesh::Mesh {
   uint32_t waitingFor_ = 0;
   bool waiting_ = false;
   Awaiting awaiting_ = Awaiting::None;
+  bool sensitiveAwait_ = false;  // the text awaited answers a `password` line: its frame is starred
 };
 
 }  // namespace mm

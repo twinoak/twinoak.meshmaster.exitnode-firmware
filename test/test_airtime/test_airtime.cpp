@@ -44,6 +44,18 @@ TEST(TransactionCosts, TheFourTypesCostWhatThePlannedLoadPricesThem) {
 // status+telemetry pair is one login and two requests - three transactions through a guest
 // fallback pair, four through an acl association, where the status read fetches the firmware
 // version as well.
+// The writes (tasks p4-53, 54, 55): an apply is n + m + 1 with m = n, two commands being five
+// transactions and a login; every other write is one command, one reply, sent once.
+TEST(TransactionCosts, TheWritesCostWhatThePlannedLoadPricesThem) {
+  EXPECT_EQ(mm::transactionsFor("config.apply", mm::CredentialClass::Admin, 2), 5);
+  EXPECT_EQ(mm::transactionsFor("config.apply", mm::CredentialClass::Admin, 3), 7);
+  EXPECT_EQ(mm::transactionsFor("config.apply", mm::CredentialClass::Admin, 1), 3);
+  EXPECT_EQ(mm::transactionsFor("config.apply", mm::CredentialClass::Admin), 3) << "an unknown plan is priced as one command";
+  for (const char* type : {"cli", "advert.request", "clock.sync", "password.set", "reboot"}) {
+    EXPECT_EQ(mm::transactionsFor(type, mm::CredentialClass::Admin), 1) << type;
+  }
+}
+
 TEST(TransactionCosts, TheStatusAndTelemetryPairCostsThreeOrFour) {
   const int guestPair = mm::kTransactionsForLogin + mm::transactionsFor("status", mm::CredentialClass::Guest) +
                         mm::transactionsFor("telemetry", mm::CredentialClass::Guest);
