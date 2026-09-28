@@ -1,0 +1,260 @@
+# The release: a GitHub Release with, per board, the image to flash.
+#
+#   push a tag vX.Y.Z   -> wait for ci to be green on that commit -> build every board -> publish
+#   workflow_dispatch   -> the same build, published nowhere: a dry run whose artifacts are the
+#                          proof that the tag path works. Input "ref": the commit to rehearse on.
+#
+# Same shape as twinoak/meshmaster.dk's release.yml, minus the deploy: pushing the tag IS the
+# approval, nothing is released whose CI is red or unknown, and an older commit is a rollback.
+#
+# Per board it publishes:
+#   meshmaster-agent-<board>-vX.Y.Z.bin          the application image, for OTA later
+#   meshmaster-agent-<board>-vX.Y.Z-merged.bin   bootloader + partitions + application, one file,
+#                                                flashed at 0x0 on a fresh board out of the box
+#   SHA256SUMS                                   for all of them, one file
+# and the notes print the one esptool line per board and the MeshCore tag the build used.
+#
+# The version the board reports is the tag: -D MESHMASTER_AGENT_VERSION="X.Y.Z+<sha7>", which
+# src/version.cpp turns into the string F-01's `status` command and the heartbeat's agentVersion
+# read. A dry run says 0.0.0-dryrun+<sha7> so an artifact can never be mistaken for a release.
+
+name: release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit or branch to rehearse the release on. Empty: this workflow's ref."
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# One release at a time, and none is ever cancelled half-way through a publish.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  PIO_VERSION: "6.1.19"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  # Nothing is released whose build and tests are red or unknown. A tag on a commit ci has not
+  # passed is refused here, before anything is built.
+  ci-green:
+    name: ci is green for this commit
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+      version: ${{ steps.commit.outputs.version }}
+      release: ${{ steps.commit.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0
+
+      - name: The commit, and the version it is released as
+        id: commit
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}+${sha:0:7}"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            version="0.0.0-dryrun+${sha:0:7}"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "$GITHUB_REF_NAME -> $version" >> "$GITHUB_STEP_SUMMARY"
+
+      # The commit a tag names must be one of master's: a tag on a side branch is not a release.
+      - name: And that it is on master
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin master
+          git merge-base --is-ancestor "$(git rev-parse HEAD)" origin/master \
+            || { echo "::error::$(git rev-parse HEAD) is not a commit of master"; exit 1; }
+
+      - name: Wait for the ci workflow of that commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$SHA" --event push --limit 1 --json status,conclusion,url --jq '.[0] // empty')
+            status=$(echo "$run" | jq -r '.status // "none"')
+            conclusion=$(echo "$run" | jq -r '.conclusion // ""')
+            echo "ci for $SHA: $status $conclusion"
+            if [ "$status" = "completed" ]; then
+              if [ "$conclusion" = "success" ]; then exit 0; fi
+              echo "::error::ci ended as '$conclusion' for $SHA: $(echo "$run" | jq -r '.url'). Nothing is released."
+              exit 1
+            fi
+            sleep 20
+          done
+          echo "::error::ci has not completed for $SHA (no green push run within 20 minutes). A tag on a commit ci has not passed is refused."
+          exit 1
+
+  build:
+    name: build (${{ matrix.env }})
+    needs: ci-green
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The same list as ci.yml. Adding a board is one line in both.
+        env: [heltec_v3]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.ci-green.outputs.sha }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ env.PIO_VERSION }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: |
+            pio-${{ runner.os }}-${{ env.PIO_VERSION }}-
+
+      - name: Install PlatformIO Core
+        run: pip install --quiet "platformio==${PIO_VERSION}"
+
+      # The version is a build flag, so it is in the image and not in a file beside it.
+      - name: Build with the version baked in
+        env:
+          PLATFORMIO_BUILD_FLAGS: -D MESHMASTER_AGENT_VERSION='"${{ needs.ci-green.outputs.version }}"'
+        run: |
+          set -euo pipefail
+          pio run -e ${{ matrix.env }}
+          pio run -e ${{ matrix.env }} -t mergebin
+
+      - name: Name the images after the release
+        env:
+          VERSION: ${{ needs.ci-green.outputs.version }}
+        run: |
+          set -euo pipefail
+          out=out/release
+          mkdir -p "$out"
+          # vX.Y.Z in the file name, not the +sha7 build metadata: that is inside the image.
+          v="v${VERSION%%+*}"
+          build=".pio/build/${{ matrix.env }}"
+          cp "$build/firmware.bin"        "$out/meshmaster-agent-${{ matrix.env }}-$v.bin"
+          cp "$build/firmware-merged.bin" "$out/meshmaster-agent-${{ matrix.env }}-$v-merged.bin"
+          ls -la "$out"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.env }}
+          path: out/release/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: ${{ needs.ci-green.outputs.release == 'true' && 'publish the release' || 'dry run (nothing published)' }}
+    needs: [ci-green, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.ci-green.outputs.sha }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: out/release
+
+      - name: SHA256SUMS and the notes
+        env:
+          VERSION: ${{ needs.ci-green.outputs.version }}
+          SHA: ${{ needs.ci-green.outputs.sha }}
+          RELEASE: ${{ needs.ci-green.outputs.release }}
+        run: |
+          set -euo pipefail
+          cd out/release
+
+          sha256sum ./*.bin | sed 's| \./| |' > SHA256SUMS
+          cat SHA256SUMS
+
+          v="v${VERSION%%+*}"
+          pin=$(sed -n 's/^pin = \(.*\)$/\1/p' ../../platformio.ini | head -1)
+          tag=$(sed -n 's/^tag = \(.*\)$/\1/p' ../../platformio.ini | head -1)
+          {
+            echo "MeshMaster agent firmware $v, built from \`${SHA:0:7}\` on MeshCore \`$tag\` (\`${pin:0:8}\`)."
+            echo
+            echo "The board reports \`$VERSION\` in its heartbeat and on its serial console."
+            if [ "$RELEASE" != "true" ]; then
+              echo
+              echo "**This is a dry run.** The images are the workflow's artifacts and nothing is published."
+            fi
+            echo
+            echo "## Flashing a board"
+            echo
+            echo "A board out of the box takes the **merged** image at \`0x0\` - it carries the"
+            echo "bootloader and the partition table with it. Hold the user button while plugging in"
+            echo "if the port does not appear, and \`pip install esptool\` if you have none:"
+            echo
+            for f in meshmaster-agent-*-"$v"-merged.bin; do
+              board="${f#meshmaster-agent-}"; board="${board%-"$v"-merged.bin}"
+              case "$board" in
+                heltec_v3|heltec_v4*) chip=esp32s3 ;;
+                *) chip=esp32 ;;
+              esac
+              echo "\`\`\`"
+              echo "# $board"
+              echo "esptool.py --chip $chip --port <PORT> --baud 921600 write_flash 0x0 $f"
+              echo "\`\`\`"
+            done
+            echo
+            echo "\`meshmaster-agent-<board>-$v.bin\` beside it is the **application** image alone,"
+            echo "for a board that already has this firmware on it (and for OTA, when there is OTA)."
+            echo "\`SHA256SUMS\` covers both."
+            echo
+            echo "## Provisioning"
+            echo
+            echo "Over the USB serial console at 115200 baud: \`set\` the WiFi credentials and the"
+            echo "agent token, then \`save\`. See \`docs/\` in this repository; the token comes from"
+            echo "the exit node's registration page on meshmaster.dk."
+          } > NOTES.md
+          cat NOTES.md
+
+      - name: Publish
+        if: needs.ci-green.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "MeshMaster agent firmware $GITHUB_REF_NAME" \
+            --notes-file out/release/NOTES.md \
+            out/release/*.bin out/release/SHA256SUMS
+
+      - name: The dry run's output, for the record
+        uses: actions/upload-artifact@v4
+        with:
+          name: images-${{ needs.ci-green.outputs.sha }}
+          path: out/release/*
+          if-no-files-found: error
+          retention-days: 14

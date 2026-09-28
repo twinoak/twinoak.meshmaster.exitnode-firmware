@@ -1,0 +1,126 @@
+# Every pull request and every push to master, once per commit.
+#
+#   build (heltec_v3)   pio run -e heltec_v3, and the .bin as an artifact
+#   native tests        pio test -e native (the host tests: no board, no radio)
+#   fixtures            tools/sync-fixtures.ps1 -Verify - the contract fixtures are still
+#                       meshmaster.dk's bytes and nobody edited one here
+#
+# One run per commit is twinoak/meshmaster.dk's rule (its tasks/phase-4/49) and it is here from the
+# first commit: a branch push and its pull request are two refs, so the concurrency group below
+# cannot collapse them. A pull request is where a check blocks a merge, and a push to master is
+# what release.yml's ci-green waits for, so those two are the triggers and a branch push is not one.
+#
+# A red job blocks the merge: tasks/RUNBOOK.md merges on green only, and the branch protection of
+# this repository makes GitHub insist too.
+
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # PlatformIO Core is pinned like every other dependency here (tasks/README.md): a firmware build
+  # has to be reproducible, and the toolchain it resolves is part of the build.
+  PIO_VERSION: "6.1.19"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  build:
+    name: build (${{ matrix.env }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # One line per board. release.yml builds the same list.
+        env: [heltec_v3]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The toolchain and every library, keyed by the file that decides them: a hit turns a
+      # four-minute cold build into seconds. MeshCore is a git dependency, so the pin is in the key.
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ env.PIO_VERSION }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: |
+            pio-${{ runner.os }}-${{ env.PIO_VERSION }}-
+
+      - name: Install PlatformIO Core
+        run: pip install --quiet "platformio==${PIO_VERSION}"
+
+      - name: Build
+        run: pio run -e ${{ matrix.env }}
+
+      # -Werror is on for src/ (platformio.ini's build_src_flags), so a warning of our own has
+      # already failed the step above. This is the size of what was built, for the record.
+      - name: What was built
+        run: |
+          set -euo pipefail
+          ls -la ".pio/build/${{ matrix.env }}/firmware.bin"
+          {
+            echo "### ${{ matrix.env }}"
+            echo '```'
+            pio run -e ${{ matrix.env }} 2>&1 | grep -E '^(RAM|Flash):' || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the image
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.env }}-${{ github.sha }}
+          path: |
+            .pio/build/${{ matrix.env }}/firmware.bin
+            .pio/build/${{ matrix.env }}/firmware.elf
+          if-no-files-found: error
+          retention-days: 14
+
+  native:
+    name: native tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-native-${{ runner.os }}-${{ env.PIO_VERSION }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: |
+            pio-native-${{ runner.os }}-${{ env.PIO_VERSION }}-
+
+      - name: Install PlatformIO Core
+        run: pip install --quiet "platformio==${PIO_VERSION}"
+
+      # A host build: g++ is the runner's own. On Windows there is none, which is why a session
+      # runs this step in a container (tasks/RUNBOOK.md section 2).
+      - name: Test
+        run: pio test -e native
+
+      # The other half of the contract-fixture rail: the native test checks that every fixture is
+      # present and well formed, this checks that its bytes are still the ones meshmaster.dk had at
+      # the commit MANIFEST.txt records. No network and no token - the hashes are in the manifest.
+      - name: The contract fixtures are still meshmaster.dk's
+        shell: pwsh
+        run: ./tools/sync-fixtures.ps1 -Verify

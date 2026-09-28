@@ -1,0 +1,5 @@
+# The contract fixtures of the .NET agent, copied - never edited here.
+# source: twinoak/meshmaster.dk/tests/fixtures/contracts at commit c2b477c45269eef55c330c508e745763ecf9646f
+# written by tools/sync-fixtures.ps1; see README.md in this directory
+#
+# sha256                                                           bytes  name
