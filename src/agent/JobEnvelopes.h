@@ -92,7 +92,8 @@ struct ClaimedJob {
 
   // The payload, for the types whose payload says something: a config.read's `keys` (none
   // means the default list), an acl.set's `publicKey` and `level`, a config.apply's plan, a
-  // cli's `command`, an advert.request's `flood` and a password.set's `field`.
+  // cli's `command`, an advert.request's `flood`, a status's `version` and a password.set's
+  // `field`.
   bool hasConfigKeys = false;
   int configKeyCount = 0;
   char configKeys[kMaxConfigKeys][kMaxConfigKeyLen + 1] = {};
@@ -104,6 +105,14 @@ struct ClaimedJob {
   bool cliCommandTooLong = false;
   char cliCommand[kMaxCliCommandLen + 1] = {0};
   bool advertFlood = true;  // AdvertRequestPayload.Flood defaults to true: the flood is what refreshes paths
+
+  // StatusPayload.Version (meshmaster.dk's task p4.3-68): whether this status read also makes
+  // the owner-info request that carries the firmware version. **Absent is "read it"** - what
+  // every claim said before that task - and `false` is the claim saying the server's record is
+  // fresh enough to spend nothing on, which at the default schedules is forty-seven of a
+  // repeater's forty-eight daily reads. readsFirmwareVersion() below is the rule; this is only
+  // what the payload said.
+  bool statusVersion = true;
   PasswordField passwordField = PasswordField::None;
 
   // What reachability knows for this (agent, repeater): the hops to set as the contact's
@@ -134,6 +143,12 @@ bool canRun(const ClaimedJob& job, char* why, size_t whyCap);
 // Jobs of one claim that share a login (EXIT-NODES §8): `groupWith` names them, and the repeater
 // they are for is the session cache's own answer to the same question.
 bool sharesLogin(const ClaimedJob& a, const ClaimedJob& b);
+
+// Whether a status job also fetches the firmware version, which is one transaction more
+// (EXIT-NODES §7). One rule, in one place, as StatusPayload.ReadsVersion is on the server:
+// class `acl` - only the association's verify step needs the version at all - unless the
+// claim's payload says the server does not want it this time. A job of another type is false.
+bool readsFirmwareVersion(const ClaimedJob& job);
 
 // Whether the lease this job was claimed under has run out (task 06). A claim's jobs are run one
 // at a time and a job is minutes of airtime, so a server that went away under a claim - or a

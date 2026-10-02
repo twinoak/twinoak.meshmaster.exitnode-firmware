@@ -320,6 +320,74 @@ TEST(StatusResult, AnAclReadCarriesTheFirmwareTheOwnerInfoRequestFetched) {
   EXPECT_NE(std::string(out, len).find("\"firmware\":\"v1.17.1\"}"), std::string::npos);
 }
 
+// The second transaction of an acl-class status read, and when it is spent (EXIT-NODES §7,
+// meshmaster.dk's task p4.3-68). readsFirmwareVersion() is the one rule - class `acl` unless the
+// claim's payload says the version is not wanted this time - and `firmware` is in the result
+// when that rule said yes and absent when it said no, which is what a reader of the result has
+// to be able to tell apart from a version read that was attempted and failed.
+TEST(StatusResult, TheFirmwareIsReadOnlyWhenTheClaimAsksForIt) {
+  const auto stats = companion("status-response", 8);
+  mm::StatusReading s;
+  ASSERT_TRUE(mm::parseRepeaterStats(stats.data(), stats.size(), s));
+  const auto owner = companion("binary-response-owner-info", 6);
+  char firmware[mm::kMaxFirmwareVersionLen + 1] = {0};
+  ASSERT_TRUE(mm::parseOwnerInfoFirmware(owner.data(), owner.size(), firmware, sizeof firmware));
+  mm::ErrorCounter errors[mm::kMaxStatusErrors];
+  const int n = mm::statusErrors(s, errors, mm::kMaxStatusErrors);
+
+  // Three claims, parsed as they arrive: an acl read whose payload says nothing (an older
+  // server, and that means read it), the same read with `version: false` - forty-seven of a
+  // repeater's forty-eight daily reads - and a guest read, which never fetches the version at
+  // all, because only the association's verify step needs it.
+  struct Case {
+    const char* what;
+    const char* claimClass;
+    const char* payload;
+    bool reads;
+    int transactions;
+  } cases[] = {
+      {"acl, payload {}", "acl", "{}", true, 2},
+      {"acl, version false", "acl", "{\"version\":false}", false, 1},
+      {"guest, payload {}", "guest", "{}", false, 1},
+  };
+
+  for (const Case& c : cases) {
+    std::string reply =
+        std::string("{\"serverTime\":\"2026-09-18T10:00:03Z\",\"jobs\":[{\"id\":27,\"type\":\"status\","
+                    "\"repeater\":{\"id\":17,\"label\":\"x\",\"publicKey\":\"a1b2\"},"
+                    "\"credentialClass\":\"") +
+        c.claimClass + "\",\"leaseUntil\":\"2026-09-18T10:02:03Z\",\"payload\":" + c.payload +
+        ",\"credential\":{\"acl\":1}}]}";
+    mm::ClaimedJob jobs[mm::kClaimMax];
+    int count = 0;
+    std::uint32_t serverTime = 0;
+    char err[96] = {0};
+    ASSERT_TRUE(
+        mm::parseClaimResponse(&reply[0], reply.size(), jobs, mm::kClaimMax, count, serverTime, err, sizeof err))
+        << c.what << ": " << err;
+    ASSERT_EQ(count, 1) << c.what;
+    EXPECT_EQ(mm::readsFirmwareVersion(jobs[0]), c.reads) << c.what;
+
+    // One status request, and the owner-info request only when the rule said so: the job's
+    // transaction count is what the result reports and what the server prices.
+    const int transactions = 1 + (mm::readsFirmwareVersion(jobs[0]) ? 1 : 0);
+    EXPECT_EQ(transactions, c.transactions) << c.what;
+
+    char out[768];
+    const std::size_t len =
+        mm::writeStatusResult(s, errors, n, mm::readsFirmwareVersion(jobs[0]) ? firmware : nullptr, out, sizeof out);
+    ASSERT_GT(len, 0u) << c.what;
+    const bool present = std::string(out, len).find("\"firmware\":\"v1.17.1\"") != std::string::npos;
+    EXPECT_EQ(present, c.reads) << c.what;
+  }
+
+  // And no other type fetches it, whatever its class says.
+  mm::ClaimedJob telemetry;
+  std::snprintf(telemetry.type, sizeof telemetry.type, "telemetry");
+  telemetry.credentialClass = mm::CredentialClass::Acl;
+  EXPECT_FALSE(mm::readsFirmwareVersion(telemetry));
+}
+
 TEST(TelemetryResult, TheTranscribedReplyMakesTheFourChannelsTheDotNetAgentMakes) {
   const auto lpp = companion("telemetry-response", 8);
   mm::LppReading readings[mm::kMaxLppReadings];

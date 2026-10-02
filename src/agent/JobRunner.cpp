@@ -465,10 +465,13 @@ Outcome JobRunner::runStatus(const ClaimedJob& job, Context& ctx, size_t& dataLe
   }
 
   char firmware[kMaxFirmwareVersionLen + 1] = {0};
-  if (job.credentialClass == CredentialClass::Acl) {
+  if (readsFirmwareVersion(job)) {
     // The verify step of an association records the firmware it proved the ACL login on
     // (EXIT-NODES §4.1 step 5); the version string is only readable through the owner-info
-    // request, one more transaction, so it is fetched for acl-class reads alone.
+    // request, one more transaction, so it is fetched for acl-class reads alone - and since
+    // meshmaster.dk's task p4.3-68 only when the claim asks for it, which is when the server's
+    // record is stale or this pair has recorded none. Forty-seven of a repeater's forty-eight
+    // daily reads are one transaction instead of two.
     if (request(job, ctx, "owner info (firmware)", AgentMesh::kReqTypeGetOwnerInfo, nullptr, 0) == Outcome::Ok) {
       const MeshReply& owner = mesh_->reply();
       parseOwnerInfoFirmware(owner.data, owner.len, firmware, sizeof firmware);

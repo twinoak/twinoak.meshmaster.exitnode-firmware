@@ -120,6 +120,16 @@ command (`restore: cli 'setperm <own key> 1': ok`, then `the ACL entry of this
 exit node's key is back at read-only, as granted; the session is now read-only
 (task 60)`). A password is never an argument of any of those lines.
 
+An `acl`-class `status` is the one read whose transaction count moves with what
+the claim asked for: it fetches the firmware version with a second request
+(`owner info (firmware)`) only when the claim's payload wants it, which the
+server asks for once a day per repeater and not on the other forty-seven reads
+(meshmaster.dk's task p4.3-68). So `jobs` shows that read as **2
+transaction(s)** the first time after a grant and after each day's refresh, and
+**1** the rest of the time; a payload that says nothing at all - an older
+server - is two every time, which is what the count was before. Nothing is
+logged when the request is skipped, because nothing was sent.
+
 The writes (task 05) say what they sent and what came back, and the .NET agent's
 words for it: `apply plan 3f2a…: 2 command(s), single attempt, stop at the first
 refusal or silence`, then one line per command (`'set advert.interval 120' try

@@ -31,6 +31,10 @@
   .\tasks\run-all.ps1 -Phase 1 -From 04 -To 04     # one task
   .\tasks\run-all.ps1 -Phase 1 -Model opus         # default model for tasks that name none
 
+  A task's branch is deleted - locally and on origin - once its report is on origin/master and
+  origin/master contains the branch. The session is asked to do it first (RUNBOOK.md section 4);
+  this is the second ask, for the session that was cut off before it got there.
+
   A session that dies on a usage or rate limit (Claude Code prints "usage limit" / "rate limit" and
   ends without landing the task) is not a stop: the driver waits -RetryWaitMinutes and starts the
   same task again, up to -MaxRetries times. The new session finds the task's branch and continues
@@ -75,6 +79,36 @@ function Report-Landed([string]$n) {
     [void](Quiet { git fetch -q origin })
     $path = if ($Phase -eq 'sync') { "tasks/sync/reports/$n.md" } else { "tasks/phase-$Phase/reports/$n.md" }
     return (Quiet { git cat-file -e "origin/master:$path" }) -eq 0
+}
+function Remove-Merged-Branch([string]$n, [string]$name) {
+    # The task's branch, once its report is on origin/master. RUNBOOK.md section 4 asks the
+    # session to delete it (`gh pr merge --delete-branch`, or `git branch -d` without gh), and a
+    # session that was cut off between the merge and the delete leaves it behind - phase 1 left
+    # five. So the driver asks again here, for this task's branch and no other.
+    #
+    # A branch is deleted only when origin/master already contains it: an unmerged branch is work
+    # nobody has, and the one thing worse than a stale branch is a lost one. `upstream/<tag>` of
+    # the sync phase is not the driver's to touch - the workflow pushed it (docs\upstream.md).
+    if ($Phase -eq 'sync') { return }
+    $branch = "task/p$Phase-$n-$name"
+    [void](Quiet { git fetch -q origin })
+    if ((Quiet { git rev-parse -q --verify "refs/remotes/origin/$branch" }) -eq 0) {
+        if ((Quiet { git merge-base --is-ancestor "refs/remotes/origin/$branch" 'refs/remotes/origin/master' }) -eq 0) {
+            if ((Quiet { git push -q origin --delete $branch }) -eq 0) { Log "deleted origin/$branch (merged)" }
+            else { Log "could not delete origin/$branch - delete it by hand" }
+        }
+        else {
+            Log "origin/$branch is not in origin/master and stays: the report landed, the branch has more on it"
+        }
+    }
+    if ((Quiet { git rev-parse -q --verify "refs/heads/$branch" }) -eq 0) {
+        if ((Quiet { git merge-base --is-ancestor "refs/heads/$branch" 'refs/remotes/origin/master' }) -eq 0) {
+            [void](Quiet { git checkout master })
+            if ((Quiet { git branch -q -d $branch }) -eq 0) { Log "deleted the local $branch (merged)" }
+            else { Log "could not delete the local $branch - delete it by hand" }
+        }
+        else { Log "the local $branch is not in origin/master and stays" }
+    }
 }
 function Commit-Notes([string]$label) {
     [void](Quiet { git checkout master })
@@ -140,7 +174,11 @@ Commit-Notes "pre-run"
 foreach ($t in $tasks) {
     if ([int]$t.N -lt [int]$From -or [int]$t.N -gt [int]$To) { continue }
     $n = $t.N
-    if (Report-Landed $n) { Log "task $n already on origin/master - skipping"; continue }
+    if (Report-Landed $n) {
+        Log "task $n already on origin/master - skipping"
+        Remove-Merged-Branch $n $t.Name
+        continue
+    }
 
     # Review notes the orchestrator wrote to the working tree between tasks land on master first.
     Commit-Notes "before task $n"
@@ -172,7 +210,7 @@ foreach ($t in $tasks) {
 
         [void](Quiet { git checkout master })
         [void](Quiet { git pull --ff-only })
-        if (Report-Landed $n) { break }
+        if (Report-Landed $n) { Remove-Merged-Branch $n $t.Name; break }
 
         if (Test-Path $stopped) {
             Stop-Run "task $n stopped on purpose: the session wrote $stopped. Resume with -Phase $Phase -From $n once fixed."

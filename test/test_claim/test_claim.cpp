@@ -1,10 +1,12 @@
 // The claim: `POST /agent/v1/jobs/claim {"max":2}` and what comes back.
 //
-// The recorded reply below is a claim of two jobs for one repeater - the status and telemetry
-// pair the server schedules in one slot and hands out together - whose **first job is
-// tests/fixtures/contracts/ClaimedJob.json verbatim**, so the shape this parser is held to is
-// the one MeshMaster.Contracts' own round-trip test wrote. The three things the task asks for
-// are the three things a claim has to honour: `max`, `leaseUntil` and `groupWith`.
+// What comes back is **tests/fixtures/contracts/ClaimResponse.json**, the envelope
+// MeshMaster.Contracts' own round-trip test wrote, whose one job is ClaimedJob.json verbatim
+// (the fixtures' README says the nested pair is one object). The recorded reply below is that
+// file with two more jobs spliced into its array - the telemetry of the status-and-telemetry
+// pair the server schedules in one slot, and a third the server sent anyway - because the three
+// things a claim has to honour are `max`, `leaseUntil` and `groupWith`, and `max` needs more
+// jobs than the sample carries. Nothing of the envelope itself is written out here any more.
 
 #include <gtest/gtest.h>
 
@@ -51,9 +53,15 @@ const char* kThirdJob =
     "\"publicKey\":\"c3d4\"},\"credentialClass\":\"none\",\"leaseUntil\":\"2026-09-18T10:02:03Z\","
     "\"timeouts\":{\"perHopMs\":4000,\"loginMs\":8000},\"payload\":{}}";
 
+// ClaimResponse.json with the two jobs above spliced in after its own. The file ends in
+// `]}` - its jobs array and then the envelope - and that is where they go.
 std::string recordedClaim() {
-  return std::string("{\"serverTime\":\"2026-09-18T10:00:03Z\",\"jobs\":[") + fixture("ClaimedJob") + "," +
-         kSecondJob + "," + kThirdJob + "]}";
+  const std::string response = fixture("ClaimResponse");
+  const std::string tail = "]}";
+  EXPECT_GT(response.size(), tail.size());
+  EXPECT_EQ(response.size() - tail.size(), response.rfind(tail))
+      << "ClaimResponse.json no longer ends in its jobs array";
+  return response.substr(0, response.size() - tail.size()) + "," + kSecondJob + "," + kThirdJob + tail;
 }
 
 uint32_t at(const char* iso) {
@@ -67,6 +75,25 @@ TEST(Claim, TheRequestIsTheOneFieldTheServerReads) {
   const std::size_t len = mm::writeClaimRequest(mm::kClaimMax, out, sizeof out);
   ASSERT_GT(len, 0u);
   EXPECT_EQ(std::string(out, len), "{\"max\":2}");
+}
+
+TEST(Claim, TheFixtureResponseIsReadAsItArrives) {
+  // The file's own bytes, parsed: one job, the server's clock, and the job inside it is
+  // ClaimedJob.json - which is what every test below reads field for field.
+  std::string reply = fixture("ClaimResponse");
+  mm::ClaimedJob jobs[mm::kClaimMax];
+  int count = 0;
+  uint32_t serverTime = 0;
+  char err[96] = {0};
+  ASSERT_TRUE(mm::parseClaimResponse(&reply[0], reply.size(), jobs, mm::kClaimMax, count, serverTime, err,
+                                     sizeof err))
+      << err;
+  EXPECT_EQ(count, 1);
+  EXPECT_EQ(serverTime, at("2026-09-18T10:00:03Z"));
+  EXPECT_EQ(jobs[0].id, 12345);
+  EXPECT_STREQ(jobs[0].type, "status");
+  EXPECT_NE(std::string::npos, fixture("ClaimResponse").find(fixture("ClaimedJob")))
+      << "ClaimResponse.json does not hold ClaimedJob.json";
 }
 
 TEST(Claim, AClaimOfTwoTakesTwoHoweverManyTheServerSent) {
@@ -475,6 +502,80 @@ TEST(Claim, TheConfigReadAndAclSetPayloadsAreRead) {
   EXPECT_FALSE(
       mm::parseClaimResponse(&tooMany[0], tooMany.size(), jobs, mm::kClaimMax, count, serverTime, err, sizeof err));
   EXPECT_NE(std::string(err).find("more keys"), std::string::npos) << err;
+}
+
+// JobCredential.json is the one sample no real claim ever sends: all five fields at once,
+// where a claim carries the material of one credential class (the fixtures' README says so). It
+// is here as a **shape** - every field's spelling and type, which is where a hand-written parser
+// goes wrong - and not as a plausible message, so what it is held to is that each field is read
+// into the place that field has, and nothing is read into the wrong one.
+TEST(Claim, TheCredentialFixtureIsAShapeAndEveryFieldOfItIsRead) {
+  std::string reply =
+      std::string("{\"serverTime\":\"2026-09-18T10:00:03Z\",\"jobs\":[{\"id\":24,\"type\":\"password.set\","
+                  "\"repeater\":{\"id\":17,\"label\":\"x\",\"publicKey\":\"a1b2\"},"
+                  "\"credentialClass\":\"admin\",\"leaseUntil\":\"2026-09-18T10:02:03Z\","
+                  "\"timeouts\":{\"perHopMs\":4000,\"loginMs\":8000},\"payload\":") +
+      fixture("PasswordSetPayload") + ",\"credential\":" + fixture("JobCredential") + "}]}";
+  mm::ClaimedJob jobs[mm::kClaimMax];
+  int count = 0;
+  uint32_t serverTime = 0;
+  char err[96] = {0};
+  ASSERT_TRUE(mm::parseClaimResponse(&reply[0], reply.size(), jobs, mm::kClaimMax, count, serverTime, err, sizeof err))
+      << err;
+  ASSERT_EQ(count, 1);
+  const mm::ClaimedJob& job = jobs[0];
+
+  // The three passwords, each in its own buffer. The sample's values are longer than the fifteen
+  // characters BaseChatMesh::sendLogin keeps, so what lands is the cut prefix and the cut flag -
+  // the same thing a real claim with a long password gets (Credentials.h).
+  EXPECT_TRUE(job.credential.hasGuestPassword);
+  EXPECT_STREQ(job.credential.guestPassword, "guest-password-");
+  EXPECT_TRUE(job.credential.guestPasswordCut);
+  EXPECT_TRUE(job.credential.hasAdminPassword);
+  EXPECT_STREQ(job.credential.adminPassword, "admin-password-");
+  EXPECT_TRUE(job.credential.adminPasswordCut);
+  EXPECT_TRUE(job.credential.hasNewPassword);
+  EXPECT_STREQ(job.credential.newPassword, "new-password-sa");
+  EXPECT_TRUE(job.credential.newPasswordCut);
+
+  // The granted level and the candidate word beside them.
+  EXPECT_TRUE(job.hasAclLevel);
+  EXPECT_EQ(job.aclLevel, 1);
+  EXPECT_STREQ(job.credentialCandidate, "new");
+
+  // And the payload names the field only - the value it sets travels in the credential above.
+  EXPECT_EQ(job.passwordField, mm::PasswordField::Admin);
+}
+
+// StatusPayload.Version (meshmaster.dk's task p4.3-68). The payload is the only place the claim
+// says it, and absent is "read it": tests/fixtures/contracts/StatusPayload.json is `{}` for that
+// reason, and so is ClaimedJob.json's payload. What the firmware then does with the field is
+// readsFirmwareVersion(), which test_job_results holds to both answers.
+TEST(Claim, TheStatusPayloadsVersionIsReadAndAbsentMeansReadIt) {
+  std::string reply = fixture("ClaimResponse");
+  mm::ClaimedJob jobs[mm::kClaimMax];
+  int count = 0;
+  uint32_t serverTime = 0;
+  char err[96] = {0};
+  ASSERT_TRUE(mm::parseClaimResponse(&reply[0], reply.size(), jobs, mm::kClaimMax, count, serverTime, err, sizeof err))
+      << err;
+  ASSERT_EQ(count, 1);
+  EXPECT_TRUE(jobs[0].statusVersion) << "the fixture's payload is {} - an older server, and that means read it";
+
+  std::string quiet =
+      std::string("{\"serverTime\":\"2026-09-18T10:00:03Z\",\"jobs\":[{\"id\":25,\"type\":\"status\","
+                  "\"repeater\":{\"id\":17,\"label\":\"x\",\"publicKey\":\"a1b2\"},"
+                  "\"credentialClass\":\"acl\",\"leaseUntil\":\"2026-09-18T10:02:03Z\",\"payload\":") +
+      fixture("StatusPayload") +
+      ",\"credential\":{\"acl\":1}},"
+      "{\"id\":26,\"type\":\"status\",\"repeater\":{\"id\":17,\"label\":\"x\",\"publicKey\":\"a1b2\"},"
+      "\"credentialClass\":\"acl\",\"leaseUntil\":\"2026-09-18T10:02:03Z\","
+      "\"payload\":{\"version\":false},\"credential\":{\"acl\":1}}]}";
+  ASSERT_TRUE(mm::parseClaimResponse(&quiet[0], quiet.size(), jobs, mm::kClaimMax, count, serverTime, err, sizeof err))
+      << err;
+  ASSERT_EQ(count, 2);
+  EXPECT_TRUE(jobs[0].statusVersion);
+  EXPECT_FALSE(jobs[1].statusVersion);
 }
 
 }  // namespace
