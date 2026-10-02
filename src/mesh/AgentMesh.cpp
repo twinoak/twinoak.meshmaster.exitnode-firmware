@@ -10,6 +10,13 @@
 
 namespace mm {
 
+// MeshPort.h writes MeshCore's two bounds down as our own, so that the fake repeater of the host
+// harness can fill a MeshReply without MeshCore on the include path. This is the one place the
+// two readings meet: a pin bump that moved either number is a red board build here rather than a
+// quiet overrun on a workstation (docs/upstream.md, tasks/sync/TEMPLATE.md).
+static_assert(kMaxReplyDataLen == MAX_PACKET_PAYLOAD, "MeshPort.h's reply bound is MeshCore's MAX_PACKET_PAYLOAD");
+static_assert(kMaxMeshPathBytes == MAX_PATH_SIZE, "MeshPort.h's path bound is MeshCore's MAX_PATH_SIZE");
+
 namespace {
 
 bool elapsed(uint32_t now, uint32_t deadline) { return static_cast<int32_t>(now - deadline) >= 0; }
@@ -286,9 +293,20 @@ SendResult AgentMesh::sendLogin(const char* password, uint32_t& tag) {
   // cipher block, so the empty string arrives as the empty string and the repeater answers from
   // its ACL alone (simple_repeater/MyMesh.cpp:90-99). With one, the repeater compares it with
   // its admin and guest passwords and the entry of this key takes the password's level.
+  //
+  // **A login reply carries no tag of ours** (found by the host harness, task p1.1-08).
+  // `handleRequest` reflects the sender's timestamp back as the reply's first four bytes - its own
+  // comment says "kind of like a 'tag'" (simple_repeater/MyMesh.cpp:214) - but `handleLoginReq`
+  // writes the **repeater's** `getCurrentTimeUnique()` there instead (:129-131). So the sender
+  // timestamp below is what the repeater judges a replay by and nothing else; `tag` is left 0,
+  // which is how awaitReply() is told to match the next RESPONSE from this peer on nothing. That is
+  // also how the .NET agent matches a login: `PUSH_CODE_LOGIN_SUCCESS` carries no tag either.
+  // Before this, every login reply was dropped for having "another tag" and every job that needed a
+  // session was `unreachable`.
   uint8_t temp[4 + kMaxPasswordLen];
-  tag = getRTCClock()->getCurrentTimeUnique();
-  std::memcpy(temp, &tag, 4);
+  tag = 0;
+  const uint32_t senderTimestamp = getRTCClock()->getCurrentTimeUnique();
+  std::memcpy(temp, &senderTimestamp, 4);
   size_t len = 0;
   if (password != nullptr) {
     while (password[len] != '\0' && len < kMaxPasswordLen) {

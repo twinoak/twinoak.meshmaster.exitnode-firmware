@@ -1,0 +1,300 @@
+{
+  "_note": [
+    "The server's side of one cycle, for tools/host-stub.py to replay in CI (docs/host.md).",
+    "",
+    "CI cannot run meshmaster.dk: no image of it is published and its own tests need MySQL. So this",
+    "file is the exchanges a run needs - the config call, the heartbeat reply, the claims in the",
+    "order the server hands them out, and what each result must come back as - and the stub answers",
+    "them over plain HTTP on a loopback port.",
+    "",
+    "Redacted on purpose, and checked by the stub: the token is the placeholder below and never a",
+    "real one, and the only passwords in the file are the fake repeaters' own",
+    "(tests/fixtures/host/two-repeaters.json). Nothing here is anybody's secret.",
+    "",
+    "Refreshed by `tools/host-run.ps1 -Record` against the compose stack on a workstation. The",
+    "`budget` is the one place this is deliberately not the server's: 60 a minute with no gap, so a",
+    "cycle of eighty-odd transactions is a minute and not seven hours. The pacing arithmetic itself",
+    "is exercised against the stack, where the budget is the server's own (docs/host.md)."
+  ],
+  "token": "mma_hostharnessplaceholdertokennotarealone0",
+  "exitNodeKey": "f7b8f191d0aa0d23976459c419f2d131371f1caecaef35289295f803078f2442",
+  "repeater1": "0f1ba04635a8ca8ca4699225f3f3bbe816cc955c97a49d07e0c6967e79985c78",
+  "repeater2": "8d39332da40bbd7c43651db579fb0f9fc567f2c66c244fe99a2f02381b4af6a8",
+
+  "config": {
+    "agentId": 42,
+    "label": "the host harness",
+    "transport": "onboard",
+    "budget": { "maxTransactionsPerMinute": 60, "minGapSeconds": 0 },
+    "pollIntervalS": 30
+  },
+  "heartbeat": {
+    "budget": { "maxTransactionsPerMinute": 60, "minGapSeconds": 0 },
+    "pollIntervalS": 30
+  },
+
+  "jobs": [
+    {
+      "id": 1001,
+      "type": "status",
+      "repeater": { "id": 1, "label": "Grenaa Chimney #1", "publicKey": "0f1ba04635a8ca8ca4699225f3f3bbe816cc955c97a49d07e0c6967e79985c78" },
+      "credentialClass": "acl",
+      "credential": { "acl": 1 },
+      "payload": {},
+      "path": { "hops": ["7f"], "source": "advert" },
+      "idempotencyKey": "harness:1:status:1",
+      "groupWith": [1002],
+      "expect": {
+        "outcome": "ok",
+        "transactions": 3,
+        "_why": "a login, the status request, and the owner-info request the absent `version` flag asks for",
+        "result": "StatusResult",
+        "has": ["firmware"]
+      }
+    },
+    {
+      "id": 1002,
+      "type": "telemetry",
+      "repeater": { "id": 1, "label": "Grenaa Chimney #1", "publicKey": "0f1ba04635a8ca8ca4699225f3f3bbe816cc955c97a49d07e0c6967e79985c78" },
+      "credentialClass": "acl",
+      "credential": { "acl": 1 },
+      "payload": {},
+      "path": { "hops": ["7f"], "source": "advert" },
+      "idempotencyKey": "harness:1:telemetry:1",
+      "groupWith": [1001],
+      "expect": {
+        "outcome": "ok",
+        "transactions": 1,
+        "_why": "the session job 1001 opened is reused: one login for the pair",
+        "result": "TelemetryResult"
+      }
+    },
+    {
+      "id": 1003,
+      "type": "neighbours",
+      "repeater": { "id": 1, "label": "Grenaa Chimney #1", "publicKey": "0f1ba04635a8ca8ca4699225f3f3bbe816cc955c97a49d07e0c6967e79985c78" },
+      "credentialClass": "admin",
+      "credential": { "adminPassword": "harness-admin", "acl": 1 },
+      "payload": {},
+      "path": { "hops": ["7f"], "source": "advert" },
+      "idempotencyKey": "harness:1:neighbours:1",
+      "expect": {
+        "outcome": "ok",
+        "transactions": 3,
+        "_why": "a login, one page of three neighbours, and the ACL restore",
+        "result": "NeighboursResult"
+      }
+    },
+    {
+      "id": 1004,
+      "type": "trace",
+      "repeater": { "id": 1, "label": "Grenaa Chimney #1", "publicKey": "0f1ba04635a8ca8ca4699225f3f3bbe816cc955c97a49d07e0c6967e79985c78" },
+      "credentialClass": "none",
+      "payload": {},
+      "path": { "hops": ["7f"], "source": "advert" },
+      "idempotencyKey": "harness:1:trace:1",
+      "expect": { "outcome": "ok", "transactions": 1, "result": "TraceResult" }
+    },
+    {
+      "id": 1005,
+      "type": "discover",
+      "repeater": { "id": 1, "label": "Grenaa Chimney #1", "publicKey": "0f1ba04635a8ca8ca4699225f3f3bbe816cc955c97a49d07e0c6967e79985c78" },
+      "credentialClass": "admin",
+      "credential": { "adminPassword": "harness-admin", "acl": 1 },
+      "payload": {},
+      "idempotencyKey": "harness:1:discover:1",
+      "expect": { "outcome": "ok", "result": "DiscoverResult" }
+    },
+    {
+      "id": 1006,
+      "type": "config.read",
+      "repeater": { "id": 1, "label": "Grenaa Chimney #1", "publicKey": "0f1ba04635a8ca8ca4699225f3f3bbe816cc955c97a49d07e0c6967e79985c78" },
+      "credentialClass": "admin",
+      "credential": { "adminPassword": "harness-admin", "acl": 1 },
+      "payload": {},
+      "path": { "hops": ["7f"], "source": "advert" },
+      "leaseSeconds": 1800,
+      "idempotencyKey": "harness:1:config.read:1",
+      "expect": {
+        "outcome": "ok",
+        "result": "ConfigReadResult",
+        "has": ["firmware", "board", "aclRestored"],
+        "aclRestored": true
+      }
+    },
+    {
+      "id": 1007,
+      "type": "acl.set",
+      "repeater": { "id": 1, "label": "Grenaa Chimney #1", "publicKey": "0f1ba04635a8ca8ca4699225f3f3bbe816cc955c97a49d07e0c6967e79985c78" },
+      "credentialClass": "admin",
+      "credential": { "adminPassword": "harness-admin", "acl": 1 },
+      "payload": { "publicKey": "f7b8f191d0aa0d23976459c419f2d131371f1caecaef35289295f803078f2442", "level": 1 },
+      "path": { "hops": ["7f"], "source": "advert" },
+      "idempotencyKey": "harness:1:acl.set:1",
+      "expect": {
+        "outcome": "ok",
+        "transactions": 2,
+        "_why": "a login and one setperm; on our own key the command is the level, so no second one follows",
+        "result": "AclSetResult"
+      }
+    },
+    {
+      "id": 1008,
+      "type": "config.apply",
+      "repeater": { "id": 1, "label": "Grenaa Chimney #1", "publicKey": "0f1ba04635a8ca8ca4699225f3f3bbe816cc955c97a49d07e0c6967e79985c78" },
+      "credentialClass": "admin",
+      "credential": { "adminPassword": "harness-admin", "acl": 1 },
+      "payload": {
+        "commands": [
+          { "key": "advert.interval", "command": "set advert.interval 180", "from": "240", "to": "180" }
+        ],
+        "planHash": "harness0001",
+        "reason": "the host harness applies one key",
+        "desiredVersion": 1
+      },
+      "path": { "hops": ["7f"], "source": "advert" },
+      "idempotencyKey": "harness:1:config.apply:1",
+      "expect": { "outcome": "ok", "result": "ConfigApplyResult", "has": ["firmware"] }
+    },
+    {
+      "id": 1009,
+      "type": "cli",
+      "repeater": { "id": 1, "label": "Grenaa Chimney #1", "publicKey": "0f1ba04635a8ca8ca4699225f3f3bbe816cc955c97a49d07e0c6967e79985c78" },
+      "credentialClass": "admin",
+      "credential": { "adminPassword": "harness-admin", "acl": 1 },
+      "payload": { "command": "neighbors", "reason": "who is around" },
+      "path": { "hops": ["7f"], "source": "advert" },
+      "idempotencyKey": "harness:1:cli:1",
+      "expect": { "outcome": "ok", "transactions": 3, "result": "CliResult" }
+    },
+    {
+      "id": 1010,
+      "type": "advert.request",
+      "repeater": { "id": 1, "label": "Grenaa Chimney #1", "publicKey": "0f1ba04635a8ca8ca4699225f3f3bbe816cc955c97a49d07e0c6967e79985c78" },
+      "credentialClass": "admin",
+      "credential": { "adminPassword": "harness-admin", "acl": 1 },
+      "payload": { "flood": true },
+      "path": { "hops": ["7f"], "source": "advert" },
+      "idempotencyKey": "harness:1:advert.request:1",
+      "expect": { "outcome": "ok", "transactions": 3, "result": "AdvertRequestResult" }
+    },
+    {
+      "id": 1011,
+      "type": "clock.sync",
+      "repeater": { "id": 1, "label": "Grenaa Chimney #1", "publicKey": "0f1ba04635a8ca8ca4699225f3f3bbe816cc955c97a49d07e0c6967e79985c78" },
+      "credentialClass": "admin",
+      "credential": { "adminPassword": "harness-admin", "acl": 1 },
+      "payload": {},
+      "path": { "hops": ["7f"], "source": "advert" },
+      "idempotencyKey": "harness:1:clock.sync:1",
+      "expect": { "outcome": "ok", "transactions": 3, "result": "ClockSyncResult" }
+    },
+    {
+      "id": 1012,
+      "type": "password.set",
+      "repeater": { "id": 1, "label": "Grenaa Chimney #1", "publicKey": "0f1ba04635a8ca8ca4699225f3f3bbe816cc955c97a49d07e0c6967e79985c78" },
+      "credentialClass": "admin",
+      "credential": { "adminPassword": "harness-admin", "newPassword": "harness-2nd", "acl": 1 },
+      "payload": { "field": "adminPassword" },
+      "path": { "hops": ["7f"], "source": "advert" },
+      "idempotencyKey": "harness:1:password.set:1",
+      "expect": {
+        "outcome": "ok",
+        "transactions": 3,
+        "_why": "a login, the password line, and the restore after it - then the session is dropped",
+        "result": "PasswordSetResult",
+        "resultIs": { "confirmed": true, "reply": "password now: <set>" }
+      }
+    },
+    {
+      "id": 1013,
+      "type": "reboot",
+      "repeater": { "id": 1, "label": "Grenaa Chimney #1", "publicKey": "0f1ba04635a8ca8ca4699225f3f3bbe816cc955c97a49d07e0c6967e79985c78" },
+      "credentialClass": "admin",
+      "_why": "the password this claim carries is the new one: a confirmed rotation is what the server stores",
+      "credential": { "adminPassword": "harness-2nd", "acl": 1 },
+      "payload": {},
+      "path": { "hops": ["7f"], "source": "advert" },
+      "idempotencyKey": "harness:1:reboot:1",
+      "expect": {
+        "outcome": "ok",
+        "transactions": 2,
+        "_why": "a login and the command; the firmware never answers a reboot and there is no restore",
+        "result": "RebootResult",
+        "resultIs": { "sent": true }
+      }
+    },
+    {
+      "id": 1014,
+      "type": "config.read",
+      "repeater": { "id": 2, "label": "Hoeg Mast #2", "publicKey": "8d39332da40bbd7c43651db579fb0f9fc567f2c66c244fe99a2f02381b4af6a8" },
+      "credentialClass": "admin",
+      "credential": { "adminPassword": "harness-admin-2", "acl": 1 },
+      "payload": {},
+      "path": { "hops": ["3a", "5c"], "source": "advert" },
+      "leaseSeconds": 1800,
+      "idempotencyKey": "harness:2:config.read:1",
+      "expect": {
+        "outcome": "ok",
+        "result": "ConfigReadResult",
+        "_why": "the ACL of 24 is silence and the region listing is cut at 160: both are raw lines and neither is evidence",
+        "hasNot": ["acl"],
+        "rawMentions": ["acl:", "regions:"]
+      }
+    },
+    {
+      "id": 1015,
+      "type": "neighbours",
+      "repeater": { "id": 2, "label": "Hoeg Mast #2", "publicKey": "8d39332da40bbd7c43651db579fb0f9fc567f2c66c244fe99a2f02381b4af6a8" },
+      "credentialClass": "admin",
+      "credential": { "adminPassword": "harness-admin-2", "acl": 1 },
+      "payload": {},
+      "path": { "hops": ["3a", "5c"], "source": "advert" },
+      "idempotencyKey": "harness:2:neighbours:1",
+      "expect": {
+        "outcome": "ok",
+        "result": "NeighboursResult",
+        "_why": "fourteen neighbours, the second page dropped: the first nine are reported and the log says the list stops"
+      }
+    },
+    {
+      "id": 1016,
+      "type": "config.apply",
+      "repeater": { "id": 2, "label": "Hoeg Mast #2", "publicKey": "8d39332da40bbd7c43651db579fb0f9fc567f2c66c244fe99a2f02381b4af6a8" },
+      "credentialClass": "admin",
+      "credential": { "adminPassword": "harness-admin-2", "acl": 1 },
+      "payload": {
+        "commands": [
+          { "key": "tx", "command": "set tx 21", "from": "20", "to": "21" }
+        ],
+        "planHash": "harness0002",
+        "reason": "a value this repeater refuses",
+        "desiredVersion": 1
+      },
+      "path": { "hops": ["3a", "5c"], "source": "advert" },
+      "idempotencyKey": "harness:2:config.apply:1",
+      "expect": {
+        "outcome": "failed",
+        "result": "ConfigApplyResult",
+        "_why": "the repeater refuses the value, the sequence stops at it, and the result carries the refusal verbatim"
+      }
+    },
+    {
+      "id": 1017,
+      "type": "status",
+      "repeater": { "id": 2, "label": "Hoeg Mast #2", "publicKey": "8d39332da40bbd7c43651db579fb0f9fc567f2c66c244fe99a2f02381b4af6a8" },
+      "credentialClass": "acl",
+      "credential": { "acl": 1 },
+      "payload": { "version": false },
+      "path": { "hops": ["3a", "5c"], "source": "advert" },
+      "idempotencyKey": "harness:2:status:1",
+      "expect": {
+        "outcome": "ok",
+        "transactions": 1,
+        "_why": "the status request alone. `version: false` spends nothing on the owner-info request, and there is no login either: job 1016's restore left a session at class acl and this job reuses it (EXIT-NODES section 7, '1 (+1 login if no session)')",
+        "result": "StatusResult",
+        "hasNot": ["firmware"]
+      }
+    }
+  ]
+}

@@ -1,0 +1,99 @@
+{
+  "_note": [
+    "The fake mesh for a run against meshmaster.dk's compose stack (tools/host-run.ps1,",
+    "docs/host.md section 7). It is deliberately not the CI scenario: every key here is one the",
+    "**seeded register of that stack already holds**, so the fake repeater and the row on the",
+    "server are the same thing and the assertions can be made on both ends.",
+    "",
+    "  exitNode.publicKey   the companion key the seeded exit node 'seed: Risskov window' already",
+    "                       reports. Reporting a different one is stored, flagged and audited, and",
+    "                       suspends admin routing through the exit node (spec/SECURITY.md 6) - so",
+    "                       the harness stands in for that exit node rather than becoming a new one.",
+    "  repeaters[0]         'Grenaa Chimney #1', whose public key the seeder sets to its number as",
+    "                       two hex digits, thirty-two times (meshmaster.dk docs/dev/local.md).",
+    "",
+    "`acceptAnyPassword` is the one concession, and src/host/HostScenario.h says exactly what it",
+    "gives up: the stack will not tell a script what password it stored for a repeater, because",
+    "revealing a credential is a gated action and a personal access token is always refused one."
+  ],
+  "exitNode": {
+    "publicKey": "c0ffee0011223344556677889900aabbccddeeff00112233445566778899aabb",
+    "_note": "the seeded exit node's own companionPublicKey"
+  },
+  "repeaters": [
+    {
+      "publicKey": "0101010101010101010101010101010101010101010101010101010101010101",
+      "_note": "the seeded 'Grenaa Chimney #1', deployed, admin's, on the Grenaa industrial chimney",
+      "name": "Grenaa Chimney #1",
+      "ownerInfo": "Twinoak",
+      "firmware": "v1.17.1",
+      "build": "27 Sep 2025",
+      "board": "Heltec V3",
+      "role": "repeater",
+      "acceptAnyPassword": true,
+      "guestPassword": "",
+      "hops": 1,
+      "latencyMs": 40,
+      "clockOffsetS": -300,
+      "online": true,
+      "acl": [
+        {
+          "_note": "the read-only grant an association leaves behind, so the restore has something to put back",
+          "key": "c0ffee0011223344556677889900aabbccddeeff00112233445566778899aabb",
+          "permissions": 1
+        }
+      ],
+      "prefs": {
+        "name": "Grenaa Chimney #1",
+        "lat": "56.41",
+        "lon": "10.88",
+        "advert.interval": "240",
+        "flood.advert.interval": "12",
+        "repeat": "on",
+        "dutycycle": "10.0",
+        "flood.max": "3",
+        "flood.max.unscoped": "0",
+        "flood.max.advert": "3",
+        "tx": "22",
+        "path.hash.mode": "1",
+        "multi.acks": "0",
+        "allow.read.only": "on",
+        "agc.reset.interval": "0",
+        "loop.detect": "moderate",
+        "freq": "869.618",
+        "guest.password": ""
+      },
+      "regions": {
+        "listing": "*\n dk F\n  jylland F\n  sjaelland F\n",
+        "default": "dk",
+        "home": "jylland"
+      },
+      "neighbours": [
+        {
+          "_note": "the seeded 'Grenaa Chimney #2' and 'Mols Mast North', which the register also holds",
+          "key": "0202020202020202020202020202020202020202020202020202020202020202",
+          "heardS": 180,
+          "snr": 7.5
+        },
+        {
+          "key": "0505050505050505050505050505050505050505050505050505050505050505",
+          "heardS": 1200,
+          "snr": -1.25
+        }
+      ],
+      "telemetry": [
+        { "channel": 1, "type": "voltage", "value": 4.012 },
+        { "channel": 1, "type": "temperature", "value": 17.4 }
+      ],
+      "status": {
+        "batteryMv": 4012,
+        "noiseFloorDbm": -112,
+        "lastRssi": -97,
+        "uptimeS": 864000,
+        "lastSnr": 6.25,
+        "floodDups": 3,
+        "recvErrors": 2
+      }
+    }
+  ]
+}

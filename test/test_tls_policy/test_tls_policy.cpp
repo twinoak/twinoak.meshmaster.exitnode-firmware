@@ -100,6 +100,58 @@ TEST(TlsPolicy, ThePinnedRootIsIsrgRootX1) {
   EXPECT_NE(std::string::npos, text.find("96:BC:EC:06:26:49:76:F3:74:60:77:9A:CF:28:C5:A7:CF:E8:A3:C0:AA:E1:1A:8F:FC:EE:05:C0:BD:DF:08:C6"));
 }
 
+// ---- the plain scheme, and the one place it is allowed (task p1.1-08) --------------------------
+
+// The host harness talks plain HTTP to a compose stack on a loopback port (docs/host.md), which is
+// the one build of this firmware that may: the board's client is HTTPS with the chain verified and
+// its URL rule refuses any other scheme (src/settings/Keys.cpp). So the scheme is allowed to appear
+// in `src/host/` and nowhere else under `src/` - a line of the board's own code that named a
+// plain-HTTP address would be a hole in the rail of task 01, and this is the grep that says so.
+TEST(TlsPolicy, ThePlainSchemeAppearsOnlyInTheHostBinding) {
+  const fs::path root(PROJECT_DIR);
+  const std::string plain = std::string("htt") + "p://";  // split, so this file is not a hit itself
+  std::vector<std::string> hits;
+  int scanned = 0;
+  int inHost = 0;
+  for (const auto& item : fs::recursive_directory_iterator(root / "src")) {
+    if (!item.is_regular_file()) continue;
+    scanned++;
+    const std::string where = item.path().generic_string();
+    const bool isHost = where.find("/src/host/") != std::string::npos;
+    std::ifstream in(item.path(), std::ios::binary);
+    std::string line;
+    int n = 0;
+    while (std::getline(in, line)) {
+      n++;
+      if (line.find(plain) == std::string::npos) continue;
+      if (isHost) {
+        inHost++;
+      } else {
+        hits.push_back(where + ":" + std::to_string(n));
+      }
+    }
+  }
+  EXPECT_GT(scanned, 20) << "the walk of src/ found almost nothing - is PROJECT_DIR right?";
+  EXPECT_GT(inHost, 0) << "src/host/ names no plain-HTTP address at all: has the host harness gone?";
+  for (const std::string& h : hits) {
+    ADD_FAILURE() << h << ": only src/host/ may name a plain-HTTP address (docs/host.md)";
+  }
+}
+
+// And the rule the host client keeps at run time, which is the half a grep cannot do: an address
+// that is neither loopback nor RFC 1918 is refused before a socket is opened.
+TEST(TlsPolicy, TheHostClientRefusesAnythingButAPrivateAddress) {
+  std::ifstream in(fs::path(PROJECT_DIR) / "src" / "host" / "HostClient.cpp");
+  ASSERT_TRUE(in.is_open()) << "src/host/HostClient.cpp";
+  std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  EXPECT_NE(std::string::npos, text.find("isPrivateAddress"));
+  EXPECT_NE(std::string::npos, text.find("127"));
+  EXPECT_NE(std::string::npos, text.find("192"));
+  EXPECT_NE(std::string::npos, text.find("172"));
+  // And https:// is refused too, because there is no TLS stack in that build to verify with.
+  EXPECT_NE(std::string::npos, text.find(std::string("htt") + "ps://"));
+}
+
 // ---- the rails list ---------------------------------------------------------------------------
 
 // README.md's "Rails that hold in every task" is a list of promises, and every one of them names
@@ -163,6 +215,10 @@ TEST(Rails, TheTestsTheRailsLeanOnAreAllThere) {
   const fs::path root(PROJECT_DIR);
   const char* const suites[] = {"test_tls_policy", "test_console_parser", "test_credentials",
                                 "test_contract_fixtures", "test_buffers"};
+  // The host harness is not a test suite of its own (it is a program CI runs against a stub,
+  // docs/host.md), so its two halves are checked by name here instead.
+  EXPECT_TRUE(fs::is_regular_file(root / "tools" / "host-stub.py")) << "tools/host-stub.py is gone";
+  EXPECT_TRUE(fs::is_regular_file(root / "tools" / "host-run.ps1")) << "tools/host-run.ps1 is gone";
   for (const char* s : suites) {
     EXPECT_TRUE(fs::is_directory(root / "test" / s)) << "test/" << s << " is gone";
   }

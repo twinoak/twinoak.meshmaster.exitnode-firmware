@@ -20,4 +20,10 @@ const char* meshcoreTag();
 // The board this image is for, as the heartbeat's `board` field names it ("heltec_v3").
 const char* boardName();
 
+// The host harness runs this firmware's own agent loop with no board at all (docs/host.md), and
+// `--board` is how a run says which board it is standing in for - so the exit node's page says
+// *onboard . Heltec V3* for the board that is in the post. Nothing on a board calls this: there the
+// compile-time MESHMASTER_BOARD stands, and `nullptr` or "" puts it back.
+void setBoardName(const char* name);
+
 }  // namespace mm

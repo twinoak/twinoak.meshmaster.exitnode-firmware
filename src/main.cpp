@@ -170,7 +170,7 @@ void printStatus(Stream& out) {
   jobs.describe(line, sizeof line);
   out.printf("jobs      %s\r\n", line);
 
-  const mm::AgentClient::Outcome& o = server.last();
+  const mm::ServerPort::Outcome& o = server.last();
   out.printf("heap      free %lu, min ever %lu, largest block %lu", static_cast<unsigned long>(ESP.getFreeHeap()),
              static_cast<unsigned long>(ESP.getMinFreeHeap()), static_cast<unsigned long>(ESP.getMaxAllocHeap()));
   if (o.attempted && o.heapAfter != 0) {

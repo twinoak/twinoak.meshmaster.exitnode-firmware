@@ -7,6 +7,7 @@
 
 #include "Log.h"
 #include "agent/Iso8601.h"
+#include "mesh/MeshCoreHeaders.h"  // Clock.h only forward-declares mesh::RTCClock (task p1.1-08)
 
 namespace mm {
 
@@ -69,6 +70,7 @@ const char* AgentClock::sourceName() const {
     case Source::Rtc: return "rtc";
     case Source::Sntp: return "sntp";
     case Source::Server: return "server";
+    case Source::Host: return "host";
   }
   return "?";
 }

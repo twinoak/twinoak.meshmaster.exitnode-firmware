@@ -31,77 +31,52 @@
 #include "Envelopes.h"
 #include "JobEnvelopes.h"
 #include "RateLimit.h"
+#include "ServerPort.h"
 #include "net/Clock.h"
 #include "settings/Store.h"
 
 namespace mm {
 
-class AgentClient {
+// Root, Call and Outcome live in agent/ServerPort.h since task p1.1-08: they are what the
+// interface carries, and the host harness's plain-HTTP client fills the same structs.
+class AgentClient : public ServerPort {
  public:
-  enum class Root : uint8_t { IsrgRootX1, CoreBundle };
-
-  // What one request came back with, whatever it asked for.
-  struct Call {
-    bool reachable = false;   // a reply arrived, whatever its status
-    bool ok = false;          // 2xx and the body parsed
-    int httpStatus = 0;
-    uint32_t retryAfterS = 0;  // the 429's Retry-After, in seconds
-    int rateLimitRemaining = -1;
-    char error[128] = {0};
-    uint32_t atEpoch = 0;
-    uint32_t atMillis = 0;
-    Root root = Root::IsrgRootX1;
-  };
-
-  // The config call keeps a little more, because `status` and the OLED report it.
-  struct Outcome {
-    bool attempted = false;
-    bool ok = false;
-    int httpStatus = 0;
-    char error[128] = {0};
-    uint32_t atMillis = 0;
-    uint32_t atEpoch = 0;
-    Root root = Root::IsrgRootX1;
-    uint32_t heapAfter = 0;  // free heap right after the call, the number later tasks budget from
-  };
-
   void begin(SettingsStore& settings, AgentClock& clock, const char* agentVersion);
 
   // After `set meshmaster.*`: re-read the URL and forget the last outcome.
-  void reconfigure();
+  void reconfigure() override;
 
-  bool configured() const { return url_[0] != '\0' && tokenSet_; }
+  bool configured() const override { return url_[0] != '\0' && tokenSet_; }
 
   // GET /agent/v1/config, once. Blocking. The reply is kept and describe() reports it.
-  bool fetchConfig();
+  bool fetchConfig() override;
 
   // POST /agent/v1/heartbeat. True when the server answered 200 and the reply parsed.
-  bool postHeartbeat(const Heartbeat& hb, HeartbeatReply& reply);
+  bool postHeartbeat(const Heartbeat& hb, HeartbeatReply& reply) override;
 
   // POST /agent/v1/observations. `body` is what writeObservationBatch() made.
-  bool postObservations(const char* body, size_t len, int& accepted, bool& duplicate);
+  bool postObservations(const char* body, size_t len, int& accepted, bool& duplicate) override;
 
   // POST /agent/v1/jobs/claim `{"max":N}`. True when the server answered 200 and the reply
   // parsed; `count` is how many jobs it handed over, which may be none.
-  bool claimJobs(ClaimedJob* jobs, int max, int& count);
+  bool claimJobs(ClaimedJob* jobs, int max, int& count) override;
 
   // POST /agent/v1/jobs/{id}/result. `body` is what writeJobResult() made. A late result is
   // taken all the same and a duplicate clientId stores nothing twice, so this is safe to retry.
-  bool postJobResult(long long jobId, const char* body, size_t len);
+  bool postJobResult(long long jobId, const char* body, size_t len) override;
 
-  bool hasConfig() const { return hasConfig_; }
-  const AgentConfig& config() const { return config_; }
-  const Outcome& last() const { return last_; }
-  const Call& lastCall() const { return lastCall_; }
-  const RateLimiter& limiter() const { return limiter_; }
-  const char* url() const { return url_; }
-  static const char* rootName(Root r);
+  bool hasConfig() const override { return hasConfig_; }
+  const AgentConfig& config() const override { return config_; }
+  const Outcome& last() const override { return last_; }
+  const Call& lastCall() const override { return lastCall_; }
+  const RateLimiter& limiter() const override { return limiter_; }
+  const char* url() const override { return url_; }
 
   // For `status`, e.g. "https://meshmaster.dk: config ok at 12:03:14, agent 17 \"Window\", ...".
-  void describe(char* out, size_t cap) const;
+  void describe(char* out, size_t cap) const override;
 
   // The OLED's third line while nothing has heartbeated yet: "config ok 12:03:14", "http 401".
-  void oledLine(char* out, size_t cap) const;
+  void oledLine(char* out, size_t cap) const override;
 
  private:
   // One request. `method` is "GET" or "POST"; `requestBody` is nullptr for a GET. The reply's

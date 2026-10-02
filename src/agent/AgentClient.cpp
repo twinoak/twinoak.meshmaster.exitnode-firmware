@@ -75,7 +75,6 @@ uint32_t parseRetryAfter(const String& value) {
 
 }  // namespace
 
-const char* AgentClient::rootName(Root r) { return r == Root::IsrgRootX1 ? "ISRG Root X1" : "the core's bundle"; }
 
 void AgentClient::begin(SettingsStore& settings, AgentClock& clock, const char* agentVersion) {
   settings_ = &settings;
