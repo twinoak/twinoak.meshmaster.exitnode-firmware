@@ -110,6 +110,11 @@ bool canRun(const ClaimedJob& job, char* why, size_t whyCap) {
   return true;
 }
 
+bool readsFirmwareVersion(const ClaimedJob& job) {
+  if (std::strcmp(job.type, "status") != 0) return false;
+  return job.credentialClass == CredentialClass::Acl && job.statusVersion;
+}
+
 bool sharesLogin(const ClaimedJob& a, const ClaimedJob& b) {
   if (a.id == b.id) return false;
   for (int i = 0; i < a.groupCount; i++) {
@@ -311,6 +316,11 @@ bool parseClaimResponse(char* json, size_t len, ClaimedJob* jobs, int max, int& 
     }
     if (!payload.isNull() && std::strcmp(job.type, "advert.request") == 0) {
       job.advertFlood = payload["flood"] | true;
+    }
+    if (!payload.isNull() && std::strcmp(job.type, "status") == 0) {
+      // A payload that says nothing is an older server, and that still means "read the version":
+      // tests/fixtures/contracts/StatusPayload.json is `{}` for exactly that reason.
+      job.statusVersion = payload["version"] | true;
     }
     if (!payload.isNull() && std::strcmp(job.type, "password.set") == 0) {
       const char* field = payload["field"].as<const char*>();

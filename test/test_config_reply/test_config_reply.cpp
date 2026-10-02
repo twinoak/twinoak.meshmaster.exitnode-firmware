@@ -1,7 +1,8 @@
 // The config-reply parser round-trips the .NET fixture JSON (tasks/phase-1/01): the same bytes
-// MeshMaster.Contracts' tests wrote for HeartbeatReply are read here into the struct that mirrors
-// the record, and GET /agent/v1/config's AgentConfig is read from the shape spec/API.md section 3
-// gives (there is no fixture for it - it is not an envelope of the job protocol).
+// MeshMaster.Contracts' tests wrote for HeartbeatReply and, since meshmaster.dk's task p4.3-71,
+// for GET /agent/v1/config's AgentConfig are read here into the structs that mirror the records.
+// The shapes spec/API.md section 3 gives are checked beside them: a field missing, a timestamp
+// that is not one, a member a newer server added.
 
 #include <gtest/gtest.h>
 
@@ -90,6 +91,22 @@ TEST(AgentConfig, TheConfigAnswerOfApiSection3ReadsIntoTheStruct) {
   EXPECT_EQ(30, c.pollIntervalS);
   EXPECT_STREQ("2026-09-28T12:03:14.5000000Z", c.serverTime);
   EXPECT_EQ(1790596994u, c.serverTimeUnix);
+}
+
+TEST(AgentConfig, TheDotNetFixtureReadsIntoTheStruct) {
+  const std::string fixture = readFixture("AgentConfig.json");
+  ASSERT_FALSE(fixture.empty())
+      << "tests/fixtures/contracts/AgentConfig.json is missing - run tools/sync-fixtures.ps1";
+  mm::AgentConfig c;
+  char err[128] = {0};
+  ASSERT_TRUE(mm::parseAgentConfig(fixture.c_str(), fixture.size(), c, err, sizeof err)) << err;
+  EXPECT_EQ(3, c.agentId);
+  EXPECT_STREQ("TwinOak Risskov companion", c.label);
+  EXPECT_STREQ("onboard", c.transport);
+  EXPECT_EQ(2, c.budget.maxTransactionsPerMinute);
+  EXPECT_EQ(20, c.budget.minGapSeconds);
+  EXPECT_EQ(30, c.pollIntervalS);
+  EXPECT_EQ(1790172001u, c.serverTimeUnix);
 }
 
 TEST(AgentConfig, AMissingFieldIsRefusedByName) {

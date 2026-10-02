@@ -1,12 +1,14 @@
 // The contract is the .NET agent's (tasks/phase-1/02): what this firmware POSTs to
-// /agent/v1/heartbeat is held against tests/fixtures/contracts/AgentHeartbeat.json **byte for
-// byte**, for the input MeshMaster.Contracts' own round-trip test wrote that fixture from. A
-// difference is a bug in the firmware, not a second dialect.
+// /agent/v1/heartbeat and /agent/v1/observations is held against
+// tests/fixtures/contracts/AgentHeartbeat.json and ObservationBatch.json **byte for byte**, for
+// the inputs MeshMaster.Contracts' own round-trip tests wrote those fixtures from. A difference
+// is a bug in the firmware, not a second dialect.
 //
-// POST /agent/v1/observations has no fixture - ObservationBatch is not one of the four envelopes
-// the .NET test writes files for - so it is held to the record in src/MeshMaster.Contracts/
-// Envelopes.cs instead: the field order, the camelCase, the nulls left out and the numbers as
-// System.Text.Json writes them.
+// ObservationBatch had no fixture until meshmaster.dk's task p4.3-71 wrote one, and this test
+// held the batch to the record in src/MeshMaster.Contracts/Envelopes.cs instead. The file is
+// here now and the inline expectation is gone: what is left inline is the cases the sample does
+// not carry - a direct neighbour, an empty batch, a name from a stranger and a position with six
+// decimals west of Greenwich.
 
 #include <gtest/gtest.h>
 
@@ -163,12 +165,17 @@ TEST(Numbers, ADoubleIsTheShortestDecimalThatReadsBackAsItself) {
 
 // ---- the observation batch ---------------------------------------------------------------------
 
-TEST(Observations, ABatchIsTheRecordsFieldOrderWithTheNullsLeftOut) {
+TEST(Observations, TheSameInputMakesTheDotNetFixtureByteForByte) {
+  const std::string fixture = readFixture("ObservationBatch.json");
+  ASSERT_FALSE(fixture.empty())
+      << "tests/fixtures/contracts/ObservationBatch.json is missing - run tools/sync-fixtures.ps1";
+
+  // The sample MeshMaster.Contracts' ContractsTests builds the fixture from, field for field.
   const char* hops[] = {"a1", "7f"};
   mm::ObservationItem item;
-  item.at = 1790172000u;
+  item.at = 1789725492u;  // 2026-09-18T09:58:12Z
   item.kind = "advert";
-  item.publicKey = "a1b2c3d4";
+  item.publicKey = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
   item.hasPath = true;
   item.path = hops;
   item.pathCount = 2;
@@ -181,19 +188,38 @@ TEST(Observations, ABatchIsTheRecordsFieldOrderWithTheNullsLeftOut) {
   item.hasFields = true;
   item.fields.name = "Grenaa Chimney #1";
   item.fields.hasPosition = true;
-  item.fields.latE6 = 56416666;
-  item.fields.lonE6 = -10876500;
+  item.fields.latE6 = 56410000;
+  item.fields.lonE6 = 10880000;
   item.fields.role = "repeater";
+  item.fields.hasFlags = true;
+  item.fields.flags = 3;
 
   char out[1024];
-  const size_t n = mm::writeObservationBatch("obs-0123456789abcdef0123456789abcdef", &item, 1, out, sizeof out);
+  const size_t n = mm::writeObservationBatch("e7c2", &item, 1, out, sizeof out);
   ASSERT_GT(n, 0u);
-  EXPECT_EQ(
-      "{\"clientId\":\"obs-0123456789abcdef0123456789abcdef\",\"items\":["
-      "{\"at\":\"2026-09-23T14:00:00Z\",\"kind\":\"advert\",\"publicKey\":\"a1b2c3d4\",\"path\":[\"a1\",\"7f\"],"
-      "\"hops\":2,\"snr\":6.25,\"rssi\":-97,"
-      "\"fields\":{\"name\":\"Grenaa Chimney #1\",\"lat\":56.416666,\"lon\":-10.8765,\"role\":\"repeater\"}}]}",
-      std::string(out, n));
+  EXPECT_EQ(fixture, std::string(out, n));
+
+  // The batch holds exactly the advert of Observation.json - the fixtures' own README says the
+  // nested pair is one object - so the item written above is that file's bytes too.
+  const std::string one = readFixture("Observation.json");
+  ASSERT_FALSE(one.empty());
+  EXPECT_NE(std::string::npos, fixture.find(one)) << "ObservationBatch.json does not hold Observation.json";
+}
+
+TEST(Observations, APositionIsThePlainDecimalOfTheAdvertsMicrodegrees) {
+  // The fixture's own position is two decimals and north-east of Greenwich; an advert can carry
+  // six and a western longitude, and neither goes through a double on the way out.
+  mm::ObservationItem item;
+  item.at = 1790172000u;
+  item.publicKey = "a1b2c3d4";
+  item.hasFields = true;
+  item.fields.hasPosition = true;
+  item.fields.latE6 = 56416666;
+  item.fields.lonE6 = -10876500;
+  char out[256];
+  const size_t n = mm::writeObservationBatch("obs-1", &item, 1, out, sizeof out);
+  ASSERT_GT(n, 0u);
+  EXPECT_NE(std::string::npos, std::string(out, n).find("\"lat\":56.416666,\"lon\":-10.8765"));
 }
 
 TEST(Observations, ADirectNeighbourHasAnEmptyPathAndZeroHops) {
