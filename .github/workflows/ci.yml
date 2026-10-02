@@ -3,6 +3,9 @@
 #   build (per board)   pio run -e <board> for every board of the matrix, and the .bin as an
 #                       artifact. heltec_v3 and heltec_v4 since task p1-06
 #   native tests        pio test -e native (the host tests: no board, no radio)
+#   host harness        pio run -e host, then tools/host-stub.py: the whole agent loop against a
+#                       fake repeater and a recorded server, every job type claimed, run and
+#                       settled without a radio (docs/host.md, task p1.1-08)
 #   fixtures            tools/sync-fixtures.ps1 -Verify - the contract fixtures and the
 #                       transcribed companion frames are still meshmaster.dk's bytes and nobody
 #                       edited one here
@@ -127,3 +130,50 @@ jobs:
       - name: The fixtures are still meshmaster.dk's
         shell: pwsh
         run: ./tools/sync-fixtures.ps1 -Verify
+
+  host:
+    name: host harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-host-${{ runner.os }}-${{ env.PIO_VERSION }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: |
+            pio-host-${{ runner.os }}-${{ env.PIO_VERSION }}-
+
+      - name: Install PlatformIO Core
+        run: pip install --quiet "platformio==${PIO_VERSION}"
+
+      # The whole agent loop built for Linux: AgentLoop, JobRunner, every handler, the ring, the
+      # result buffer, the sessions and the console parser, with the mesh and the server client
+      # bound to a fake repeater and a plain-HTTP client (docs/host.md). -Werror is on here too.
+      - name: Build the host program
+        run: pio run -e host
+
+      # The stub replays the server from tests/fixtures/server/one-cycle.json and runs the program
+      # against it: thirteen job types, one cycle, and then the assertions - the results against
+      # the contract fixtures' shapes, and the fake's journal for "once each" and "the timestamps
+      # rise". A stale recording fails here naming the field that differed.
+      - name: One cycle against the recorded stub
+        run: python tools/host-stub.py --log-level info
+
+      - name: Keep the run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-harness-${{ github.sha }}
+          path: |
+            out/host-stub.log
+            out/host-journal.json
+          if-no-files-found: warn
+          retention-days: 14

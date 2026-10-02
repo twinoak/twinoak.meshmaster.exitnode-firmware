@@ -13,7 +13,12 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "mesh/MeshCoreHeaders.h"
+// Only the type of begin()'s argument, so that a host build can carry this header without
+// MeshCore on the include path (src/host/HostClock.cpp is the clock there, and never calls
+// begin()). The board's src/net/Clock.cpp includes mesh/MeshCoreHeaders.h for the definition.
+namespace mesh {
+class RTCClock;
+}
 
 namespace mm {
 
@@ -24,6 +29,7 @@ class AgentClock {
     Rtc,     // the RTC held a plausible time at boot (kept across a software reset)
     Sntp,    // the pool answered
     Server,  // taken from a config reply's serverTime
+    Host,    // the workstation's own clock, in the host harness (docs/host.md) - no board, no RTC
   };
 
   static constexpr int32_t kToleranceS = 5;

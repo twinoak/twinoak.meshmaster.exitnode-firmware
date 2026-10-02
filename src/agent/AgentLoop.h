@@ -37,11 +37,11 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "AgentClient.h"
+#include "ServerPort.h"
 #include "JobRunner.h"
 #include "Observations.h"
 #include "ServerPolicy.h"
-#include "mesh/AgentMesh.h"
+#include "mesh/MeshPort.h"
 #include "net/Clock.h"
 #include "net/WifiLink.h"
 #include "settings/Store.h"
@@ -62,7 +62,7 @@ class AgentLoop {
     uint32_t consecutiveFailures = 0;  // calls that got no answer since the last one that did
   };
 
-  void begin(SettingsStore& settings, AgentClient& server, AgentClock& clock, WifiLink& wifi, AgentMesh& mesh,
+  void begin(SettingsStore& settings, ServerPort& server, AgentClock& clock, WifiLink& wifi, MeshPort& mesh,
              JobRunner& jobs);
 
   // The board's own identity, as 64 lowercase hex, or nullptr while the radio has made none.
@@ -110,16 +110,16 @@ class AgentLoop {
   void doJobs();
   void buildHeartbeat(Heartbeat& hb) const;
   // Acts on what the answer means (ServerPolicy.h) and says which action that was.
-  ServerAction noteFailure(const AgentClient::Call& call);
+  ServerAction noteFailure(const ServerPort::Call& call);
   void succeeded();
   size_t buildBatch(uint32_t nowMs, char* out, size_t cap);
   uint32_t epochOf(uint32_t heardAtMillis, uint32_t nowMs) const;
 
   SettingsStore* settings_ = nullptr;
-  AgentClient* server_ = nullptr;
+  ServerPort* server_ = nullptr;
   AgentClock* clock_ = nullptr;
   WifiLink* wifi_ = nullptr;
-  AgentMesh* mesh_ = nullptr;
+  MeshPort* mesh_ = nullptr;
   JobRunner* jobs_ = nullptr;
 
   ObservationRing ring_;

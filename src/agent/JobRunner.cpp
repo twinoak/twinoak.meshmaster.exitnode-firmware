@@ -75,7 +75,7 @@ TraceHop g_hops[kMaxTraceHops + 1];
 char g_pathHops[kMaxClaimPathHops][8];
 const char* g_pathPtrs[kMaxClaimPathHops];
 uint8_t g_pathBytes[kMaxClaimPathHops * 3];
-uint8_t g_roundTrip[MAX_PATH_SIZE];
+uint8_t g_roundTrip[kMaxMeshPathBytes];
 ConfigSnapshot g_snapshot;
 AccessListEntry g_acl[kAccessListMaxEntries];
 char g_cliReply[kMaxCliReplyLen + 1];       // the last CLI reply, as the repeater wrote it
@@ -134,7 +134,7 @@ bool sameKey(const char* a, const char* b) {
 
 }  // namespace
 
-void JobRunner::begin(AgentMesh& mesh, AgentClient& server, AgentClock& clock, void (*pump)()) {
+void JobRunner::begin(MeshPort& mesh, ServerPort& server, AgentClock& clock, void (*pump)()) {
   mesh_ = &mesh;
   server_ = &server;
   clock_ = &clock;
@@ -453,7 +453,7 @@ Outcome JobRunner::runStatus(const ClaimedJob& job, Context& ctx, size_t& dataLe
   const Outcome session = ensureSession(job, ctx);
   if (session != Outcome::Ok) return session;
 
-  const Outcome got = request(job, ctx, "status request", AgentMesh::kReqTypeGetStatus, nullptr, 0);
+  const Outcome got = request(job, ctx, "status request", MeshPort::kReqTypeGetStatus, nullptr, 0);
   if (got != Outcome::Ok) return got;
 
   StatusReading reading;
@@ -472,7 +472,7 @@ Outcome JobRunner::runStatus(const ClaimedJob& job, Context& ctx, size_t& dataLe
     // meshmaster.dk's task p4.3-68 only when the claim asks for it, which is when the server's
     // record is stale or this pair has recorded none. Forty-seven of a repeater's forty-eight
     // daily reads are one transaction instead of two.
-    if (request(job, ctx, "owner info (firmware)", AgentMesh::kReqTypeGetOwnerInfo, nullptr, 0) == Outcome::Ok) {
+    if (request(job, ctx, "owner info (firmware)", MeshPort::kReqTypeGetOwnerInfo, nullptr, 0) == Outcome::Ok) {
       const MeshReply& owner = mesh_->reply();
       parseOwnerInfoFirmware(owner.data, owner.len, firmware, sizeof firmware);
     } else {
@@ -494,7 +494,7 @@ Outcome JobRunner::runTelemetry(const ClaimedJob& job, Context& ctx, size_t& dat
   // sender may have) and four random bytes, for a packet hash nothing repeats.
   uint8_t data[8] = {0};
   randomBytes(&data[4], 4);
-  const Outcome got = request(job, ctx, "telemetry request", AgentMesh::kReqTypeGetTelemetry, data, sizeof data);
+  const Outcome got = request(job, ctx, "telemetry request", MeshPort::kReqTypeGetTelemetry, data, sizeof data);
   if (got != Outcome::Ok) return got;
 
   const MeshReply& reply = mesh_->reply();
@@ -527,7 +527,7 @@ Outcome JobRunner::runNeighbours(const ClaimedJob& job, Context& ctx, size_t& da
 
     char what[40];
     std::snprintf(what, sizeof what, "neighbours page at %d", offset);
-    const Outcome got = request(job, ctx, what, AgentMesh::kReqTypeGetNeighbours, data, sizeof data);
+    const Outcome got = request(job, ctx, what, MeshPort::kReqTypeGetNeighbours, data, sizeof data);
     if (got != Outcome::Ok) {
       // A page that never came back after some already did is still a reading: the server gets
       // what was heard rather than nothing at all.
@@ -591,7 +591,7 @@ Outcome JobRunner::runTrace(const ClaimedJob& job, Context& ctx, size_t& dataLen
     std::memcpy(&g_roundTrip[n], &g_pathBytes[i * hashSize], hashSize);
     n += hashSize;
   }
-  if (n > MAX_PATH_SIZE) {
+  if (n > kMaxMeshPathBytes) {
     g_log.add("the round trip is %u bytes, more than a trace packet's path", static_cast<unsigned>(n));
     return Outcome::Unsupported;
   }
@@ -831,7 +831,7 @@ Outcome JobRunner::readAccessList(const ClaimedJob& job, Context& ctx, ConfigSna
   // The ACL is a binary request and not a `get` (task p3.5-43): `get acl` is answered on the
   // repeater's local serial console alone. Admin only; both reserved bytes zero.
   const uint8_t data[2] = {0, 0};
-  const Outcome got = request(job, ctx, "access-list request (the ACL)", AgentMesh::kReqTypeGetAccessList, data,
+  const Outcome got = request(job, ctx, "access-list request (the ACL)", MeshPort::kReqTypeGetAccessList, data,
                               sizeof data);
   if (got != Outcome::Ok) {
     if ((got == Outcome::Unreachable || got == Outcome::Timeout) && snapshot.valuesRead() > 0) {

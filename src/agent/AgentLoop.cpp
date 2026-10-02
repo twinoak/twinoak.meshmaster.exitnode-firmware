@@ -44,8 +44,8 @@ bool elapsed(uint32_t now, uint32_t deadline) { return static_cast<int32_t>(now 
 
 }  // namespace
 
-void AgentLoop::begin(SettingsStore& settings, AgentClient& server, AgentClock& clock, WifiLink& wifi,
-                      AgentMesh& mesh, JobRunner& jobs) {
+void AgentLoop::begin(SettingsStore& settings, ServerPort& server, AgentClock& clock, WifiLink& wifi,
+                      MeshPort& mesh, JobRunner& jobs) {
   settings_ = &settings;
   server_ = &server;
   clock_ = &clock;
@@ -120,6 +120,15 @@ void AgentLoop::doConfig() {
   configDue_ = false;
   if (server_->fetchConfig()) {
     budget_ = server_->config().budget;
+    // **And onto the gate**, which is where the budget is actually spent (found by the host harness,
+    // task p1.1-08). This line was missing: `budget_` was taken from the config call and
+    // doHeartbeat() below only passes a budget on when the reply's *differs from `budget_`* - so a
+    // server whose heartbeat agreed with its own config call never reached the gate at all, and the
+    // board paced every job at AirtimeGate's constructor default of two a minute and twenty seconds
+    // instead. Invisible in production, where that default is also the server's; plain the moment an
+    // owner raises an exit node's budget, which is what the harness did.
+    jobs_->setBudget(budget_);
+    LOG_I("server: budget in force: %d/min, gap %d s", budget_.maxTransactionsPerMinute, budget_.minGapSeconds);
     pollIntervalS_ = server_->config().pollIntervalS > 0 ? server_->config().pollIntervalS : 30;
   } else {
     // The config call is a startup nicety - the heartbeat answers the budget, the poll interval
@@ -161,7 +170,7 @@ void AgentLoop::buildHeartbeat(Heartbeat& hb) const {
   hb.board = boardName();
 }
 
-ServerAction AgentLoop::noteFailure(const AgentClient::Call& call) {
+ServerAction AgentLoop::noteFailure(const ServerPort::Call& call) {
   const ServerAction action = actionFor(call.reachable, call.httpStatus);
   switch (action) {
     case ServerAction::Halt:

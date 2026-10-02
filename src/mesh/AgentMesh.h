@@ -37,49 +37,15 @@
 #include "agent/Credentials.h"
 #include "agent/Observations.h"
 #include "mesh/MeshCoreHeaders.h"
+#include "mesh/MeshPort.h"
 #include "mesh/ReplyCodec.h"
 
 namespace mm {
 
-struct MeshCounters {
-  uint32_t rx = 0;             // every frame that parsed
-  uint32_t rxByType[16] = {};  // by PAYLOAD_TYPE_* (0x00..0x0F)
-  uint32_t tx = 0;             // what left the radio: one per transaction, and nothing else
-  uint32_t adverts = 0;        // adverts that verified and became observations
-  uint32_t advertsDropped = 0; // adverts whose app_data did not decode
-};
+// MeshCounters, MeshReply and SendResult live in mesh/MeshPort.h since task p1.1-08: they are
+// what the interface carries, and the fake repeater of the host harness fills the same structs.
 
-// What came back from a repeater during a job. One instance, reused: a board runs one
-// transaction at a time, by the budget of EXIT-NODES §8.
-struct MeshReply {
-  enum class Kind : uint8_t { None, Response, Trace, Text };
-
-  Kind kind = Kind::None;
-  uint32_t tag = 0;
-  bool viaPath = false;  // it came back as a returned path, which also taught us the way out
-
-  // A RESPONSE, after the four-byte tag: the repeater's own reply bytes (mesh/ReplyCodec.h).
-  uint8_t data[MAX_PACKET_PAYLOAD] = {};
-  uint8_t len = 0;
-
-  // A TXT_MSG: the CLI reply's text, as CommonCLI wrote it (at most 160 characters), untrimmed.
-  char text[kMaxCliReplyLen + 1] = {0};
-
-  float snr = 0;  // what this board measured on the reply
-
-  // A TRACE, as Mesh::onTraceRecv delivers it.
-  uint8_t traceFlags = 0;
-  uint8_t traceHashes[MAX_PATH_SIZE] = {};
-  uint8_t traceHashBytes = 0;
-  uint8_t traceSnrs[MAX_PATH_SIZE] = {};
-  uint8_t traceSnrCount = 0;
-  float traceFinalSnr = 0;
-};
-
-// What a send came to. The words are MeshCore's MSG_SEND_* and mean the same thing.
-enum class SendResult : uint8_t { Failed, Flood, Direct };
-
-class AgentMesh : public mesh::Mesh {
+class AgentMesh : public mesh::Mesh, public MeshPort {
  public:
   static constexpr int kRecent = 5;  // what `mesh` prints: the last five, with their names
 
@@ -87,23 +53,27 @@ class AgentMesh : public mesh::Mesh {
             mesh::PacketManager& mgr, mesh::MeshTables& tables)
       : mesh::Mesh(radio, ms, rng, rtc, mgr, tables) {}
 
-  // Where a heard advert goes. Until this is set, adverts are counted and dropped.
-  void setRing(ObservationRing* ring) { ring_ = ring; }
+  // One turn of the mesh. `mesh::Mesh::loop()` is not virtual, so this is the one name the rest
+  // of the firmware calls and it forwards; the qualified call is the only way in.
+  void loop() override { mesh::Mesh::loop(); }
 
-  const MeshCounters& counters() const { return counters_; }
+  // Where a heard advert goes. Until this is set, adverts are counted and dropped.
+  void setRing(ObservationRing* ring) override { ring_ = ring; }
+
+  const MeshCounters& counters() const override { return counters_; }
 
   // The heartbeat's `overheard`: frames of the mesh's own chat, counted and never read.
-  uint32_t overheard() const {
+  uint32_t overheard() const override {
     return counters_.rxByType[PAYLOAD_TYPE_GRP_TXT] + counters_.rxByType[PAYLOAD_TYPE_GRP_DATA] +
            counters_.rxByType[PAYLOAD_TYPE_TXT_MSG];
   }
 
-  void setFrameLog(bool on) { frameLog_ = on; }
-  bool frameLog() const { return frameLog_; }
+  void setFrameLog(bool on) override { frameLog_ = on; }
+  bool frameLog() const override { return frameLog_; }
 
   // The newest first, at most kRecent of them; count() is how many are real.
-  const HeardAdvert& recent(int index) const { return recent_[index]; }
-  int recentCount() const { return recentCount_; }
+  const HeardAdvert& recent(int index) const override { return recent_[index]; }
+  int recentCount() const override { return recentCount_; }
 
   static const char* payloadTypeName(uint8_t type);
 
@@ -113,34 +83,35 @@ class AgentMesh : public mesh::Mesh {
   // claim carries them, `hashSize` bytes each). With no path the mesh floods, which is what
   // EXIT-NODES §3 asks for: the server never guesses, and a companion that knows no route finds
   // one. Returns false when the key is not 64 hex characters.
-  bool beginJob(const char* publicKeyHex, const uint8_t* pathHashes, uint8_t hopCount, uint8_t hashSize);
+  bool beginJob(const char* publicKeyHex, const uint8_t* pathHashes, uint8_t hopCount, uint8_t hashSize) override;
 
   // No job in flight: the peer is forgotten, the shared secret is wiped, and a RESPONSE from
   // anybody is released again before it is decrypted.
-  void endJob();
+  void endJob() override;
 
   // The server knows the repeater as a direct neighbour: a path of zero hops, which is sent
   // DIRECT with an empty path rather than flooded.
-  void setDirectPath();
+  void setDirectPath() override;
   // The path is stale (a direct login along it got nothing back): forget it, so the next send
   // floods and the reply teaches a fresh one.
-  void forgetPath();
+  void forgetPath() override;
 
-  bool jobInFlight() const { return peerSet_; }
-  uint8_t pathHopCount() const { return haveOutPath_ ? static_cast<uint8_t>(outPathLen_ & 63) : 0; }
-  bool hasPath() const { return haveOutPath_; }
+  bool jobInFlight() const override { return peerSet_; }
+  uint8_t pathHopCount() const override { return haveOutPath_ ? static_cast<uint8_t>(outPathLen_ & 63) : 0; }
+  bool hasPath() const override { return haveOutPath_; }
   // The out-path as hex hops, for the result's `pathUsed`; returns how many were written.
-  int describePath(char hops[][8], int max) const;
+  int describePath(char hops[][8], int max) const override;
 
   // A login as ourselves (EXIT-NODES §7). With `password` empty or nullptr it is the ACL login,
   // which offers the repeater our own key and no secret at all; with one it is the guest or
   // admin login, and the plaintext that carried the password is wiped as soon as the packet is
-  // encrypted (at most kMaxPasswordLen bytes go, as BaseChatMesh::sendLogin sends them). `tag`
-  // is what the reply is matched by.
-  SendResult sendLogin(const char* password, uint32_t& tag);
+  // encrypted (at most kMaxPasswordLen bytes go, as BaseChatMesh::sendLogin sends them). `tag` is
+  // set to **0**: a login reply is prefixed with the repeater's own clock and not with ours, so it
+  // is matched on nothing (MeshPort.h, and the comment in sendLogin's body).
+  SendResult sendLogin(const char* password, uint32_t& tag) override;
 
   // REQ_TYPE_* with its request data, on the session the login opened.
-  SendResult sendRequest(uint8_t reqType, const uint8_t* data, uint8_t len, uint32_t& tag);
+  SendResult sendRequest(uint8_t reqType, const uint8_t* data, uint8_t len, uint32_t& tag) override;
 
   // One CLI line as a TXT_MSG datagram of type CLI data, on the admin session: `timestamp` is
   // the sender timestamp the repeater judges replays by, and must be strictly above the last
@@ -148,34 +119,30 @@ class AgentMesh : public mesh::Mesh {
   // nothing and does not run the command) - uniqueTime() is that series. The reply is a TXT_MSG
   // of the repeater's own and is awaited with awaitText(). `sensitive` is a line made from a
   // password: its frame, and the reply awaited for it, are printed with their bodies as stars.
-  SendResult sendCli(const char* text, uint32_t timestamp, bool sensitive = false);
+  SendResult sendCli(const char* text, uint32_t timestamp, bool sensitive = false) override;
 
   // The path-discovery request as the companion's CMD_SEND_PATH_DISCOVERY_REQ makes it
   // (examples/companion_radio/MyMesh.cpp:1602-1630 at d9296435): a base-telemetry REQ, always
   // flooded, whose reply comes back as a returned path. The last resort of a discover.
-  SendResult sendDiscovery(uint32_t& tag);
+  SendResult sendDiscovery(uint32_t& tag) override;
 
   // A trace along the round-trip path, which is the way out, the repeater, and the way back.
-  SendResult sendTrace(const uint8_t* roundTripHashes, uint8_t hashBytes, uint8_t hashSize, uint32_t& tag);
+  SendResult sendTrace(const uint8_t* roundTripHashes, uint8_t hashBytes, uint8_t hashSize, uint32_t& tag) override;
 
   // Wait for the RESPONSE (or TRACE) with this tag, pumping the mesh (and whatever `pump` is)
   // meanwhile. Returns false on silence. The reply is reply().
-  bool awaitReply(uint32_t tag, uint32_t timeoutMs, void (*pump)());
+  bool awaitReply(uint32_t tag, uint32_t timeoutMs, void (*pump)()) override;
   // Wait for a CLI reply: the first TXT_MSG of CLI data from the peer, which carries no tag.
-  bool awaitText(uint32_t timeoutMs, void (*pump)());
-  const MeshReply& reply() const { return reply_; }
+  bool awaitText(uint32_t timeoutMs, void (*pump)()) override;
+  const MeshReply& reply() const override { return reply_; }
 
   // The RTC's unique second: every tag and every sender timestamp this board sends comes from
   // it, so the series a repeater sees from this key is strictly increasing across REQs and CLI
   // lines alike, which is what its replay check needs.
-  uint32_t uniqueTime() { return getRTCClock()->getCurrentTimeUnique(); }
+  uint32_t uniqueTime() override { return getRTCClock()->getCurrentTimeUnique(); }
 
-  // The request types of examples/simple_repeater/MyMesh.cpp at d9296435.
-  static constexpr uint8_t kReqTypeGetStatus = 0x01;
-  static constexpr uint8_t kReqTypeGetTelemetry = 0x03;
-  static constexpr uint8_t kReqTypeGetAccessList = 0x05;
-  static constexpr uint8_t kReqTypeGetNeighbours = 0x06;
-  static constexpr uint8_t kReqTypeGetOwnerInfo = 0x07;
+  // The request types of examples/simple_repeater/MyMesh.cpp at d9296435 are MeshPort's, so the
+  // fake repeater of the host harness answers the same numbers.
 
  protected:
   mesh::DispatcherAction onRecvPacket(mesh::Packet* pkt) override;

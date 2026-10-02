@@ -1,0 +1,174 @@
+{
+  "_note": [
+    "The fake mesh of the host harness (docs/host.md, src/host/HostScenario.h). Two repeaters:",
+    "the first is an ordinary one that every job type is run against, the second carries the knobs",
+    "the task asked for - an ACL of 24 entries, which one RESPONSE datagram cannot hold, a region",
+    "map longer than the firmware's 160-character reply buffer, a dropped neighbours page and a",
+    "`set tx` the repeater refuses.",
+    "",
+    "The passwords here are the passwords of repeaters that do not exist. Every key is the SHA-256",
+    "of the name beside it, so a run is repeatable and no key here could be a real node's."
+  ],
+  "exitNode": {
+    "publicKey": "f7b8f191d0aa0d23976459c419f2d131371f1caecaef35289295f803078f2442",
+    "_seed": "sha256('meshmaster-host-harness-exit-node')"
+  },
+  "repeaters": [
+    {
+      "_seed": "sha256('harness-repeater-1')",
+      "publicKey": "0f1ba04635a8ca8ca4699225f3f3bbe816cc955c97a49d07e0c6967e79985c78",
+      "name": "Grenaa Chimney #1",
+      "ownerInfo": "Twinoak",
+      "firmware": "v1.17.1",
+      "build": "27 Sep 2025",
+      "board": "Heltec V3",
+      "role": "repeater",
+      "adminPassword": "harness-admin",
+      "guestPassword": "",
+      "hops": 1,
+      "latencyMs": 40,
+      "online": true,
+      "acl": [
+        {
+          "_note": "the read-only grant an association leaves behind; the restore puts it back here",
+          "key": "f7b8f191d0aa0d23976459c419f2d131371f1caecaef35289295f803078f2442",
+          "permissions": 1
+        }
+      ],
+      "prefs": {
+        "name": "Grenaa Chimney #1",
+        "lat": "56.41",
+        "lon": "10.88",
+        "advert.interval": "240",
+        "flood.advert.interval": "12",
+        "repeat": "on",
+        "dutycycle": "10.0",
+        "flood.max": "3",
+        "flood.max.unscoped": "0",
+        "flood.max.advert": "3",
+        "tx": "22",
+        "path.hash.mode": "1",
+        "multi.acks": "0",
+        "allow.read.only": "on",
+        "agc.reset.interval": "0",
+        "loop.detect": "moderate",
+        "freq": "869.618",
+        "guest.password": ""
+      },
+      "regions": {
+        "listing": "*\n dk F\n  jylland F\n  sjaelland F\n",
+        "default": "dk",
+        "home": "jylland"
+      },
+      "neighbours": [
+        {
+          "_seed": "sha256('harness-neighbour-1')",
+          "key": "aa48c001d3209e30f71a1317b899410483985b50732d633d98a26df381b12631",
+          "heardS": 120,
+          "snr": 6.25
+        },
+        {
+          "_seed": "sha256('harness-neighbour-2')",
+          "key": "6edf8cc90b04623d4cb05f2805a9ed845005486eaa2aeb7a280b949ce21388c3",
+          "heardS": 900,
+          "snr": -2.5
+        },
+        {
+          "_seed": "sha256('harness-neighbour-3')",
+          "key": "9872c8c29f7adbabf1bc3eec46bac995e02d6435608bb2f4d078327d7b505169",
+          "heardS": 3600,
+          "snr": 1.0
+        }
+      ],
+      "telemetry": [
+        { "channel": 1, "type": "voltage", "value": 4.012 },
+        { "channel": 1, "type": "temperature", "value": 17.4 }
+      ],
+      "status": {
+        "batteryMv": 4012,
+        "txQueueLen": 0,
+        "noiseFloorDbm": -112,
+        "lastRssi": -97,
+        "packetsRecv": 12345,
+        "packetsSent": 6789,
+        "airtimeS": 1234,
+        "uptimeS": 864000,
+        "sentFlood": 1000,
+        "sentDirect": 2000,
+        "recvFlood": 3000,
+        "recvDirect": 4000,
+        "errEvents": 0,
+        "lastSnr": 6.25,
+        "directDups": 0,
+        "floodDups": 3,
+        "rxAirtimeS": 456,
+        "recvErrors": 2
+      }
+    },
+    {
+      "_note": [
+        "The awkward one. `aclEntries: 24` pads the ACL past what one RESPONSE datagram carries, so",
+        "the access-list request is answered with silence and a config read says so rather than",
+        "reading a short list as a revoked grant (spec/EXIT-NODES.md 4.3). The region listing is 180",
+        "characters, which the firmware's reply buffer cuts at 160 with no marker - no evidence, and",
+        "the snapshot's raw line says so. `drop` makes the second neighbours page vanish, and",
+        "`refuse` makes `set tx` answer the firmware's own refusal."
+      ],
+      "_seed": "sha256('harness-repeater-2')",
+      "publicKey": "8d39332da40bbd7c43651db579fb0f9fc567f2c66c244fe99a2f02381b4af6a8",
+      "name": "Hoeg Mast #2",
+      "ownerInfo": "Twinoak|the awkward one",
+      "firmware": "v1.17.1",
+      "build": "27 Sep 2025",
+      "board": "Heltec V3",
+      "role": "repeater",
+      "adminPassword": "harness-admin-2",
+      "guestPassword": "harness-guest-2",
+      "hops": 2,
+      "latencyMs": 40,
+      "online": true,
+      "acl": [
+        {
+          "key": "f7b8f191d0aa0d23976459c419f2d131371f1caecaef35289295f803078f2442",
+          "permissions": 1
+        }
+      ],
+      "aclEntries": 24,
+      "neighbourCount": 14,
+      "prefs": {
+        "name": "Hoeg Mast #2",
+        "lat": "56.09",
+        "lon": "10.21",
+        "advert.interval": "240",
+        "flood.advert.interval": "12",
+        "repeat": "on",
+        "dutycycle": "10.0",
+        "flood.max": "3",
+        "flood.max.unscoped": "0",
+        "tx": "20",
+        "path.hash.mode": "1",
+        "multi.acks": "0",
+        "allow.read.only": "on",
+        "guest.password": "harness-guest-2"
+      },
+      "regions": {
+        "_listingNote": "187 characters. The firmware exports the map into a 160-byte reply buffer and BufStream::write simply stops there with no marker, so what the agent reads is cut mid-name and is no evidence of anything (src/agent/ConfigRead.h).",
+        "listing": "*\n dk F\n  jylland F\n   grenaa F\n   aarhus F\n   randers F\n   viborg F\n   silkeborg F\n  sjaelland F\n   koebenhavn F\n   roskilde F\n   helsingoer F\n  fyn F\n   odense F\n   svendborg F\n  bornholm F\n",
+        "default": "dk",
+        "home": "jylland"
+      },
+      "telemetry": [
+        { "channel": 1, "type": "voltage", "value": 3.904 }
+      ],
+      "drop": ["neighbours@9"],
+      "refuse": ["tx"],
+      "status": {
+        "batteryMv": 3904,
+        "uptimeS": 7200,
+        "lastSnr": -3.5,
+        "legacy": true,
+        "_legacyNote": "a 48-byte RepeaterStats: the two newest counters are not in it"
+      }
+    }
+  ]
+}

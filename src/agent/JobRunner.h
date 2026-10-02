@@ -3,9 +3,16 @@
 // The .NET agent's JobRunner has a companion on a cable and a handler per type; here the board
 // **is** the companion, so each handler is a direct call into MeshCore's mesh layer - the same
 // primitives the companion firmware runs when a phone asks - and the reply arrives in the
-// callbacks src/mesh/AgentMesh.h has. Simpler on the wire, and the same result shapes on the
+// callbacks src/mesh/MeshPort.h names. Simpler on the wire, and the same result shapes on the
 // server: what is posted is held to the .NET agent's bytes by test/test_job_results and
 // test/test_config_read.
+//
+// Since task p1.1-08 this file talks to two interfaces and not to two classes: `MeshPort` is the
+// board's mesh (src/mesh/AgentMesh.h) or the fake repeater of the host harness
+// (src/host/HostMesh.h), and `ServerPort` is the board's verified-TLS client
+// (src/agent/AgentClient.h) or the harness's plain-HTTP one (src/host/HostClient.h). Everything
+// below is the same code in both, which is the point: what `pio run -e host` runs against a fake
+// mesh is this file and not a port of it (docs/host.md).
 //
 // Thirteen types. Four of them log in as this board and nothing else (task 03):
 //
@@ -74,13 +81,13 @@
 #include <cstdint>
 
 #include "Airtime.h"
-#include "AgentClient.h"
 #include "ConfigApply.h"
 #include "ConfigRead.h"
 #include "JobEnvelopes.h"
 #include "ResultBuffer.h"
+#include "ServerPort.h"
 #include "Sessions.h"
-#include "mesh/AgentMesh.h"
+#include "mesh/MeshPort.h"
 #include "net/Clock.h"
 
 namespace mm {
@@ -98,7 +105,7 @@ class JobRunner {
   };
   static constexpr int kRemembered = 10;
 
-  void begin(AgentMesh& mesh, AgentClient& server, AgentClock& clock, void (*pump)());
+  void begin(MeshPort& mesh, ServerPort& server, AgentClock& clock, void (*pump)());
   void setIdentity(const char* publicKeyHex);
   void setBudget(const AgentBudget& budget) { gate_.setBudget(budget); }
 
@@ -224,8 +231,8 @@ class JobRunner {
   // Every remembered job with this id is marked posted, once its result has gone through.
   void markPosted(long long jobId);
 
-  AgentMesh* mesh_ = nullptr;
-  AgentClient* server_ = nullptr;
+  MeshPort* mesh_ = nullptr;
+  ServerPort* server_ = nullptr;
   AgentClock* clock_ = nullptr;
   void (*pump_)() = nullptr;
   const char* publicKey_ = nullptr;
