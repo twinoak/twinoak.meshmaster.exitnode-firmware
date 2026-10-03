@@ -286,9 +286,20 @@ SendResult AgentMesh::sendLogin(const char* password, uint32_t& tag) {
   // cipher block, so the empty string arrives as the empty string and the repeater answers from
   // its ACL alone (simple_repeater/MyMesh.cpp:90-99). With one, the repeater compares it with
   // its admin and guest passwords and the entry of this key takes the password's level.
+  //
+  // **A login reply carries no tag of ours** (found by the host harness, task p1.1-08; the same
+  // fix is on that branch). `handleRequest` reflects the sender's timestamp back as the reply's
+  // first four bytes, but `handleLoginReq` writes the **repeater's** `getCurrentTimeUnique()` there
+  // instead (simple_repeater/MyMesh.cpp:129-131 at d9296435). So the timestamp below is what the
+  // repeater judges a replay by and nothing else; `tag` is left 0, which is how awaitReply() is
+  // told to take the next RESPONSE from this peer whatever its first four bytes - as the .NET
+  // agent does, since PUSH_CODE_LOGIN_SUCCESS carries no tag either. Before this, every login
+  // reply was dropped for having "another tag" and every job that needed a session was
+  // `unreachable` (the first bench: acl.set to a repeater at 11 dB, twice, no reply).
   uint8_t temp[4 + kMaxPasswordLen];
-  tag = getRTCClock()->getCurrentTimeUnique();
-  std::memcpy(temp, &tag, 4);
+  tag = 0;
+  const uint32_t senderTimestamp = getRTCClock()->getCurrentTimeUnique();
+  std::memcpy(temp, &senderTimestamp, 4);
   size_t len = 0;
   if (password != nullptr) {
     while (password[len] != '\0' && len < kMaxPasswordLen) {
