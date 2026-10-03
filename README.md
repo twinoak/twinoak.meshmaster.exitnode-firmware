@@ -90,7 +90,10 @@ posted yet, and the reboot log `reboots` prints
 Over the USB serial console — 115 200 baud, one command per line, a `>` prompt,
 [`docs/console.md`](docs/console.md) for every command and key — not over a
 captive portal. The token comes from the exit node's registration page on
-meshmaster.dk (`/exit-nodes/new`) and is kept in NVS. A board from nothing:
+meshmaster.dk (`/exit-nodes/new`) and is kept in NVS; the server is
+`https://meshmaster.dk` unless `meshmaster.url` says otherwise (a staging
+installation, a test stack behind a certificate the board can verify). A board
+from nothing:
 
 ```console
 > status
@@ -101,15 +104,13 @@ radio     869.618 MHz, bw 62.5 kHz, sf 8, cr 8, tx 22 dBm; companion role, no re
 frames    rx 3 (advert 2, grp-txt 1, txt 0, ack 0, path 0, trace 0, other 0), tx 0, noise floor -112 dBm, frame log off
 wifi      off, wifi.ssid is unset
 time      no time (sntp not started, no wifi)
-server    not configured (meshmaster.url unset, meshmaster.token unset)
+server    not configured (meshmaster.token unset)
 heap      free 203980, min ever 200772, largest block 110580
 log       level info, frames off, oled on
 > set wifi.ssid Twinoak
 ok wifi.ssid
 > set wifi.pass ********************
 ok wifi.pass
-> set meshmaster.url https://meshmaster.dk
-ok meshmaster.url
 > set meshmaster.token mma_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ok meshmaster.token
 > get meshmaster.token
@@ -119,7 +120,7 @@ wifi.pass set
 > get
 wifi.ssid Twinoak
 wifi.pass set
-meshmaster.url https://meshmaster.dk
+meshmaster.url unset (https://meshmaster.dk)
 meshmaster.token set
 radio.freq unset (869.618)
 radio.bw unset (62.5)

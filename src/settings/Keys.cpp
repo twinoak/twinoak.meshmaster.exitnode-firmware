@@ -29,7 +29,7 @@ namespace mm {
 const KeyDef kKeys[kKeyCount] = {
     {"wifi.ssid", "wifi_ssid", ValueKind::Text, nullptr, 0, 0, 1, 32, "the network to join"},
     {"wifi.pass", "wifi_pass", ValueKind::Secret, nullptr, 0, 0, 8, 63, "its WPA passphrase, 8..63 characters; never printed"},
-    {"meshmaster.url", "mm_url", ValueKind::Url, nullptr, 0, 0, 9, kMaxValueLen, "the server, https:// required (https://meshmaster.dk)"},
+    {"meshmaster.url", "mm_url", ValueKind::Url, "https://meshmaster.dk", 0, 0, 9, kMaxValueLen, "the server; https:// required; unset means https://meshmaster.dk"},
     {"meshmaster.token", "mm_token", ValueKind::Token, nullptr, 0, 0, 12, kMaxValueLen, "the agent token from /exit-nodes/new; never printed"},
     {"radio.freq", "radio_freq", ValueKind::Float, "869.618", 150.0f, 2500.0f, 0, 0, "MHz"},
     {"radio.bw", "radio_bw", ValueKind::Float, "62.5", 7.8f, 500.0f, 0, 0, "kHz"},

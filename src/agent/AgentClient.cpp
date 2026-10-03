@@ -85,7 +85,9 @@ void AgentClient::begin(SettingsStore& settings, AgentClock& clock, const char* 
 }
 
 void AgentClient::reconfigure() {
-  settings_->get(*findKey("meshmaster.url"), url_, sizeof url_);
+  // The stored URL, else the key's fallback (https://meshmaster.dk): this project has one server,
+  // and a board that was given only its token talks to it.
+  settings_->effective(*findKey("meshmaster.url"), url_, sizeof url_);
   // A trailing slash is not part of the origin.
   size_t n = std::strlen(url_);
   while (n > 0 && url_[n - 1] == '/') url_[--n] = '\0';
@@ -173,7 +175,7 @@ bool AgentClient::call(const char* method, const char* endpoint, const char* req
   out.root = root_;
 
   if (!configured()) {
-    std::snprintf(out.error, sizeof out.error, "not configured: meshmaster.url and meshmaster.token are needed");
+    std::snprintf(out.error, sizeof out.error, "not configured: meshmaster.token is needed");
     lastCall_ = out;
     return false;
   }

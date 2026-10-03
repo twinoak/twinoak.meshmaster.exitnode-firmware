@@ -422,7 +422,7 @@ void AgentLoop::report(Stream& out) const {
   if (halted_) {
     out.println("state     halted: the server refused the token (http 401). Set meshmaster.token again.");
   } else if (!server_->configured()) {
-    out.println("state     not configured: meshmaster.url and meshmaster.token are needed");
+    out.println("state     not configured: meshmaster.token is needed");
   } else if (!wifi_->connected()) {
     out.println("state     waiting for wifi");
   } else if (!elapsed(now, holdUntil_)) {
@@ -524,6 +524,12 @@ void AgentLoop::describe(char* out, size_t cap) const {
 }
 
 void AgentLoop::oledLine(char* out, size_t cap) const {
+  // Drawn by Oled::render, which has no reason to know whether begin() has run here yet: before
+  // it has, server_ and wifi_ are null and there is nothing to say but that.
+  if (server_ == nullptr) {
+    std::snprintf(out, cap, "starting");
+    return;
+  }
   if (halted_) {
     std::snprintf(out, cap, "token revoked/wrong");
     return;

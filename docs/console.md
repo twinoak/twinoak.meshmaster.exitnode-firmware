@@ -41,7 +41,7 @@ that is not `https://`, a line over 200 characters, a control character.
 |---|---|---|
 | `wifi.ssid` | 1..32 characters | none: WiFi stays off |
 | `wifi.pass` | 8..63 characters, the WPA passphrase; never printed | none |
-| `meshmaster.url` | `https://host[:port][/path]`, the scheme required, at most 128 characters | none: no call is made |
+| `meshmaster.url` | `https://host[:port][/path]`, the scheme required, at most 128 characters | `https://meshmaster.dk`: the project has one server, and this is only set to point a board elsewhere |
 | `meshmaster.token` | the agent token from `/exit-nodes/new` on the server: `mma_` and base64url; never printed | none: no call is made |
 | `radio.freq` | MHz, 150..2500 | 869.618 |
 | `radio.bw` | kHz, 7.8..500 | 62.5 |
@@ -192,8 +192,8 @@ server comes back.
    `wifi: connected` and an address; then `clock: ... from sntp`. Pull the
    network cable from the router's uplink to see the retry lines back off (5 s,
    10 s, 20 s ... up to five minutes) and the link come back by itself.
-4. `set meshmaster.url https://meshmaster.dk` and the token from
-   `/exit-nodes/new`: `server: GET ...`, then `heap: ... free after the call`
+4. The token from `/exit-nodes/new` (`set meshmaster.url` only for a server
+   that is not meshmaster.dk): `server: GET ...`, then `heap: ... free after the call`
    and `server: config ok: agent <id> "<label>" ...`. A wrong token is
    `server: http 401`, and that **halts the loop**: nothing more is sent until
    `set meshmaster.token <token>` or a reboot, and the OLED says

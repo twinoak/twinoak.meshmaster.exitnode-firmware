@@ -370,12 +370,12 @@ void setup() {
   // everything after it can be the thing that has to be survived.
   mm::healthBegin(&clockForLog, board.getResetReasonString(board.getResetReason()));
 
+  // The panel is probed here so that a missing one is the first thing logged - but the four lines
+  // are first drawn below, once every object fillOled reads from has had its begin(): the first
+  // flash of a V3 crashed in AgentLoop::oledLine on a server_ that agent.begin() had not set yet
+  // (LoadProhibited at 0xc, the first frame rendered from Oled::begin before agent.begin ran).
   display_ok = display.begin();
-  if (display_ok) {
-    oled.begin(&display, &user_btn, &fillOled);
-  } else {
-    LOG_W("oled: not found");
-  }
+  if (!display_ok) LOG_W("oled: not found");
 
   radio_ok = radio_init();
   if (radio_ok) {
@@ -396,7 +396,8 @@ void setup() {
   jobs.begin(the_mesh, server, agentClock, &pumpDuringAJob);
   agent.begin(settings, server, agentClock, wifi, the_mesh, jobs);
   agent.setIdentity(public_key_hex[0] != 0 ? public_key_hex : nullptr);
-  if (!server.configured()) LOG_I("server: not configured; set meshmaster.url and meshmaster.token");
+  if (!server.configured()) LOG_I("server: not configured; set meshmaster.token (meshmaster.url is https://meshmaster.dk unless set)");
+  if (display_ok) oled.begin(&display, &user_btn, &fillOled);  // the first frame, now that its sources exist
 
   mm::ConsoleHost host = {&printStatus,  &printMesh,    &printServer, &printJobs,
                           &printSessions, &printErrors,  &printReboots, &printDump,
