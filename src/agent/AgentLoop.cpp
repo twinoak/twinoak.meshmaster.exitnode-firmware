@@ -161,8 +161,18 @@ void AgentLoop::buildHeartbeat(Heartbeat& hb) const {
   hb.board = boardName();
 }
 
+// The board's own link, proven: WiFi associated *and* a time that came off the network. An RTC
+// that held a plausible time across a software reset proves nothing about the network, so it is
+// not enough; SNTP having answered, or the server's own time having been taken, means a packet
+// of ours left this board and something answered it (task p1.2-10).
+bool AgentLoop::linkProven() const {
+  if (wifi_ == nullptr || !wifi_->connected() || clock_ == nullptr) return false;
+  const AgentClock::Source source = clock_->source();
+  return source == AgentClock::Source::Sntp || source == AgentClock::Source::Server;
+}
+
 ServerAction AgentLoop::noteFailure(const AgentClient::Call& call) {
-  const ServerAction action = actionFor(call.reachable, call.httpStatus);
+  const ServerAction action = actionFor(call.reachable, call.httpStatus, call.retryAfterS);
   switch (action) {
     case ServerAction::Halt:
       halted_ = true;
@@ -170,9 +180,16 @@ ServerAction AgentLoop::noteFailure(const AgentClient::Call& call) {
             "fixes it - `set meshmaster.token <token>` on this console.");
       break;
     case ServerAction::WaitRetryAfter: {
+      // A 429, or the 502/503/504 of a deploy that said how long it would be: the wait is the
+      // answer's own, to the second. The backoff does not double - a server that answered and
+      // named a time has not gone unanswered - so this is neither a consecutive failure nor one
+      // of the twelve the reboot guard counts. `httpFailures` is "a call that did not come back
+      // 2xx, 401 and 429 apart", so a 5xx still shows up in the heartbeat's counters.
       const uint32_t wait = retryAfterMs(call.retryAfterS);
       holdUntil_ = millis() + wait;
-      LOG_W("server: http 429; the wait is Retry-After's %lu s", static_cast<unsigned long>(wait / 1000));
+      if (call.httpStatus != 429) counters_.httpFailures++;
+      LOG_W("server: http %d; the wait is Retry-After's %lu s", call.httpStatus,
+            static_cast<unsigned long>(wait / 1000));
       break;
     }
     case ServerAction::Discard:
@@ -183,19 +200,31 @@ ServerAction AgentLoop::noteFailure(const AgentClient::Call& call) {
     default: {
       counters_.httpFailures++;
       counters_.consecutiveFailures++;
-      backoffMs_ = nextBackoffMs(backoffMs_);
-      // The sequence is 30 s, 60 s, 120 s ... ten minutes; what is waited is that plus or minus
-      // a quarter, so two boards that lost the server together drift apart (src/Backoff.h).
+      if (counters_.consecutiveFailures == 1) firstFailureAtMillis_ = millis();
+      // The sequence is 30 s, 60 s, 120 s ... up to its ceiling; what is waited is that plus or
+      // minus a quarter, so two boards that lost the server together drift apart
+      // (src/Backoff.h). The ceiling is two minutes once this board's own link is proven and ten
+      // while it is not: a server that is back deserves a call within minutes, and a WiFi that
+      // associates and goes nowhere deserves the long wait it always had (task p1.2-10).
+      backoffMs_ = nextBackoffMs(backoffMs_, linkProven());
       const uint32_t wait = withJitter(backoffMs_, esp_random());
       holdUntil_ = millis() + wait;
       LOG_I("server: next attempt in %lu s (the %lu s step, jittered)", static_cast<unsigned long>(wait / 1000),
             static_cast<unsigned long>(backoffMs_ / 1000));
       // A link that is up and a server that has not answered for an hour and a half is a stack
       // that is wedged, not a server that is busy: the board restarts itself, having said why.
-      if (counters_.consecutiveFailures >= kRebootAfterFailures && wifi_ != nullptr && wifi_->connected()) {
+      // Both the count *and* the hour and a half, since task p1.2-10 brought the proven link's
+      // ceiling down to two minutes: twelve failures can now be twenty minutes apart end to end,
+      // and twenty minutes of a server being away is a deploy (src/Health.h).
+      const uint32_t failingForMs = millis() - firstFailureAtMillis_;
+      if (counters_.consecutiveFailures >= kRebootAfterFailures && failingForMs >= kRebootAfterFailingMs &&
+          wifi_ != nullptr && wifi_->connected()) {
         char why[kMaxRebootWhyLen + 1];
-        std::snprintf(why, sizeof why, "%lu server calls in a row got no answer, with wifi up",
-                      static_cast<unsigned long>(counters_.consecutiveFailures));
+        // 41 characters and two counts of at most ten digits each: inside kMaxRebootWhyLen, which
+        // -Werror=format-truncation is what checks.
+        std::snprintf(why, sizeof why, "%lu server calls unanswered in %lu min, wifi up",
+                      static_cast<unsigned long>(counters_.consecutiveFailures),
+                      static_cast<unsigned long>(failingForMs / 60000));
         healthRebootNow(why);
       }
       break;
@@ -480,12 +509,14 @@ void AgentLoop::reportErrors(Stream& out) const {
   out.printf("  wifiReconnects       %lu  (%u link(s) in all, %u drop(s))\r\n",
              static_cast<unsigned long>(counters_.wifiReconnects), static_cast<unsigned>(wifi_->connects()),
              static_cast<unsigned>(wifi_->drops()));
-  out.printf("  httpFailures         %lu  (%lu in a row now; %lu reboot(s) away from restarting)\r\n",
+  out.printf("  httpFailures         %lu  (%lu in a row now, failing for %lu min; it restarts itself at %lu in "
+             "a row and %lu min)\r\n",
              static_cast<unsigned long>(counters_.httpFailures),
              static_cast<unsigned long>(counters_.consecutiveFailures),
-             static_cast<unsigned long>(counters_.consecutiveFailures >= kRebootAfterFailures
-                                            ? 0
-                                            : kRebootAfterFailures - counters_.consecutiveFailures));
+             static_cast<unsigned long>(
+                 counters_.consecutiveFailures == 0 ? 0 : (millis() - firstFailureAtMillis_) / 60000),
+             static_cast<unsigned long>(kRebootAfterFailures),
+             static_cast<unsigned long>(kRebootAfterFailingMs / 60000));
   out.printf("  observationsDropped  %lu  (adverts the ring overwrote; %u of %u waiting, %lu heard in all)\r\n",
              static_cast<unsigned long>(ring_.dropped()), static_cast<unsigned>(ring_.size()),
              static_cast<unsigned>(ObservationRing::kCapacity), static_cast<unsigned long>(ring_.heard()));

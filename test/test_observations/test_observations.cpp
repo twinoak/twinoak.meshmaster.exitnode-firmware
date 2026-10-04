@@ -5,6 +5,9 @@
 // next heartbeat's `observationsDropped` tells the server. A batch goes at twenty or at sixty
 // seconds, whichever comes first. And nothing this firmware sends may break the server's
 // 120-a-minute agent policy.
+//
+// What the server's *answers* mean was here too until task p1.2-10 gave the policy a suite of
+// its own: test/test_server_policy.
 
 #include <gtest/gtest.h>
 
@@ -13,7 +16,6 @@
 
 #include "agent/Observations.h"
 #include "agent/RateLimit.h"
-#include "agent/ServerPolicy.h"
 
 namespace {
 
@@ -125,49 +127,6 @@ TEST(RateLimiter, ItSurvivesTheMillisecondCounterWrapping) {
   for (size_t i = 0; i < mm::RateLimiter::kMaxPerMinute; i++) ASSERT_TRUE(limiter.take(before + i));
   EXPECT_FALSE(limiter.take(before + 1000)) << "still inside the minute, across the wrap";
   EXPECT_TRUE(limiter.take(before + 61000)) << "a minute later, wrapped, and the window is clear";
-}
-
-// ---- what the server's answer means -------------------------------------------------------------
-
-TEST(ServerPolicy, AFourOhOneHaltsEverything) {
-  // "a 401 stops everything but the console and says token revoked or wrong on the OLED"
-  // (tasks/phase-1/02). It is the one answer that no amount of waiting improves.
-  EXPECT_EQ(mm::ServerAction::Halt, mm::actionFor(true, 401));
-}
-
-TEST(ServerPolicy, AFourTwoNineWaitsExactlyWhatRetryAfterSays) {
-  EXPECT_EQ(mm::ServerAction::WaitRetryAfter, mm::actionFor(true, 429));
-  EXPECT_EQ(17000u, mm::retryAfterMs(17));
-  EXPECT_EQ(1000u, mm::retryAfterMs(1));
-  // No header, or one this firmware would not parse: a minute, which is the safe way round.
-  EXPECT_EQ(60000u, mm::retryAfterMs(0));
-  // And bounded, so a server that says "come back next week" does not stop the board for a week.
-  EXPECT_EQ(3600000u, mm::retryAfterMs(86400));
-}
-
-TEST(ServerPolicy, AFiveHundredBacksOffFromHalfAMinuteToTen) {
-  EXPECT_EQ(mm::ServerAction::BackOff, mm::actionFor(true, 500));
-  EXPECT_EQ(mm::ServerAction::BackOff, mm::actionFor(true, 503));
-  EXPECT_EQ(mm::ServerAction::BackOff, mm::actionFor(false, 0)) << "no reply at all is the same";
-  EXPECT_EQ(mm::ServerAction::BackOff, mm::actionFor(true, 408));
-
-  uint32_t wait = 0;
-  const uint32_t expected[] = {30000, 60000, 120000, 240000, 480000, 600000, 600000, 600000};
-  for (uint32_t want : expected) {
-    wait = mm::nextBackoffMs(wait);
-    EXPECT_EQ(want, wait);
-  }
-}
-
-TEST(ServerPolicy, TheAnswersThatMeanTheRequestItselfIsWrong) {
-  for (int status : {400, 403, 404, 409, 410, 413, 422}) {
-    EXPECT_EQ(mm::ServerAction::Discard, mm::actionFor(true, status)) << "http " << status;
-  }
-}
-
-TEST(ServerPolicy, ATwoHundredIsSimplyOk) {
-  EXPECT_EQ(mm::ServerAction::Ok, mm::actionFor(true, 200));
-  EXPECT_EQ(mm::ServerAction::Ok, mm::actionFor(true, 204));
 }
 
 int main(int argc, char** argv) {

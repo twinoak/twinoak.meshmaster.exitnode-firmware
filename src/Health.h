@@ -37,11 +37,18 @@ namespace mm {
 // is stuck.
 constexpr uint32_t kWatchdogSeconds = 90;
 
-// How many consecutive server failures - with WiFi up, so the link is not the reason - earn a
-// reboot. At the backoff of ServerPolicy.h (30 s doubling to ten minutes) twelve of them is
-// about an hour and a half, so a board reboots at most about once an hour and a half through a
-// long outage, and once is usually all a wedged stack needs.
+// What earns a reboot: consecutive server failures - with WiFi up, so the link is not the
+// reason - for long enough that the stack and not the server is the suspect. Task 06 wrote the
+// count alone, and twelve of them at a backoff doubling to ten minutes *was* about an hour and a
+// half; task p1.2-10 lowered that ceiling to two minutes for a board whose link is proven, which
+// would have brought twelve within about twenty - and twenty minutes of a server being down is
+// an ordinary deploy, not a wedged stack. So both have to be true, and the sentence task 06
+// wrote stays true of either backoff: a board reboots at most about once an hour and a half
+// through a long outage, and once is usually all a wedged stack needs. What a reboot costs is
+// the buffers (the advert ring and the results waiting to be posted late), which is exactly what
+// a server outage fills.
 constexpr uint32_t kRebootAfterFailures = 12;
+constexpr uint32_t kRebootAfterFailingMs = 90u * 60000u;
 
 constexpr int kRebootsRemembered = 5;
 constexpr size_t kMaxRebootWhyLen = 63;

@@ -284,16 +284,11 @@ TEST(Claim, AJobThisFirmwareCannotRunIsRecognisedBeforeAnythingIsSent) {
   EXPECT_TRUE(mm::canRun(jobs[1], why, sizeof why));
   EXPECT_STREQ(why, "");
 
-  // The class table of JobTypes.CredentialClasses: a status at admin runs, a neighbours at guest
-  // does not, a trace at anything but none does not, the three password types at admin alone.
+  // The class table of JobTypes.CredentialClasses: a status at admin runs, a trace at anything
+  // but none does not, the three password types at admin alone.
   mm::ClaimedJob admin = jobs[1];
   admin.credentialClass = mm::CredentialClass::Admin;
   EXPECT_TRUE(mm::canRun(admin, why, sizeof why)) << why;
-  mm::ClaimedJob guestNeighbours = jobs[1];
-  std::snprintf(guestNeighbours.type, sizeof guestNeighbours.type, "neighbours");
-  guestNeighbours.credentialClass = mm::CredentialClass::Guest;
-  EXPECT_FALSE(mm::canRun(guestNeighbours, why, sizeof why));
-  EXPECT_NE(std::string(why).find("class guest"), std::string::npos) << why;
   mm::ClaimedJob aclTrace = jobs[1];
   std::snprintf(aclTrace.type, sizeof aclTrace.type, "trace");
   EXPECT_FALSE(mm::canRun(aclTrace, why, sizeof why));
@@ -314,6 +309,57 @@ TEST(Claim, AJobThisFirmwareCannotRunIsRecognisedBeforeAnythingIsSent) {
   keyless.repeaterKey[0] = 0;
   EXPECT_FALSE(mm::canRun(keyless, why, sizeof why));
   EXPECT_NE(std::string(why).find("public key"), std::string::npos) << why;
+}
+
+// The three types any login is answered, at every class the server may send them at - and
+// `neighbours` is one of them since task p1.2-10. The firmware this project pins checks no
+// permission at all on REQ_TYPE_GET_NEIGHBOURS (examples/simple_repeater/MyMesh.cpp:276 at
+// d9296435, against :262's `sender->isAdmin()` for the access list), and meshmaster.dk's task
+// p4.7-94 now sends the job at class `guest` for a pair made at the guest door - which this
+// board answered `unsupported` before, where the Pi agent answered the list
+// (EXIT-NODES §7's table, "the binary neighbours request answers any login at d9296435").
+TEST(Claim, TheReadsRunAtGuestAclAndAdmin) {
+  std::string reply = recordedClaim();
+  mm::ClaimedJob jobs[mm::kClaimMax];
+  int count = 0;
+  uint32_t serverTime = 0;
+  char err[96] = {0};
+  ASSERT_TRUE(mm::parseClaimResponse(&reply[0], reply.size(), jobs, mm::kClaimMax, count, serverTime, err, sizeof err))
+      << err;
+  char why[200] = {0};
+  for (const char* type : {"status", "telemetry", "neighbours"}) {
+    mm::ClaimedJob job = jobs[1];
+    std::snprintf(job.type, sizeof job.type, "%s", type);
+    // The guest-class job is a pair with no grant: jobs[1] carries `{"acl": true}`, and a guest
+    // login from a key that holds a grant is refused whatever its type (task p4.1-60, below).
+    job.hasAclLevel = false;
+    job.aclLevel = 0;
+    for (mm::CredentialClass c : {mm::CredentialClass::Guest, mm::CredentialClass::Acl, mm::CredentialClass::Admin}) {
+      job.credentialClass = c;
+      EXPECT_TRUE(mm::canRun(job, why, sizeof why)) << type << " at " << mm::credentialClassName(c) << ": " << why;
+    }
+    // And `none` is not one of them: these three need a login, and class none carries none.
+    job.credentialClass = mm::CredentialClass::None;
+    EXPECT_FALSE(mm::canRun(job, why, sizeof why)) << type << " at none";
+    EXPECT_NE(std::string(why).find("class none"), std::string::npos) << why;
+  }
+
+  // The grant rule still stands over the new class: a guest `neighbours` through a pair that
+  // holds a grant on the repeater is refused here, because the login would demote the entry.
+  mm::ClaimedJob granted = jobs[1];
+  std::snprintf(granted.type, sizeof granted.type, "neighbours");
+  granted.credentialClass = mm::CredentialClass::Guest;
+  ASSERT_TRUE(granted.hasAclLevel) << "the fixture's acl-class job carries a grant";
+  EXPECT_FALSE(mm::canRun(granted, why, sizeof why));
+  EXPECT_NE(std::string(why).find("grant"), std::string::npos) << why;
+
+  // `config.read` at guest is refused as it always was: the admin password, and nothing less.
+  mm::ClaimedJob read = jobs[1];
+  std::snprintf(read.type, sizeof read.type, "config.read");
+  read.hasAclLevel = false;
+  read.credentialClass = mm::CredentialClass::Guest;
+  EXPECT_FALSE(mm::canRun(read, why, sizeof why));
+  EXPECT_NE(std::string(why).find("class guest"), std::string::npos) << why;
 }
 
 // Every type of API §3, in JobTypes.All's order - which is the order AgentHeartbeat.json carries

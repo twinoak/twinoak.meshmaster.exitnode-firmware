@@ -13,9 +13,11 @@
 // posted first, in order, with the timestamps it was made with - then the claim, then the
 // observation batch. And the wait after a failure carries jitter (src/Backoff.h), so a hundred
 // boards that lost the same server do not all come back at the same second; past
-// `kRebootAfterFailures` consecutive unanswered calls **with the WiFi link up**, the board
-// restarts itself and says why (src/Health.h), because a TLS stack that has failed for an hour
-// and a half against a live link is not going to recover by being asked again.
+// `kRebootAfterFailures` consecutive unanswered calls **with the WiFi link up**, over
+// `kRebootAfterFailingMs`, the board restarts itself and says why (src/Health.h), because a TLS
+// stack that has failed for an hour and a half against a live link is not going to recover by
+// being asked again - and the hour and a half is a condition of its own since task p1.2-10
+// lowered the proven link's backoff ceiling to two minutes.
 //
 // What the server's answers do here:
 //   200   the budget, the poll interval and the clock are taken, and `jobsWaiting` makes a claim
@@ -25,8 +27,13 @@
 //         `set meshmaster.token`
 //         (or a reboot) is what starts the loop again
 //   429   the wait is `Retry-After`, to the second
+//   502, 503, 504 with a Retry-After
+//         the same: a deploy of meshmaster.dk says how long it will be, and that is believed
+//         rather than doubled past it (task p1.2-10)
 //   5xx, no reply
-//         backoff, 30 s doubling to ten minutes, reset by the first answer
+//         backoff, 30 s doubling to **two minutes** once this board's own link is proven - WiFi
+//         up and a time off the network - and to ten minutes while it is not, reset by the first
+//         answer
 //
 // `jobTypes` is the thirteen types JobRunner has a handler for - every type of API §3 since
 // task 05 - and routing sends nothing else, because it requires the type advertised.
@@ -121,6 +128,9 @@ class AgentLoop {
   void buildHeartbeat(Heartbeat& hb) const;
   // Acts on what the answer means (ServerPolicy.h) and says which action that was.
   ServerAction noteFailure(const AgentClient::Call& call);
+  // WiFi up and a time that came off the network: the ceiling the backoff doubles to
+  // (ServerPolicy.h's maxBackoffMs) is the lower one when this is true.
+  bool linkProven() const;
   void succeeded();
   size_t buildBatch(uint32_t nowMs, char* out, size_t cap);
   uint32_t epochOf(uint32_t heardAtMillis, uint32_t nowMs) const;
@@ -142,8 +152,9 @@ class AgentLoop {
   uint32_t configAt_ = 0;
   bool heartbeatScheduled_ = false;
   uint32_t nextHeartbeatAt_ = 0;
-  uint32_t holdUntil_ = 0;      // a 429's Retry-After, or the backoff after a failure
+  uint32_t holdUntil_ = 0;      // a Retry-After the answer named, or the backoff after a failure
   uint32_t backoffMs_ = 0;
+  uint32_t firstFailureAtMillis_ = 0;  // the start of the present run of unanswered calls
 
   AgentBudget budget_;          // AgentBudget.Default until the server says otherwise (begin())
   int pollIntervalS_ = 30;

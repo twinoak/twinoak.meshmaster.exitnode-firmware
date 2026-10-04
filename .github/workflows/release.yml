@@ -8,11 +8,16 @@
 # approval, nothing is released whose CI is red or unknown, and an older commit is a rollback.
 #
 # Per board it publishes:
-#   meshmaster-agent-<board>-vX.Y.Z.bin          the application image, for OTA later
+#   meshmaster-agent-<board>-vX.Y.Z.bin          the application image at 0x10000: the upgrade,
+#                                                which keeps the settings (and OTA later)
 #   meshmaster-agent-<board>-vX.Y.Z-merged.bin   bootloader + partitions + application, one file,
-#                                                flashed at 0x0 on a fresh board out of the box
+#                                                flashed at 0x0 on a board out of the box or one
+#                                                coming from other firmware - and it erases the
+#                                                settings on the way, because the gap it fills
+#                                                with 0xFF covers NVS at 0x9000 (task p1.2-10)
 #   SHA256SUMS                                   for all of them, one file
-# and the notes print the one esptool line per board and the MeshCore tag the build used.
+# and the notes print the one esptool line per board, which of the two files keeps a provisioned
+# board's settings, and the MeshCore tag the build used.
 #
 # The version the board reports is the tag: -D MESHMASTER_AGENT_VERSION="X.Y.Z+<sha7>", which
 # src/version.cpp turns into the string F-01's `status` command and the heartbeat's agentVersion
@@ -211,9 +216,12 @@ jobs:
             echo
             echo "## Flashing a board"
             echo
-            echo "A board out of the box takes the **merged** image at \`0x0\` - it carries the"
-            echo "bootloader and the partition table with it. Hold the user button while plugging in"
-            echo "if the port does not appear, and \`pip install esptool\` if you have none:"
+            echo "**A board out of the box, or one coming from other firmware, takes the merged image**"
+            echo "at \`0x0\`: it carries the bootloader and the partition table with it, and it **erases the"
+            echo "settings** on its way past them - the gap it fills with \`0xFF\` covers NVS at \`0x9000\`, so the"
+            echo "WiFi credentials, the server URL and the token are gone and the board is provisioned again"
+            echo "over its console. Hold the user button while plugging in if the port does not appear, and"
+            echo "\`pip install esptool\` if you have none:"
             echo
             for f in meshmaster-agent-*-"$v"-merged.bin; do
               board="${f#meshmaster-agent-}"; board="${board%-"$v"-merged.bin}"
@@ -227,8 +235,9 @@ jobs:
               echo "\`\`\`"
             done
             echo
-            echo "\`meshmaster-agent-<board>-$v.bin\` beside it is the **application** image alone,"
-            echo "for a board that already has this firmware on it (and for OTA, when there is OTA)."
+            echo "**\`meshmaster-agent-<board>-$v.bin\` beside it is the application image alone, and that is the"
+            echo "upgrade**: for a board already running this firmware, at \`0x10000\`, **keeping the settings and"
+            echo "the identity** (and for OTA, when there is OTA). The identity in SPIFFS survives either file."
             echo "\`SHA256SUMS\` covers both."
             echo
             echo "## Provisioning"

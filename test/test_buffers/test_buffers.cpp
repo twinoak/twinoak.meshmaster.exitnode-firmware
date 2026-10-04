@@ -239,7 +239,8 @@ TEST(StayingUp, TheHeartbeatGoesFromInsideALongJob) {
 // ---- the backoff ------------------------------------------------------------------------------
 
 TEST(Backoff, TheSequenceDoublesToItsCeilingAndStaysThere) {
-  // The server loop's own numbers, which ServerPolicy.h names and this function is behind.
+  // The server loop's own numbers, which ServerPolicy.h names and this function is behind. That
+  // the policy's own form is this one at those numbers is test_server_policy's (task p1.2-10).
   uint32_t ms = 0;
   const uint32_t expected[] = {30000, 60000, 120000, 240000, 480000, 600000, 600000, 600000};
   for (uint32_t want : expected) {
@@ -253,19 +254,6 @@ TEST(Backoff, TheSequenceDoublesToItsCeilingAndStaysThere) {
     wifi = mm::nextBackoffMs(wifi, 5000, 5 * 60000);
     EXPECT_EQ(want, wifi);
   }
-}
-
-TEST(Backoff, ServerPolicysOwnBackoffIsThatSequence) {
-  // The one-argument form the agent loop calls is the three-argument one at the server's numbers,
-  // so the two can never drift apart.
-  uint32_t a = 0;
-  uint32_t b = 0;
-  for (int i = 0; i < 10; i++) {
-    a = mm::nextBackoffMs(a);
-    b = mm::nextBackoffMs(b, mm::kFirstBackoffMs, mm::kMaxBackoffMs);
-    EXPECT_EQ(a, b) << "step " << i;
-  }
-  EXPECT_EQ(mm::kMaxBackoffMs, a);
 }
 
 TEST(Backoff, TheJitterStaysWithinAQuarterAndMovesTheWait) {
