@@ -110,7 +110,66 @@ Open, carried forward:
   pick one: **(a)** say so — the release notes and README name the merged
   image as *for a board out of the box only* and the application image as
   the upgrade, and the web flasher's step says which file; or **(b)** a
-  custom partition table with NVS moved above the app and SPIFFS (the merged
-  image then ends at the app's end and never reaches it), one re-provisioning
-  on the day it lands. (b) is the real fix; (a) is a sentence and should land
-  first either way. Small.
+  custom partition table with NVS moved above the app (the merged image then
+  ends at the app's end and never reaches it), `spiffs` kept at its present
+  offset so the identity survives the move, one re-provisioning on the day
+  it lands (WiFi and token re-entered; the token is a new one, rotated on the
+  server first). Not (c) skipping the merged image: it is the only way onto a
+  board that is not already running this firmware - out of the box, or
+  coming from the repeater image as Thomas's V3 did - because the application
+  image presumes the bootloader and our partition table are there. (b) is
+  the real fix, after which one file serves both the first flash and the
+  upgrade; (a) is a sentence and should land first either way. Small.
+- [ ] **The display stays on** (Thomas, 4 October: "i'd like that the display
+  on the heltec doesn't turn off"). Today `Oled::loop()` turns the OLED off
+  five minutes after the last button press (`kAutoOffMs` in `Oled.h`,
+  `offAt_`), and the button brings it back. Change the default to *never
+  off*: a setting `display.timeout` in seconds, `0` meaning never, default
+  `0`, read in `Oled::begin` and on `reconfigure` so `set display.timeout
+  300` restores today's behaviour without a rebuild. The PRG button
+  (MeshCore's `user_btn`, GPIO 0 on the V3, already read in `Oled::loop`)
+  becomes a toggle: a click turns the display off when it is on and on when
+  it is off, and restarts the timeout if one is set. `MomentaryButton`
+  also reports long, double and triple presses; leave them unused for now.
+  `Oled.h`'s header comment and README's display paragraph say the new
+  default and the button. One thing to
+  know, not a reason to decide otherwise: an SSD1306 showing the same four
+  lines around the clock ages the lit pixels faster than the dark ones, so
+  over months the frame ghosts; the one-second re-render does not help
+  with that. If it ever shows, the cheap mitigation is shifting the text a
+  pixel every few minutes, not a timeout. Small; not reached by the native
+  tests or the host harness, so the bench proves it.
+- [ ] **The display's four lines** (Thomas, 4 October; same task as the one
+  above). Replace `fillOled` in `main.cpp` and the three `oledLine`s it
+  calls. The font gives 21 characters a line (`Oled::kCols` − 1), which
+  decided the wording below.
+  1. `ID: 46F6` left — the first four hex characters of the public key, the
+     prefix MeshMaster shows — and the clock `hh:mm:ss` right-aligned when
+     `AgentClock::hasTime()`, `no time` otherwise. `no identity` alone on
+     the line when there is none.
+  2. `WiFi: yes Online: yes` — exactly 21, so no comma. *WiFi* is
+     `WifiLink::connected()`; *Online* is "the last call to MeshMaster was
+     answered": a heartbeat has happened and `consecutiveFailures == 0` and
+     not `halted_`. The IP address leaves the display; `status` has it.
+  3. `Heartbeat: hh:mm:ss` from `lastHeartbeatAtEpoch_` (`Last heartbeat:`
+     would be 24 characters); `Heartbeat: none` until the first.
+  4. Whether it is working: while `JobRunner::claimAndRun` has a job open,
+     `Job 1234 acl.set` (id and type; the display refreshes from
+     `pumpDuringAJob`, so this is live), and otherwise `Idle, last 12:34:56`
+     from the newest `recent_` record, `Idle, no jobs yet` before any. The
+     runner exposes the open job (id, type) and the newest record for it.
+     The reasons the board is *not* working, which line three carries today
+     (task 06), move here, since nothing runs in those states anyway:
+     `token revoked/wrong` after a 401, `no server: retry 30s` while backing
+     off, `no wifi` when that is why. Line two's `no` says that something is
+     wrong; line four says what.
+  Oled.h's header comment describes the new frame. Bench only, as above.
+- [ ] **`neighbours` at guest** (meshmaster.dk task p4.7-94, 4 October): the
+  server now runs the neighbour-list job at class `guest` for a guest-only
+  pair, because `REQ_TYPE_GET_NEIGHBOURS` answers any login at `d9296435`
+  (its `handleRequest` checks `isAdmin()` for the access list only). This
+  firmware refuses it: `JobEnvelopes.cpp:72` requires admin for `neighbours`,
+  so a board would answer `unsupported` where the Pi agent answers the list.
+  Drop the check to the same rule the server and the firmware source have -
+  status, telemetry and neighbours at any login, the access list at admin -
+  and add the case to the host harness's fake. Small.
