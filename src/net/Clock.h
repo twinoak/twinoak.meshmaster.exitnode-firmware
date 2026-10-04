@@ -2,7 +2,8 @@
 // fallback when NTP is blocked (EXIT-NODES section 5, "Clock"; the .NET agent's AgentClock).
 //
 // The clock is what every login and every sender timestamp will depend on from task 04 on, so
-// `status` and the OLED say where the time came from and "no time" until it came from somewhere.
+// `status` says where the time came from and "no time" until it came from somewhere; the OLED's
+// first line is the clock itself, or "no time" (src/ui/DisplayLines.h).
 // The tolerance is the .NET agent's: five seconds. SNTP, once it has answered, wins over the
 // server; the server's time is taken when there is nothing better and it disagrees by more.
 
@@ -46,9 +47,6 @@ class AgentClock {
 
   // One line for `status`: "2026-09-28T12:03:14Z (sntp)" or "no time (sntp not answered yet)".
   void describe(char* out, size_t cap) const;
-
-  // The OLED's second line: "12:03:14 UTC" or "no time".
-  void oledLine(char* out, size_t cap) const;
 
  private:
   static void onSntpSync(::timeval* tv);

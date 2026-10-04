@@ -2,8 +2,8 @@
 //
 // The passphrase is read from NVS into a stack buffer for the one call that needs it and wiped
 // after; the driver's own habit of persisting credentials in its NVS namespace is turned off
-// (WiFi.persistent(false)), so the one copy on flash is the settings store's. The console and
-// the OLED's first line show the state; `wifi` scans.
+// (WiFi.persistent(false)), so the one copy on flash is the settings store's. `status` shows the
+// state in full and the OLED's second line shows `connected()` as one word; `wifi` scans.
 
 #pragma once
 
@@ -44,9 +44,6 @@ class WifiLink {
 
   // One line for `status`, e.g. "connected Twinoak 192.168.1.20 rssi -61 dBm (1 connect, 0 drops)".
   void describe(char* out, size_t cap) const;
-
-  // The OLED's first line, 21 characters at most.
-  void oledLine(char* out, size_t cap) const;
 
   // `wifi`: a blocking scan (a few seconds), one line per network, then the state.
   void scan(Stream& out);

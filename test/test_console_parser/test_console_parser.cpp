@@ -42,9 +42,10 @@ std::string setReply(const mm::KeyDef& key) {
 
 // ---- the keys -------------------------------------------------------------------------------
 
-TEST(Keys, TheTableHasTheElevenKeysTheTaskNames) {
-  const char* expected[] = {"wifi.ssid", "wifi.pass",  "meshmaster.url", "meshmaster.token", "radio.freq", "radio.bw",
-                            "radio.sf",  "radio.cr",   "radio.tx",       "log.level",        "log.frames"};
+TEST(Keys, TheTableHasTheTwelveKeysTheTasksAskFor) {
+  const char* expected[] = {"wifi.ssid", "wifi.pass", "meshmaster.url", "meshmaster.token",
+                            "radio.freq", "radio.bw", "radio.sf",       "radio.cr",
+                            "radio.tx",   "log.level", "log.frames",    "display.timeout"};
   ASSERT_EQ(kKeyCount, static_cast<int>(sizeof expected / sizeof expected[0]));
   for (int i = 0; i < kKeyCount; i++) {
     EXPECT_STREQ(expected[i], kKeys[i].name);
@@ -86,6 +87,7 @@ TEST(Keys, EveryKeyAcceptsAValidValueAndSetIsAcceptedForIt) {
       {"radio.tx", "22"},
       {"log.level", "debug"},
       {"log.frames", "on"},
+      {"display.timeout", "300"},
   };
   ASSERT_EQ(kKeyCount, static_cast<int>(sizeof samples / sizeof samples[0]));
   for (const Sample& s : samples) {

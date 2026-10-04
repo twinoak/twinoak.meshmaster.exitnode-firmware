@@ -13,11 +13,18 @@ bool Oled::begin(DisplayDriver* display, MomentaryButton* button, Fill fill) {
   if (display_ == nullptr) return false;
   if (button_ != nullptr) button_->begin();
   display_->turnOn();
-  offAt_ = millis() + kAutoOffMs;
+  restartTimeout(millis());
   nextRefreshAt_ = 0;
   render();
   return true;
 }
+
+void Oled::setTimeout(uint32_t seconds) {
+  timeoutMs_ = seconds * 1000;
+  if (display_ != nullptr && display_->isOn()) restartTimeout(millis());
+}
+
+void Oled::restartTimeout(uint32_t now) { offAt_ = now + timeoutMs_; }
 
 void Oled::render() {
   if (display_ == nullptr || fill_ == nullptr) return;
@@ -39,15 +46,20 @@ void Oled::loop() {
   if (display_ == nullptr) return;
   const uint32_t now = millis();
 
-  if (button_ != nullptr && button_->check() != BUTTON_EVENT_NONE) {
-    if (!display_->isOn()) display_->turnOn();
-    offAt_ = now + kAutoOffMs;
+  // A click toggles. Every other event the button reports is left alone.
+  if (button_ != nullptr && button_->check() == BUTTON_EVENT_CLICK) {
+    if (display_->isOn()) {
+      display_->turnOff();
+      return;
+    }
+    display_->turnOn();
+    restartTimeout(now);
     nextRefreshAt_ = now;
   }
 
   if (!display_->isOn()) return;
 
-  if (static_cast<int32_t>(now - offAt_) >= 0) {
+  if (timeoutMs_ != 0 && static_cast<int32_t>(now - offAt_) >= 0) {
     display_->turnOff();
     return;
   }

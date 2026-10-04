@@ -78,30 +78,40 @@ Nothing is stored anywhere else, and no reboot is part of provisioning: every
 
 ## 4. The OLED's four lines
 
-The display is on for five minutes after boot and after a press of the user
-button (PRG, GPIO 0), then off. A board with a dark display is a board that is
-fine; press the button.
+The display **stays on**: `display.timeout` is the seconds of no button press
+after which it goes dark, and its default is `0`, which never turns it off. A
+**click on the user button** (PRG, GPIO 0) toggles it - off when it is on, on
+when it is off. `set display.timeout 300` gives back the five minutes this
+firmware did until the display task, without a rebuild and without a reboot.
 
 ```
-wifi 192.168.1.20          <- the link: an address, or no ssid / connecting / retry 20s
-12:03:14 UTC (sntp)        <- the clock: this, or "no time"
-hb 12:03 . 17 adverts      <- the exit node: the last heartbeat and the adverts heard
-id 7f3a9c02  agent         <- the identity's first eight hex characters
+ID: 46F6     12:03:14      <- who: the key's first four, and the clock (or "no time")
+WiFi: yes Online: yes      <- the link, and whether the last call to the server was answered
+Heartbeat: 12:03:14        <- when meshmaster.dk last heard from this board
+Idle, last 12:34:56        <- what it is doing, or why it is doing nothing
 ```
 
-**Line three is the one to read when something is wrong**, and it names which
-of the two is missing:
+Line one is `no identity` alone if the radio did not come up - the console
+still works and the board hears nothing. Line two is the glance: *WiFi* is the
+link, *Online* is the last call having been answered. Line three is
+`Heartbeat: none` until the first one.
 
-| Line three | What it means | What to do |
+**Line four is the one to read when something is wrong.** Line two's *no* says
+something is wrong; line four says what:
+
+| Line four | What it means | What to do |
 |---|---|---|
-| `hb HH:MM · N adverts` | all well: the last heartbeat and the adverts heard | nothing |
-| `no wifi: no server` | the WiFi link is down, so the server cannot be reached either | line one says how far the retry has got; §6 |
+| `Job 1234 acl.set` | a job is on the air, this id and this type | nothing; it is working |
+| `Idle, last 12:34:56` | nothing is running; the newest job ended then | nothing |
+| `Idle, no jobs yet` | nothing has run since this board started | nothing, unless line two says *no* |
+| `no wifi` | the WiFi link is down, so the server cannot be reached either | `status` says how far the retry has got; §6 |
 | `no server: retry 45s` | the link is up and meshmaster.dk is not answering | §6; the countdown is the next attempt |
-| `no server set` | `meshmaster.url` or `meshmaster.token` is unset | §2, step 6 |
-| `config ok HH:MM:SS` | the first call worked and no heartbeat has been answered yet | wait one poll interval |
-| `http 401` / `token revoked/wrong` | the token was revoked, or is wrong | §6; nothing is sent until it is set again |
-| `tls/net failed` | the certificate chain or the network | §6 |
-| `no identity` | the radio did not come up | the console still works; the board hears nothing |
+| `token revoked/wrong` | the token was revoked, or is wrong | §6; nothing is sent until it is set again |
+
+A board that is up but unprovisioned shows `WiFi: no Online: no` and `no wifi`:
+there is no SSID to join. The console's `status` and `server` have everything
+the lines leave out - the IP address, the certificate root, the config call's
+own answer, the poll interval.
 
 ## 5. What the exit node's page says, and what to do about it
 

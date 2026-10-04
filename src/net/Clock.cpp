@@ -104,14 +104,5 @@ void AgentClock::describe(char* out, size_t cap) const {
   std::snprintf(out, cap, "%s (%s)", when, sourceName());
 }
 
-void AgentClock::oledLine(char* out, size_t cap) const {
-  if (!hasTime()) {
-    std::snprintf(out, cap, "no time");
-    return;
-  }
-  char hms[12];
-  formatClock(now(), hms, sizeof hms);
-  std::snprintf(out, cap, "%s UTC (%s)", hms, sourceName());
-}
 
 }  // namespace mm

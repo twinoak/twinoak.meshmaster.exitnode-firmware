@@ -523,37 +523,9 @@ void AgentLoop::describe(char* out, size_t cap) const {
                 static_cast<unsigned long>(ring_.dropped()));
 }
 
-void AgentLoop::oledLine(char* out, size_t cap) const {
-  // Drawn by Oled::render, which has no reason to know whether begin() has run here yet: before
-  // it has, server_ and wifi_ are null and there is nothing to say but that.
-  if (server_ == nullptr) {
-    std::snprintf(out, cap, "starting");
-    return;
-  }
-  if (halted_) {
-    std::snprintf(out, cap, "token revoked/wrong");
-    return;
-  }
-  // Which of the two is missing, in one word each, because that is the question somebody
-  // standing at the window is asking (task 06). Line one already has the WiFi's own detail.
-  if (wifi_ != nullptr && !wifi_->connected() && server_->configured()) {
-    std::snprintf(out, cap, "no wifi: no server");
-    return;
-  }
-  if (counters_.consecutiveFailures > 0 && server_->configured()) {
-    const int32_t left = static_cast<int32_t>(holdUntil_ - millis());
-    std::snprintf(out, cap, "no server: retry %lus", static_cast<unsigned long>(left > 0 ? left / 1000 : 0));
-    return;
-  }
-  if (!everHeartbeated_) {
-    server_->oledLine(out, cap);
-    return;
-  }
-  char when[24];
-  formatClock(lastHeartbeatAtEpoch_, when, sizeof when);
-  // "\xfa" is the middle dot of code page 437, which is the font the OLED is drawn in
-  // (MeshCore's SSD1306Display::startFrame calls Adafruit_GFX::cp437(true)).
-  std::snprintf(out, cap, "hb %.5s \xfa %lu adverts", when, static_cast<unsigned long>(mesh_->counters().adverts));
+uint32_t AgentLoop::retrySeconds() const {
+  const int32_t left = static_cast<int32_t>(holdUntil_ - millis());
+  return left > 0 ? static_cast<uint32_t>(left) / 1000 : 0;
 }
 
 }  // namespace mm

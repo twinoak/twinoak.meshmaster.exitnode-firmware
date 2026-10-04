@@ -156,14 +156,6 @@ void WifiLink::describe(char* out, size_t cap) const {
   }
 }
 
-void WifiLink::oledLine(char* out, size_t cap) const {
-  switch (state_) {
-    case State::Off: std::snprintf(out, cap, "wifi: no ssid"); return;
-    case State::Connecting: std::snprintf(out, cap, "wifi: connecting"); return;
-    case State::Connected: std::snprintf(out, cap, "wifi %s", WiFi.localIP().toString().c_str()); return;
-    case State::Waiting: std::snprintf(out, cap, "wifi: retry %lus", static_cast<unsigned long>(waitMs_ / 1000)); return;
-  }
-}
 
 void WifiLink::scan(Stream& out) {
   out.println("scanning...");
