@@ -157,12 +157,13 @@ TEST(Rails, EveryPathTheRailsListNamesIsInTheTree) {
   }
 }
 
-// And the three the rails claim a test for, by name: the grep above, the redaction of 01 and 04,
-// and the buffers of 06. A rail whose test directory has been renamed is a rail nobody checks.
+// And the ones the rails claim a test for, by name: the grep above, the redaction of 01 and 04,
+// the buffers of 06 and the server's answers of p1.2-10. A rail whose test directory has been
+// renamed is a rail nobody checks.
 TEST(Rails, TheTestsTheRailsLeanOnAreAllThere) {
   const fs::path root(PROJECT_DIR);
-  const char* const suites[] = {"test_tls_policy", "test_console_parser", "test_credentials",
-                                "test_contract_fixtures", "test_buffers"};
+  const char* const suites[] = {"test_tls_policy",        "test_console_parser", "test_credentials",
+                                "test_contract_fixtures", "test_buffers",        "test_server_policy"};
   for (const char* s : suites) {
     EXPECT_TRUE(fs::is_directory(root / "test" / s)) << "test/" << s << " is gone";
   }

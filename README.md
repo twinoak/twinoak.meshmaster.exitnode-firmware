@@ -73,18 +73,28 @@ board that has been flashed once by either line above:
 esptool.py --chip esp32s3 --port COM5 --baud 921600 write_flash 0x10000 firmware.bin
 ```
 
-A release publishes, per board, a **merged** image for a board out of the box
-(bootloader + partition table + application, flashed at `0x0`) and the
-application image alone beside it, with `SHA256SUMS` and the one `esptool`
-line to use. A tag `vX.Y.Z` on a commit CI has passed is what makes one; *Run
-workflow* on `release.yml` rehearses it and publishes nothing.
+A release publishes, per board, a **merged** image (bootloader + partition table
++ application, flashed at `0x0`) and the **application** image alone beside it,
+with `SHA256SUMS` and the one `esptool` line to use. A tag `vX.Y.Z` on a commit
+CI has passed is what makes one; *Run workflow* on `release.yml` rehearses it
+and publishes nothing.
 
-Flashing does not touch the settings (NVS) or the identity (SPIFFS), so a board
-keeps its WiFi, its token and its key across updates. `erase confirm` on the
-console forgets the settings; the identity stays even then. What a reflash
-does lose is what was in RAM: results and observations this board had not
-posted yet, and the reboot log `reboots` prints
-([`docs/field.md`](docs/field.md)).
+**Which of the two, and what it costs.** The merged image is for a board **out
+of the box, or one coming from other firmware** — the repeater image, a
+companion build — because it carries the bootloader and the partition table that
+the application image presumes are already there. It **erases the settings as it
+goes**: `esptool`'s merge fills the gap between the partition table (`0x8000`)
+and `boot_app0` (`0xE000`) with `0xFF`, and `default_8MB.csv` keeps NVS at
+`0x9000`, inside that span — so the WiFi credentials, the server URL and the
+token are gone and the board is provisioned again from the console. The
+application image at `0x10000` is for **every upgrade** of a board already
+running this firmware, and it keeps them; so does `pio run -t upload`, which
+writes the same region. The identity in SPIFFS sits above the application and
+survives either way, which is why a repeater's ACL entry for this board still
+holds after a merged flash. `erase confirm` on the console forgets the settings
+on purpose; the identity stays even then. What any reflash loses is what was in
+RAM: results and observations this board had not posted yet, and the reboot log
+`reboots` prints ([`docs/field.md`](docs/field.md)).
 
 ## Provisioning it
 
@@ -355,8 +365,12 @@ reading.
   reasons in RTC memory for `reboots` to print (`src/Health.h`). What the
   server was away for is buffered in RAM — bounded, oldest dropped, counted,
   and posted late with the bytes it was written with — and a job whose lease
-  ran out while it waited is not put on the air at all. Every bound and the
-  backoff's own sequence have a native test (`test/test_buffers`).
+  ran out while it waited is not put on the air at all. Every bound has a
+  native test (`test/test_buffers`), and so has every answer the server can
+  give and the wait it earns (`test/test_server_policy`): a 503 that carries
+  `Retry-After` is believed to the second, and once WiFi is up and the clock
+  came off the network the backoff stops doubling at **two minutes**, because
+  then the only thing not answering is the server.
 - **Path hashes are two bytes or more, never one.** Wherever this firmware
   chooses a path-hash width - every flood it originates
   (`AgentMesh::kFloodPathHashSize`), a trace it builds, anything a later task

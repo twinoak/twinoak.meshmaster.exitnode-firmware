@@ -66,10 +66,17 @@ namespace {
 // JobTypes.CredentialClasses on the server, as a predicate.
 bool typeAllowsClass(const char* type, CredentialClass c) {
   if (std::strcmp(type, "trace") == 0) return c == CredentialClass::None;
-  if (std::strcmp(type, "status") == 0 || std::strcmp(type, "telemetry") == 0) {
+  // The three any login is answered. `neighbours` joined them in task p1.2-10, read from the
+  // firmware this project pins: examples/simple_repeater/MyMesh.cpp at d9296435 guards
+  // REQ_TYPE_GET_ACCESS_LIST with `sender->isAdmin()` (line 262) and REQ_TYPE_GET_NEIGHBOURS
+  // with nothing at all (line 276), so a guest login gets the neighbour list. The server sends
+  // the job at class `guest` for a guest-only pair since its task p4.7-94
+  // (EXIT-NODES §7's table), and this board answered `unsupported` where the Pi agent answered
+  // the list. `guest` with a grant on the repeater is still refused, below.
+  if (std::strcmp(type, "status") == 0 || std::strcmp(type, "telemetry") == 0 ||
+      std::strcmp(type, "neighbours") == 0) {
     return c == CredentialClass::Guest || c == CredentialClass::Acl || c == CredentialClass::Admin;
   }
-  if (std::strcmp(type, "neighbours") == 0) return c == CredentialClass::Acl || c == CredentialClass::Admin;
   // discover, acl.set, config.read, and everything that writes: the admin password, and nothing
   // less.
   return c == CredentialClass::Admin;

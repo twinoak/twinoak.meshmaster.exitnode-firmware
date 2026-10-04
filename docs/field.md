@@ -178,10 +178,27 @@ come back at the same second:
 | | first | then | ceiling |
 |---|---|---|---|
 | WiFi | 5 s | ×2 | 5 min |
-| the server | 30 s | ×2 | 10 min |
+| the server, link proven | 30 s | ×2 | **2 min** |
+| the server, link not proven | 30 s | ×2 | 10 min |
 
 and each wait is that step plus or minus a quarter. The log says both numbers:
 `server: next attempt in 88 s (the 120 s step, jittered)`.
+
+**The link proven** is WiFi connected *and* a time that came off the network
+(`status` says `from sntp`, or `from server`). Then the board's own end is
+working and the only thing left not answering is meshmaster.dk, which deserves
+a call within two minutes rather than within ten: a release of the server costs
+a minute or two and the wait used to outlast it by a quarter of an hour, so the
+exit node read *quiet* long after the server was back (bench, 3 October 2026).
+A board whose link is **not** proven — a WiFi that associates and goes nowhere, a
+captive portal, a DNS that answers nothing — keeps the ten minutes it always
+had, because then the suspect is at this end.
+
+**And a server that says when to come back is believed.** A 503 (or a 502 or a
+504) carrying `Retry-After` holds for exactly that, to the second, and nothing
+doubles — the log says `server: http 503; the wait is Retry-After's 90 s`. That
+is the 429's rule, which rate limiting always had, extended to the three
+statuses a deploy answers. A 5xx with no header backs off as above.
 
 Through all of it **the mesh keeps running**: the radio is listening, adverts
 go into the ring, and the ring holds 64 of them — when it is full the oldest is
@@ -192,11 +209,15 @@ they were written with, which is why a late result is still a good result: the
 server takes it and de-duplicates.
 
 **What the board will do by itself.** After twelve consecutive unanswered
-calls *with the WiFi link up* — about an hour and a half at the backoff above —
-it decides the TLS stack is wedged and restarts, having written the reason into
-RTC memory first. That is the whole of its self-healing, and `reboots` is where
-it confesses to it. It will not do that while the link is down: a router that
-is off is not something a reboot fixes.
+calls *with the WiFi link up*, **and** an hour and a half of them, it decides
+the TLS stack is wedged and restarts, having written the reason into RTC memory
+first. Both conditions, because at the two-minute ceiling above twelve failures
+can be twenty minutes end to end and twenty minutes of a server being away is
+an ordinary deploy, not a wedged stack. That is the whole of its self-healing,
+and `reboots` is where it confesses to it (`12 server calls in a row got no
+answer in 94 min, wifi up`). It will not do that while the link is down: a
+router that is off is not something a reboot fixes. `errors` prints how far
+along both conditions are.
 
 **What it will not do.** It has no journal: a restart, a reflash or a power cut
 loses whatever was in the buffers. Flash a board when the mesh is quiet, or

@@ -285,9 +285,10 @@ server comes back. What the four lines say is a pure function of a struct
     new password.
 18. Staying up (task 06). Pull the router's uplink for ten minutes with a job
     in flight: the log backs off (`server: next attempt in 30 s (the 30 s
-    step, jittered)`, then 60, 120 …), the OLED's fourth line says
-    `no server: retry Ns`, `mesh` keeps counting adverts, and `jobs` shows the
-    result waiting under `buffer`. Plug it back in: `jobs: N result(s) that
+    step, jittered)`, then 60, then 120 and **120 again** — two minutes is the
+    ceiling once WiFi is up and the clock came off the network, task p1.2-10),
+    the OLED's fourth line says `no server: retry Ns`, `mesh` keeps counting
+    adverts, and `jobs` shows the result waiting under `buffer`. Plug it back in: `jobs: N result(s) that
     waited went through` and the job's row on the server fills in, late and
     complete. Pull the *WiFi* instead and the fourth line says `no wifi`.
     Then `errors` (every counter, and how many failures from a

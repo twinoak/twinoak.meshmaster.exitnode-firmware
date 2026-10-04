@@ -129,8 +129,10 @@ struct ClaimedJob {
 
 // Whether this firmware can run the job at all, and one sentence saying why not when it cannot:
 // a type without a handler, a class the type cannot use (JobTypes.CredentialClasses on the
-// server: status and telemetry at guest, acl or admin; neighbours at acl or admin; trace at
-// none; discover, acl.set, config.read and the six writes at admin), a repeater with no key -
+// server: status, telemetry and neighbours at guest, acl or admin - neighbours since task
+// p1.2-10, which is the rule the pinned firmware has (REQ_TYPE_GET_NEIGHBOURS checks no
+// permission at all); trace at none; discover, acl.set, config.read and the six writes at
+// admin), a repeater with no key -
 // and, belt beside
 // the claim's braces (task p4.1-60), the **guest password on a pair that holds a grant**: a
 // guest login from this key would rewrite the ACL entry to guest, so a claim that carries both
