@@ -1396,6 +1396,9 @@ int JobRunner::claimAndRun() {
 
     Context ctx;
     ctx.job = &job;
+    // The display's fourth line, for as long as this job lasts: the pump refreshes the panel
+    // through every wait, so "Job 1234 acl.set" is live (src/ui/DisplayLines.h).
+    open_ = &job;
     if (job.credentialCandidate[0] != '\0') {
       // The material is one of the two candidates of an unverified credential (task p4-55), and
       // the server reads this job's outcome as the verdict on it: a session another job opened
@@ -1466,6 +1469,7 @@ int JobRunner::claimAndRun() {
     }
     ran_++;
     remember(job, outcome, ctx.transactions, posted);
+    open_ = nullptr;
   }
   for (int i = 0; i < kClaimMax; i++) g_jobs[i].credential.wipe();
   return count;

@@ -16,7 +16,7 @@
 //               structs (host-portable), the observation ring, the airtime budget, the session
 //               cache, the job runner, and the loop that drives them
 //   mesh/       the mesh in companion role: hears adverts, forwards nothing, and speaks a job
-//   ui/         the OLED's four lines
+//   ui/         the OLED's four lines, as a pure function over a struct this file fills
 //   Log.h       what the serial port prints besides the console's replies, and the 4 kB ring
 //               `dump` prints it back out of (LogRing.h)
 //   Health.h    the task watchdog, the deliberate reboot on a wedged stack, and why this board
@@ -42,6 +42,7 @@
 #include "net/Clock.h"
 #include "net/WifiLink.h"
 #include "settings/Store.h"
+#include "ui/DisplayLines.h"
 #include "ui/Oled.h"
 #include "version.h"
 
@@ -96,6 +97,14 @@ void applyLogSettings() {
   mm::logSetLevelByName(buf);
   settings.effective(*mm::findKey("log.frames"), buf, sizeof buf);
   the_mesh.setFrameLog(std::strcmp(buf, "on") == 0);
+}
+
+// `display.timeout`: how long the panel stays lit after a button press, 0 never turning it off,
+// which is the default (src/ui/Oled.h). Re-read on every `set display.*`, so no reboot is part
+// of changing it.
+void applyDisplaySettings() {
+  const long seconds = static_cast<long>(settings.number(*mm::findKey("display.timeout")));
+  oled.setTimeout(static_cast<uint32_t>(seconds < 0 ? 0 : seconds));
 }
 
 void setUpIdentity() {
@@ -322,11 +331,14 @@ void onSettingChanged(const mm::KeyDef& key) {
     if (radio_ok) applyRadioSettings();
   } else if (std::strncmp(key.name, "log.", 4) == 0) {
     applyLogSettings();
+  } else if (std::strncmp(key.name, "display.", 8) == 0) {
+    applyDisplaySettings();
   }
 }
 
 void onErased() {
   applyLogSettings();
+  applyDisplaySettings();
   server.reconfigure();
   agent.reconfigure();
   wifi.reconfigure();
@@ -335,17 +347,39 @@ void onErased() {
 
 // ---- the OLED -------------------------------------------------------------------------------
 
+// The one place the display's struct is filled: every field is a plain read of an object that
+// already exists, and what the four lines *say* is src/ui/DisplayLines.cpp's, under test
+// natively. Called from Oled::render once a second - and from the job pump, which is why the
+// open job on line four is live.
 void fillOled(char lines[mm::Oled::kLines][mm::Oled::kCols]) {
-  wifi.oledLine(lines[0], mm::Oled::kCols);
-  agentClock.oledLine(lines[1], mm::Oled::kCols);
-  agent.oledLine(lines[2], mm::Oled::kCols);
-  if (identity_ok) {
-    char key[80];
-    publicKeyHex(key, sizeof key);
-    std::snprintf(lines[3], mm::Oled::kCols, "id %.8s  agent", key);
-  } else {
-    std::snprintf(lines[3], mm::Oled::kCols, "no identity");
+  mm::DisplayState state;
+
+  state.publicKeyHex = (identity_ok && public_key_hex[0] != 0) ? public_key_hex : nullptr;
+  state.hasTime = agentClock.hasTime();
+  state.nowEpoch = agentClock.now();
+
+  state.wifiConnected = wifi.connected();
+  state.online = agent.online();
+
+  state.everHeartbeated = agent.everHeartbeated();
+  state.lastHeartbeatAtEpoch = agent.lastHeartbeatAtEpoch();
+
+  const mm::ClaimedJob* open = jobs.openJob();
+  if (open != nullptr) {
+    state.jobOpen = true;
+    state.jobId = open->id;
+    state.jobType = open->type;
   }
+  const mm::JobRunner::Record* last = jobs.newest();
+  if (last != nullptr) {
+    state.hasLastJob = true;
+    state.lastJobAtEpoch = last->atEpoch;
+  }
+  state.tokenRefused = agent.halted();
+  state.backingOff = agent.counters().consecutiveFailures > 0;
+  state.retrySeconds = agent.retrySeconds();
+
+  mm::renderLines(state, lines);
 }
 
 }  // namespace
@@ -372,8 +406,10 @@ void setup() {
 
   // The panel is probed here so that a missing one is the first thing logged - but the four lines
   // are first drawn below, once every object fillOled reads from has had its begin(): the first
-  // flash of a V3 crashed in AgentLoop::oledLine on a server_ that agent.begin() had not set yet
+  // flash of a V3 crashed drawing a frame from a server_ that agent.begin() had not set yet
   // (LoadProhibited at 0xc, the first frame rendered from Oled::begin before agent.begin ran).
+  // Since task p1.2-09 every field fillOled reads is a plain member of an object that is already
+  // constructed, so the order is no longer load-bearing - but it is still the right one.
   display_ok = display.begin();
   if (!display_ok) LOG_W("oled: not found");
 
@@ -397,7 +433,10 @@ void setup() {
   agent.begin(settings, server, agentClock, wifi, the_mesh, jobs);
   agent.setIdentity(public_key_hex[0] != 0 ? public_key_hex : nullptr);
   if (!server.configured()) LOG_I("server: not configured; set meshmaster.token (meshmaster.url is https://meshmaster.dk unless set)");
-  if (display_ok) oled.begin(&display, &user_btn, &fillOled);  // the first frame, now that its sources exist
+  if (display_ok) {
+    applyDisplaySettings();  // `display.timeout`, before the first frame starts its clock
+    oled.begin(&display, &user_btn, &fillOled);  // the first frame, now that its sources exist
+  }
 
   mm::ConsoleHost host = {&printStatus,  &printMesh,    &printServer, &printJobs,
                           &printSessions, &printErrors,  &printReboots, &printDump,

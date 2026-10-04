@@ -21,7 +21,8 @@
 //   200   the budget, the poll interval and the clock are taken, and `jobsWaiting` makes a claim
 //         due before the next heartbeat
 //   401   everything stops. The token was revoked or is wrong, and no amount of retrying fixes
-//         either; the console still works and the OLED says so, and a `set meshmaster.token`
+//         either; the console still works and the OLED's fourth line says so, and a
+//         `set meshmaster.token`
 //         (or a reboot) is what starts the loop again
 //   429   the wait is `Retry-After`, to the second
 //   5xx, no reply
@@ -90,6 +91,18 @@ class AgentLoop {
   const Counters& counters() const { return counters_; }
   bool halted() const { return halted_; }
 
+  // What the OLED's four lines need of this loop (src/ui/DisplayLines.h). Every one of them is
+  // a plain read of state this object already keeps, safe to call before begin() has run - the
+  // first frame is drawn from main.cpp's setup() and the panel has no reason to know.
+  bool everHeartbeated() const { return everHeartbeated_; }
+  uint32_t lastHeartbeatAtEpoch() const { return lastHeartbeatAtEpoch_; }
+  // *Online* is the last call to MeshMaster having been answered: a heartbeat has happened,
+  // nothing has gone unanswered since, and the token has not been refused.
+  bool online() const { return everHeartbeated_ && counters_.consecutiveFailures == 0 && !halted_; }
+  // Seconds until the next attempt while backing off (or holding a 429's Retry-After); 0 when
+  // the wait is over or there is none.
+  uint32_t retrySeconds() const;
+
   // `server` on the console: the last heartbeat, the next, the last batch, the counters.
   void report(Stream& out) const;
 
@@ -98,9 +111,6 @@ class AgentLoop {
 
   // One line for `status`.
   void describe(char* out, size_t cap) const;
-
-  // The OLED's third line: "hb 12:03 · 17 adverts" once one has been answered.
-  void oledLine(char* out, size_t cap) const;
 
  private:
   void doConfig();

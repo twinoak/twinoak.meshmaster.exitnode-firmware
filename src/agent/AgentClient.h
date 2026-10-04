@@ -53,7 +53,7 @@ class AgentClient {
     Root root = Root::IsrgRootX1;
   };
 
-  // The config call keeps a little more, because `status` and the OLED report it.
+  // The config call keeps a little more, because `status` reports it.
   struct Outcome {
     bool attempted = false;
     bool ok = false;
@@ -99,9 +99,6 @@ class AgentClient {
 
   // For `status`, e.g. "https://meshmaster.dk: config ok at 12:03:14, agent 17 \"Window\", ...".
   void describe(char* out, size_t cap) const;
-
-  // The OLED's third line while nothing has heartbeated yet: "config ok 12:03:14", "http 401".
-  void oledLine(char* out, size_t cap) const;
 
  private:
   // One request. `method` is "GET" or "POST"; `requestBody` is nullptr for a GET. The reply's

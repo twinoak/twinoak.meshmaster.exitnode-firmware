@@ -116,6 +116,14 @@ class JobRunner {
   // How many results are waiting to be posted, which is the heartbeat's `queueDepth`.
   int queueDepth() const { return static_cast<int>(results_.count()); }
 
+  // What the OLED's fourth line needs (src/ui/DisplayLines.h): the job that is open, or
+  // nullptr between jobs. Only `claimAndRun`'s own pump ever sees one - the pointer is into the
+  // claim's buffer and is good for the length of the job and no longer.
+  const ClaimedJob* openJob() const { return open_; }
+
+  // The newest of the last ten, or nullptr before any job has run.
+  const Record* newest() const { return recentCount_ > 0 ? &recent_[0] : nullptr; }
+
   const AirtimeGate& gate() const { return gate_; }
   const ResultBuffer& results() const { return results_; }
   uint32_t claims() const { return claims_; }
@@ -235,6 +243,9 @@ class JobRunner {
 
   Record recent_[kRemembered];
   int recentCount_ = 0;
+
+  // The job `claimAndRun` is running, for the display (task p1.2-09). Null between jobs.
+  const ClaimedJob* open_ = nullptr;
 
   uint32_t claims_ = 0;
   uint32_t ran_ = 0;

@@ -419,30 +419,5 @@ void AgentClient::describe(char* out, size_t cap) const {
   }
 }
 
-void AgentClient::oledLine(char* out, size_t cap) const {
-  if (!configured()) {
-    std::snprintf(out, cap, "no server set");
-    return;
-  }
-  if (!last_.attempted) {
-    std::snprintf(out, cap, "server: waiting");
-    return;
-  }
-  if (last_.ok) {
-    char when[12];
-    if (last_.atEpoch != 0) {
-      formatClock(last_.atEpoch, when, sizeof when);
-    } else {
-      std::snprintf(when, sizeof when, "+%lus", static_cast<unsigned long>(last_.atMillis / 1000));
-    }
-    std::snprintf(out, cap, "config ok %s", when);
-    return;
-  }
-  if (last_.httpStatus != 0) {
-    std::snprintf(out, cap, "http %d", last_.httpStatus);
-    return;
-  }
-  std::snprintf(out, cap, "tls/net failed");
-}
 
 }  // namespace mm

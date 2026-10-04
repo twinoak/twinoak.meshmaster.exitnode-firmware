@@ -50,12 +50,13 @@ that is not `https://`, a line over 200 characters, a control character.
 | `radio.tx` | dBm, -9..22 | 22 |
 | `log.level` | `error`, `warn`, `info`, `debug` | `info` |
 | `log.frames` | `on`, `off`: one log line per frame, both directions. A frame of a job in flight - the login, the request, a CLI line and its reply, a trace - is printed as hex, header, path and payload; a login that carries a password, and the `password` line of a rotation and the reply that echoes it, are printed with their encrypted bodies as one `*` per byte, which is the .NET agent's redaction of `CMD_SEND_LOGIN` and of a sensitive CLI line; an advert and the mesh's own chat are the header line only, never their bytes | `off` |
+| `display.timeout` | seconds, 0..86400: how long the OLED stays lit after a button press | `0`: it never turns off. `300` is the five minutes this firmware did before task p1.2-09 |
 
 The radio's fallbacks are the Danish MeshCore channel, the one the field
 repeaters run; the ranges are MeshCore's own. A `set` takes effect at once:
 `wifi.*` drops the link and rejoins, `meshmaster.*` starts the server loop
 again (and forgets a 401), `radio.*` reprograms the SX1262, `log.*` changes
-what is printed.
+what is printed, `display.timeout` restarts the panel's timer.
 
 `radio.freq`, `radio.bw`, `radio.sf` and `radio.cr` are also what the heartbeat
 reports as its `radio` block, which is what the exit node's page on
@@ -155,33 +156,44 @@ never logged, the mesh's own chat is counted by type and dropped unread, and
 
 ## The OLED
 
-Four lines, on for five minutes after boot or after a press of the user button
-(PRG, GPIO 0), then off until the next press:
+Four lines, redrawn once a second, and the panel **stays on**: `display.timeout`
+is the seconds of no button press after which it goes dark and its default is
+`0`, which never turns it off. A **click on the user button** (PRG, GPIO 0)
+toggles it - off when on, on when off - and restarts the timer when one is set.
+Holding PRG through a reset is the ESP32-S3's own bootloader and is nothing this
+firmware does.
 
 ```
-wifi 192.168.1.20
-12:03:14 UTC (sntp)
-hb 12:03 . 17 adverts
-id 7f3a9c02  agent
+ID: 46F6     12:03:14
+WiFi: yes Online: yes
+Heartbeat: 12:03:14
+Idle, last 12:34:56
 ```
 
-Line one is `wifi: no ssid`, `wifi: connecting`, `wifi: retry 20s` or the
-address; line two is `no time` until the clock is set; line four is the
-identity's first eight hex characters.
+| Line | What it says |
+|---|---|
+| 1 | the first four characters of the companion key - the prefix meshmaster.dk shows this exit node by - and the clock right-aligned, or `no time` until it is set. `no identity` alone when the radio made none. The IP address is not here; `status` has it |
+| 2 | `WiFi` is the link, `Online` is *the last call to meshmaster.dk was answered*: a heartbeat has happened, nothing has gone unanswered since, and the token has not been refused |
+| 3 | when the server last heard from this board, `Heartbeat: none` until the first |
+| 4 | what it is doing, and when it is doing nothing, why - the table below |
 
-Line three is the exit node's state, and when something is missing it says
-**which of the two** it is: `no wifi: no server` while the link is down (line
-one has the link's own detail), `no server: retry 45s` while the link is up and
-meshmaster.dk is not answering, counting down to the next attempt. Otherwise:
-until a heartbeat has been answered it is the config call's - `no server set`,
-`server: waiting`, `config ok HH:MM:SS`, `http <status>` or `tls/net failed`;
-after that it is the heartbeat and the adverts, `hb HH:MM` and a middle dot and
-the count. A refused token replaces it with `token revoked/wrong`, and it stays
-there until the token is set again.
+**Line four is the one to read when something is wrong.** Line two's *no* says
+something is wrong; line four says what.
+
+| Line four | What it means |
+|---|---|
+| `Job 1234 acl.set` | a job is on the air: its id and its type, live, because the job's own waits pump the display |
+| `Idle, last 12:34:56` | nothing is running; the newest job ended then |
+| `Idle, no jobs yet` | nothing has run since this board started |
+| `token revoked/wrong` | a 401: nothing is sent until `set meshmaster.token <token>` or a reboot |
+| `no server: retry 30s` | the link is up and meshmaster.dk is not answering; the countdown is the next attempt |
+| `no wifi` | the link is down, so the server cannot be reached either |
 
 The radio keeps running and hearing through all of it: the mesh is pumped by
 the same loop, the adverts go into the ring, and they are posted when the
-server comes back.
+server comes back. What the four lines say is a pure function of a struct
+(`src/ui/DisplayLines.h`) and every line above has a native test
+(`test/test_display_lines`); the toggle and the timeout need the board.
 
 ## The bench walk
 
@@ -196,7 +208,7 @@ server comes back.
    that is not meshmaster.dk): `server: GET ...`, then `heap: ... free after the call`
    and `server: config ok: agent <id> "<label>" ...`. A wrong token is
    `server: http 401`, and that **halts the loop**: nothing more is sent until
-   `set meshmaster.token <token>` or a reboot, and the OLED says
+   `set meshmaster.token <token>` or a reboot, and the OLED's fourth line says
    `token revoked/wrong`. A URL the chain does not verify for is
    `server: no reply: connection refused (tls -9984: ...)` and the next attempt
    tries the core's certificate bundle. `status` then shows
@@ -273,12 +285,12 @@ server comes back.
     new password.
 18. Staying up (task 06). Pull the router's uplink for ten minutes with a job
     in flight: the log backs off (`server: next attempt in 30 s (the 30 s
-    step, jittered)`, then 60, 120 …), the OLED's third line says
+    step, jittered)`, then 60, 120 …), the OLED's fourth line says
     `no server: retry Ns`, `mesh` keeps counting adverts, and `jobs` shows the
     result waiting under `buffer`. Plug it back in: `jobs: N result(s) that
     waited went through` and the job's row on the server fills in, late and
-    complete. Pull the *WiFi* instead and the third line says `no wifi: no
-    server`. Then `errors` (every counter, and how many failures from a
+    complete. Pull the *WiFi* instead and the fourth line says `no wifi`.
+    Then `errors` (every counter, and how many failures from a
     restart), `reboots` (`Power-on reset` and an empty log on a board that has
     just been plugged in), and `dump` (the last 4 kB of exactly what the port
     printed - no secret can be in it that was not on the terminal already).

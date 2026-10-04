@@ -42,7 +42,7 @@ struct KeyDef {
 // The longest value any key accepts, and the buffer size a caller needs for one.
 constexpr size_t kMaxValueLen = 128;
 
-constexpr int kKeyCount = 11;
+constexpr int kKeyCount = 12;
 extern const KeyDef kKeys[kKeyCount];
 
 // The key called `name`, or nullptr. Exact, case-sensitive match.

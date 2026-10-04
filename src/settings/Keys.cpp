@@ -38,6 +38,7 @@ const KeyDef kKeys[kKeyCount] = {
     {"radio.tx", "radio_tx", ValueKind::Int, MESHMASTER_TX_DBM_DEFAULT, -9, 22, 0, 0, "transmit power in dBm, -9..22"},
     {"log.level", "log_level", ValueKind::Level, "info", 0, 0, 0, 0, "error | warn | info | debug"},
     {"log.frames", "log_frames", ValueKind::OnOff, "off", 0, 0, 0, 0, "on | off: one line per received frame, header only, never the payload"},
+    {"display.timeout", "disp_timeout", ValueKind::Int, "0", 0, 86400, 0, 0, "seconds the OLED stays lit after a button press, 0..86400; 0 never turns it off, 300 is what this firmware did before"},
 };
 
 const KeyDef* findKey(const char* name) {

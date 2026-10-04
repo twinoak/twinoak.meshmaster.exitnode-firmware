@@ -52,7 +52,8 @@ firmware sends, the job envelopes and results, the credential buffer, the
 config read, the apply engine and the CLI reply rules, the airtime budget, the
 session cache, the observation ring, the offline result buffer, the log ring,
 the rate limiter, the backoff, the reply codec, the policy that reads the
-server's status codes and the version string) are what the native tests
+server's status codes, the OLED's four lines and the version string) are what
+the native tests
 exercise; the rest needs a board.
 
 ## Flashing it
@@ -129,6 +130,7 @@ radio.cr unset (8)
 radio.tx unset (22)
 log.level unset (info)
 log.frames unset (off)
+display.timeout unset (0)
 > set radio.tx 23
 error: radio.tx: out of range, -9..22
 > set meshmaster.url http://meshmaster.dk
@@ -182,6 +184,37 @@ echoes as asterisks, and is printed by nothing afterwards; the two `error:`
 lines are what a wrong value gets. Every `set` takes effect at once, so no
 reboot is part of provisioning. The session above is replayed by the native
 tests against the parser, reply for reply.
+
+## What the display says
+
+The OLED **stays on**. Four lines, written for the window a board is mounted in,
+redrawn once a second:
+
+```
+ID: 46F6     12:03:14
+WiFi: yes Online: yes
+Heartbeat: 12:03:14
+Idle, last 12:34:56
+```
+
+Line one is the first four characters of the companion key — the prefix
+meshmaster.dk shows an exit node by — and the clock, or `no time` until it is
+set; `no identity` alone when the radio made none. Line two is the two
+questions worth asking at a glance: *WiFi* is the link, *Online* is whether the
+last call to meshmaster.dk was answered. Line three is when the server last
+heard from this board, `Heartbeat: none` until the first. Line four is what it
+is doing — `Job 1234 acl.set` while a job is on the air, `Idle, last 12:34:56`
+otherwise, `Idle, no jobs yet` before any — and when it is doing nothing
+because something is wrong, which of the three it is: `token revoked/wrong`
+after a 401, `no server: retry 30s` while backing off, `no wifi` when that is
+why. Line two's *no* says something is wrong; line four says what.
+
+A **click on the PRG button** (GPIO 0) toggles the panel: off when it is on, on
+when it is off. `display.timeout` is the seconds of no button press after which
+it goes dark, and its default is **`0`**, which never turns it off;
+`set display.timeout 300` is the five minutes this firmware did before and takes
+effect without a reboot. Holding PRG through a reset is the chip's bootloader
+and has nothing to do with either.
 
 ## What you should see on meshmaster.dk
 
