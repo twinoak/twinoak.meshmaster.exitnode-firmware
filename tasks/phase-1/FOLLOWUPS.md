@@ -97,3 +97,20 @@ Open, carried forward:
   answered) cap the wait lower than ten minutes — two, say — because a server
   that is back deserves a call within minutes, not within the cap.
   `AgentLoop::noteFailure`, `ServerPolicy.h`'s `kMaxBackoffMs`. Small.
+- [ ] **The merged image erases the settings** (bench, 4 October): Thomas
+  re-flashed `v0.1.1`'s `-merged.bin` over a provisioned board and lost WiFi,
+  URL and token. Not a bug in the firmware and not the web flasher's doing:
+  `esptool merge_bin` fills the gap between the partition table (`0x8000`)
+  and `boot_app0` (`0xE000`) with `0xFF`, and `default_8MB.csv` puts NVS at
+  `0x9000–0xDFFF` — inside the span. The application image at `0x10000` and
+  `pio run -t upload` (separate regions) leave NVS alone; the identity in
+  SPIFFS sits above the app and survives either way, which is why the
+  repeater's ACL entry still holds. README.md's "flashing does not touch the
+  settings" is true of those two and false of the merged image. Two fixes,
+  pick one: **(a)** say so — the release notes and README name the merged
+  image as *for a board out of the box only* and the application image as
+  the upgrade, and the web flasher's step says which file; or **(b)** a
+  custom partition table with NVS moved above the app and SPIFFS (the merged
+  image then ends at the app's end and never reaches it), one re-provisioning
+  on the day it lands. (b) is the real fix; (a) is a sentence and should land
+  first either way. Small.
