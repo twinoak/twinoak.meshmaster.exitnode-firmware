@@ -1,0 +1,12 @@
+# WRONG, on purpose: tests/fixtures/partitions/README.md. This is the framework's default_8MB.csv
+# as it was installed on 5 October 2026 (framework-arduinoespressif32 3.20017.241212) - nvs at
+# 0x9000, inside the span a merged image fills with 0xFF, which is the table that erased a
+# provisioned board's settings on the bench. tools/check-partitions.py must refuse it: nvs is
+# not above app0, and any merged image reaches it.
+# Name,   Type, SubType, Offset,  Size, Flags
+nvs,      data, nvs,     0x9000,  0x5000,
+otadata,  data, ota,     0xe000,  0x2000,
+app0,     app,  ota_0,   0x10000, 0x330000,
+app1,     app,  ota_1,   0x340000,0x330000,
+spiffs,   data, spiffs,  0x670000,0x180000,
+coredump, data, coredump,0x7F0000,0x10000,

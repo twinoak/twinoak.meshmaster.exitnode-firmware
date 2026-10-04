@@ -24,3 +24,52 @@ which is how MeshCore reaches its own, and the variant's sources are compiled
 into the MeshCore library by `MC_VARIANT=heltec_v4` (upstream's
 `build_as_lib.py`). So the one thing vendored is the one thing that cannot be
 referenced.
+
+## `partitions/` — the two tables, and why they exist
+
+`meshmaster_8MB.csv` (the V3) and `meshmaster_16MB.csv` (the V4) are the
+framework's `default_8MB.csv` and `default_16MB.csv` with **one change: `nvs`
+is above the application**, at the offset `app1` had. `platformio.ini` names
+them per environment (`board_build.partitions`); the board definitions above
+are not edited for it.
+
+The reason is the merged image. A board out of the box is flashed with
+bootloader + partition table + application as one file from `0x0`, and
+`esptool merge_bin` fills the gap between the partition table (`0x8000`) and
+`boot_app0` (`0xE000`) with `0xFF`. The framework's default puts NVS — the
+WiFi credentials, the server URL, the token — at `0x9000`, inside that gap, so
+every merged flash of `v0.1.1` erased a provisioned board's settings (bench,
+4 October 2026). A merged image ends where the application ends; NVS above the
+application is NVS a merged image cannot reach.
+
+What **does not move**, and why it is held in CI rather than promised:
+
+- **`spiffs`** keeps the default's offset and size on both boards. The identity
+  lives there (`IdentityStore(SPIFFS, "/identity")`), it is the one thing on a
+  board that cannot be re-provisioned, and a `spiffs` that moves by one sector
+  is an identity that is gone and a repeater ACL that names a stranger.
+- **`app0`** keeps `0x10000` and its size: the application image and
+  `pio run -t upload` write there, and `otadata` at `0xE000` keeps pointing at
+  it. **`coredump`** stays where it was.
+- **`nvs` keeps its label** and the default's size: `Preferences` opens the
+  partition by that label (`src/settings/Store.cpp` changes nothing).
+- **`app1` is gone** — this firmware does no OTA, so the second slot was never
+  written — and the rest of its region is **left unallocated** rather than
+  given to `spiffs`, which would have moved `spiffs`. The gap at
+  `0x9000`–`0xDFFF` stays empty for the same reason.
+
+[`tools/check-partitions.py`](../tools/check-partitions.py) reads the csv each
+environment names and holds all of that against the framework default for the
+board's flash size, then checks that the merged image really does end before
+`nvs` begins — in `ci.yml`, after `pio run` and `-t mergebin`, on every build of
+every board, so the day the application grows past its region CI says so before
+a release does. Its own tests are the two wrong tables in
+[`tests/fixtures/partitions/`](../tests/fixtures/partitions/README.md). A
+framework bump that moves a default (`platformio/espressif32` in
+`platformio.ini`) is a red build there too, which is right: these tables are
+derived from the defaults and would need re-deriving.
+
+What a board goes through on the day this table lands is in README.md's
+*Flashing it*: the application image keeps the old table and the old settings;
+the first merged flash gets the new table, keeps the identity, and needs WiFi
+and a new token once.

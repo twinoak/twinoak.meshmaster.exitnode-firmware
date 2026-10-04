@@ -33,7 +33,11 @@ serial console over the network and no captive portal
 
 1. **Flash it.** `pio run -e heltec_v3 -t upload`, or the merged image from a
    release with `esptool` — [`README.md`](../README.md) has both lines. Use
-   `-e heltec_v4` for a V4.
+   `-e heltec_v4` for a V4. Either keeps a provisioned board's settings and its
+   identity, with the one exception README's *Flashing it* spells out: the
+   **first** merged flash of a release carrying this firmware's partition table
+   over a board provisioned under `v0.1.1` or earlier forgets the settings — not
+   the identity — and is steps 4 to 7 again, with a new token.
 2. **Open the port.** The banner, then a `>` prompt. If nothing appears, it is
    the cable.
 3. **`status`.** An identity of 64 hex characters, the radio parameters,
@@ -275,8 +279,22 @@ with a USB cable.
 
 - **The token and the identity survive.** Both live outside the application
   image — the token in NVS, the identity in SPIFFS — so the exit node comes
-  back as itself, with its history, its budget and its associations. A board
-  that is wiped is a revoke and a fresh registration.
+  back as itself, with its history, its budget and its associations. Either
+  image keeps them: this firmware's partition table puts NVS above the
+  application, where a merged image cannot reach it
+  ([`boards/README.md`](../boards/README.md)). A board that is wiped is a
+  revoke and a fresh registration.
+- **One flash, once per board, forgets the token and the WiFi** and nothing
+  else: the **first** merged image of a release carrying this firmware's
+  partition table, flashed over a board provisioned under `v0.1.1` or earlier
+  (whose table kept NVS in the span a merged image overwrites —
+  [`README.md`](../README.md), *Flashing it*). The identity stays, `status`
+  shows the same key, and the exit node is still itself with its associations;
+  it needs its WiFi again and a **new** token from *Generate a new token* on
+  its page — not a fresh registration. Upgrading such a board with the
+  application image at `0x10000` keeps its old table and its settings, and
+  postpones that to its next merged flash. After that one flash, no image
+  reaches the settings again.
 - **What is in RAM is lost**: unposted results and observations, and the reboot
   log. Do it when the mesh is quiet.
 - **A V4 is not a V3.** Flash `heltec_v4` images to a V4 and `heltec_v3` to a
