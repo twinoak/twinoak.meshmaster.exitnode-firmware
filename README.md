@@ -79,22 +79,39 @@ with `SHA256SUMS` and the one `esptool` line to use. A tag `vX.Y.Z` on a commit
 CI has passed is what makes one; *Run workflow* on `release.yml` rehearses it
 and publishes nothing.
 
-**Which of the two, and what it costs.** The merged image is for a board **out
-of the box, or one coming from other firmware** — the repeater image, a
-companion build — because it carries the bootloader and the partition table that
-the application image presumes are already there. It **erases the settings as it
-goes**: `esptool`'s merge fills the gap between the partition table (`0x8000`)
-and `boot_app0` (`0xE000`) with `0xFF`, and `default_8MB.csv` keeps NVS at
-`0x9000`, inside that span — so the WiFi credentials, the server URL and the
-token are gone and the board is provisioned again from the console. The
-application image at `0x10000` is for **every upgrade** of a board already
-running this firmware, and it keeps them; so does `pio run -t upload`, which
-writes the same region. The identity in SPIFFS sits above the application and
-survives either way, which is why a repeater's ACL entry for this board still
-holds after a merged flash. `erase confirm` on the console forgets the settings
-on purpose; the identity stays even then. What any reflash loses is what was in
-RAM: results and observations this board had not posted yet, and the reboot log
-`reboots` prints ([`docs/field.md`](docs/field.md)).
+**Which of the two.** The merged image is for a board **out of the box, or one
+coming from other firmware** — the repeater image, a companion build — because
+it carries the bootloader and the partition table that the application image
+presumes are already there. The application image at `0x10000` is the upgrade
+for a board already running this firmware; so is `pio run -t upload`, which
+writes the same region. **Either keeps the settings and the identity.** This
+firmware's partition table ([`boards/README.md`](boards/README.md)) puts NVS —
+the WiFi credentials, the server URL, the token — above the application, where
+a merged image, which ends where the application ends, cannot reach it; the
+identity in SPIFFS sits above that, at the same offset as in every table this
+firmware has ever had, which is why a repeater's ACL entry for this board holds
+through any reflash. CI holds both on every build (`tools/check-partitions.py`).
+
+**The one exception, once per board.** A board provisioned under `v0.1.1` or
+earlier carries the framework's default table, which keeps NVS at `0x9000` —
+inside the span `esptool`'s merge fills with `0xFF`. The **first merged flash**
+of a release with this firmware's table onto such a board **forgets the
+settings**: it writes the new table, and NVS is now read from a region nothing
+ever wrote, so the board comes up with `wifi off, wifi.ssid is unset` and
+`server not configured` and is provisioned again from the console —
+`set wifi.ssid`, `set wifi.pass`, and a **new** token, because the old one is
+gone from the board and the server keeps only its hash: *Generate a new token*
+on the exit node's page on meshmaster.dk, then `set meshmaster.token`. The
+identity is untouched — `status` shows the same 64 hex characters before and
+after, and the repeater's ACL still holds the board — so the exit node is
+itself again, associations and all, and not a fresh registration. Upgrading
+such a board with the application image instead keeps its old table and its
+settings, and postpones the re-provisioning to its next merged flash. After
+that one flash, no image reaches the settings again. `erase confirm` on the
+console forgets the settings on purpose; the identity stays even then. What any
+reflash loses is what was in RAM: results and observations this board had not
+posted yet, and the reboot log `reboots` prints
+([`docs/field.md`](docs/field.md)).
 
 ## Provisioning it
 

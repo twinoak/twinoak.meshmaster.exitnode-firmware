@@ -1,0 +1,24 @@
+# MeshMaster agent firmware, 8 MB flash (Heltec V3): the framework's default_8MB.csv with NVS
+# moved above the application. Read boards/README.md before changing a byte here.
+#
+# Why: a merged image (bootloader + partition table + application, flashed at 0x0) is one file
+# from 0x0 to the application's end, and esptool fills the gap between the partition table at
+# 0x8000 and boot_app0 at 0xE000 with 0xFF. The default puts NVS at 0x9000, inside that gap, so
+# every merged flash erased a provisioned board's settings (bench, 4 October 2026). Here NVS
+# begins where app1 began, above anything a merged image can reach.
+#
+# app1 is gone: this firmware does no OTA, so the second application slot was never written.
+# The rest of app1's region (0x345000-0x66FFFF) is deliberately left unallocated - giving it to
+# spiffs would move spiffs's offset, and spiffs holds the identity, which is the one thing on a
+# board that cannot be re-provisioned. The gap 0x9000-0xDFFF stays empty for the same reason:
+# nothing of ours may live where a merged image writes.
+#
+# otadata, app0, spiffs and coredump are byte-identical to default_8MB.csv (offset and size).
+# tools/check-partitions.py holds all of that against the installed framework, in CI, every build.
+#
+# Name,   Type, SubType, Offset,  Size, Flags
+otadata,  data, ota,     0xe000,  0x2000,
+app0,     app,  ota_0,   0x10000, 0x330000,
+nvs,      data, nvs,     0x340000,0x5000,
+spiffs,   data, spiffs,  0x670000,0x180000,
+coredump, data, coredump,0x7F0000,0x10000,

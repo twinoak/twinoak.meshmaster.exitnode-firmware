@@ -1,7 +1,10 @@
 # Every pull request and every push to master, once per commit.
 #
 #   build (per board)   pio run -e <board> for every board of the matrix, and the .bin as an
-#                       artifact. heltec_v3 and heltec_v4 since task p1-06
+#                       artifact. heltec_v3 and heltec_v4 since task p1-06. Then -t mergebin and
+#                       tools/check-partitions.py against the merged image: the partition table
+#                       the environment names is the framework default's with NVS above the
+#                       application, and the image ends before NVS begins (task p1.2-11)
 #   native tests        pio test -e native (the host tests: no board, no radio)
 #   fixtures            tools/sync-fixtures.ps1 -Verify - the contract fixtures and the
 #                       transcribed companion frames are still meshmaster.dk's bytes and nobody
@@ -68,6 +71,20 @@ jobs:
 
       - name: Build
         run: pio run -e ${{ matrix.env }}
+
+      # The merged image is what a board out of the box is flashed with, and the partition table
+      # it carries is where NVS, SPIFFS (the identity) and the application live. The check holds
+      # the table this environment names against the framework's default for the board's flash
+      # size - spiffs, coredump, otadata and app0 unmoved, nvs above the application, the gap at
+      # 0x9000 empty - and then that the merged image really ends before nvs begins, so the day
+      # the application grows past its region this step says so before a release does
+      # (boards/README.md, task p1.2-11). The self-test first: the two tables it must refuse.
+      - name: The merged image, and the partition table it carries
+        run: |
+          set -euo pipefail
+          pio run -e ${{ matrix.env }} -t mergebin
+          python tools/check-partitions.py --self-test
+          python tools/check-partitions.py --env ${{ matrix.env }} --merged ".pio/build/${{ matrix.env }}/firmware-merged.bin"
 
       # -Werror is on for src/ (platformio.ini's build_src_flags), so a warning of our own has
       # already failed the step above. This is the size of what was built, for the record.

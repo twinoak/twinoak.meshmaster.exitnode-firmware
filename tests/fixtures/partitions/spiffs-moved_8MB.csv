@@ -1,0 +1,10 @@
+# WRONG, on purpose: tests/fixtures/partitions/README.md. This is the table task p1.2-11 warns
+# against - nvs takes app1's whole region and spiffs is pulled down to follow it, which moves
+# the identity by 0x32B000 bytes and makes every repeater's ACL entry for the board a stranger's
+# key. tools/check-partitions.py must refuse it.
+# Name,   Type, SubType, Offset,  Size, Flags
+otadata,  data, ota,     0xe000,  0x2000,
+app0,     app,  ota_0,   0x10000, 0x330000,
+nvs,      data, nvs,     0x340000,0x5000,
+spiffs,   data, spiffs,  0x345000,0x180000,
+coredump, data, coredump,0x7F0000,0x10000,
