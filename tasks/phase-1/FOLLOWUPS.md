@@ -89,3 +89,11 @@ Open, carried forward:
   should too.
 - [ ] **`AgentConfig` has no contract fixture** (01) — meshmaster.dk's side,
   with the envelope fixtures above.
+- [ ] **The backoff after a server deploy** (bench, 3 October): a release on
+  meshmaster.dk cost five failed calls and the doubling wait (30 s … 480 s)
+  then outlasted the outage by a quarter of an hour, so the exit node read
+  *quiet* long after the server was back. Honour `Retry-After` on the
+  deploy's 503s, and once the link has been proven up (WiFi connected, SNTP
+  answered) cap the wait lower than ten minutes — two, say — because a server
+  that is back deserves a call within minutes, not within the cap.
+  `AgentLoop::noteFailure`, `ServerPolicy.h`'s `kMaxBackoffMs`. Small.

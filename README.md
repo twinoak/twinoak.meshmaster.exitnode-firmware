@@ -324,6 +324,14 @@ reading.
   and posted late with the bytes it was written with — and a job whose lease
   ran out while it waited is not put on the air at all. Every bound and the
   backoff's own sequence have a native test (`test/test_buffers`).
+- **Path hashes are two bytes or more, never one.** Wherever this firmware
+  chooses a path-hash width - every flood it originates
+  (`AgentMesh::kFloodPathHashSize`), a trace it builds, anything a later task
+  adds - the width is at least two bytes. One-byte hashes let two repeaters
+  that share a first byte both repeat a direct packet, and the first bench
+  showed a five-hop path of them. A path learned from a reply keeps the width
+  it was learned at. Thomas, 3 October 2026, for all MeshCore work
+  ([D-33](https://github.com/twinoak/meshmaster.dk/blob/master/spec/DECISIONS.md#3-new-decisions)).
 - **The contract is the .NET agent's.** Every envelope is checked against
   `MeshMaster.Contracts`' fixtures, copied byte for byte into
   [`tests/fixtures/contracts/`](tests/fixtures/contracts/README.md), and every

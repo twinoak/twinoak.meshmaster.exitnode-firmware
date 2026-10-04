@@ -171,6 +171,16 @@ class AgentMesh : public mesh::Mesh {
   uint32_t uniqueTime() { return getRTCClock()->getCurrentTimeUnique(); }
 
   // The request types of examples/simple_repeater/MyMesh.cpp at d9296435.
+  // The path-hash size of every flood this board originates: two bytes per hop, never one.
+  // MeshCore's sendFlood() defaults to one (MeshCore.h PATH_HASH_SIZE, Mesh.h), and a path of
+  // one-byte hashes is what the first bench returned - "EF → 38 → 82 → 49 → 01" - where two
+  // repeaters sharing a first byte would both repeat a direct packet. Repeaters append their hash
+  // at the size the originator chose (Mesh.cpp, the retransmit path), so this is the whole
+  // decision for a request's outbound path; the reply comes back along it. meshguide's standard
+  // asks repeaters for path.hash.mode >= 1 (two bytes) for their own floods, and this is the same
+  // choice made for ours. Thomas, 3 October 2026: "force it to always use at least 2 bytes".
+  static constexpr uint8_t kFloodPathHashSize = 2;
+
   static constexpr uint8_t kReqTypeGetStatus = 0x01;
   static constexpr uint8_t kReqTypeGetTelemetry = 0x03;
   static constexpr uint8_t kReqTypeGetAccessList = 0x05;

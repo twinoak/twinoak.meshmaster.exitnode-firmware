@@ -273,7 +273,7 @@ SendResult AgentMesh::dispatch(mesh::Packet* pkt, size_t clearBytes) {
     sendDirect(pkt, outPath_, outPathLen_);
     return SendResult::Direct;
   }
-  sendFlood(pkt);
+  sendFlood(pkt, 0, kFloodPathHashSize);
   return SendResult::Flood;
 }
 
@@ -362,7 +362,7 @@ SendResult AgentMesh::sendDiscovery(uint32_t& tag) {
   mesh::Packet* pkt = createDatagram(PAYLOAD_TYPE_REQ, peer_, sharedSecret(), temp, sizeof temp);
   if (pkt == nullptr) return SendResult::Failed;
   logFrame("tx", pkt, true);
-  sendFlood(pkt);
+  sendFlood(pkt, 0, kFloodPathHashSize);
   return SendResult::Flood;
 }
 
