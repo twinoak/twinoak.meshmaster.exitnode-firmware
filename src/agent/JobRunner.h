@@ -78,6 +78,7 @@
 #include "ConfigApply.h"
 #include "ConfigRead.h"
 #include "JobEnvelopes.h"
+#include "LoginSequence.h"
 #include "ResultBuffer.h"
 #include "Sessions.h"
 #include "mesh/AgentMesh.h"
@@ -153,15 +154,23 @@ class JobRunner {
     uint8_t sessionRole = 0;
     bool grantedBelowClass = false;
     uint8_t grantedRole = 0;
+    // The rotation probe (task p1.3-13; agent/LoginSequence.h): a blank login between the two
+    // tries of the `new` candidate was answered, and the second try was then silent - the
+    // password's silence, reported `unauthorized` with LoginSilentResult as the data. The tier
+    // the probe was answered at is `probeAnsweredRole`, or `refused` when `probeRefused` (the
+    // legacy frame); both are set by probeReachable() and mean nothing until it ran.
+    bool silentAfterReachable = false;
+    bool probeRefused = false;
+    uint8_t probeAnsweredRole = 0;
     // The restore (task p4.1-60): sent once per job, by the handler that needs its verdict in
     // the result (config.read) or by the runner after the handler.
     bool aclRestoreDone = false;
   };
 
-  // What one login came to. `Refused` is a reply that was not a login-ok, and a login answered
-  // below the class it was for (task p3.5-41); `NoReply` is what stock firmware answers a key
-  // and password it does not accept.
-  enum class LoginResult : uint8_t { Ok, Refused, NoReply, Failed, Timeout };
+  // What one login came to: agent/LoginSequence.h's reading, which is this runner's. `Refused`
+  // is a reply that was not a login-ok, and a login answered below the class it was for (task
+  // p3.5-41); `NoReply` is what stock firmware answers a key and password it does not accept.
+  using LoginResult = LoginTry;
 
   Outcome runJob(const ClaimedJob& job, Context& ctx, size_t& dataLen);
   Outcome runStatus(const ClaimedJob& job, Context& ctx, size_t& dataLen);
@@ -197,8 +206,19 @@ class JobRunner {
   // One login: counted, logged, the session bookkeeping a reply implies, and no policy beyond
   // that. ensureSession() is this twice; a discover is this once, for the path.
   LoginResult loginOnce(const ClaimedJob& job, Context& ctx, const char* material, const char* what);
-  // A login at the job's class if none is live. Returns Ok when there is a session to use.
+  // One blank login between the two tries of the `new` candidate of an unverified rotation (task
+  // p1.3-13; meshmaster.dk's task p4.7-95): one transaction through the gate as every send is
+  // (refused by the gate: no probe, false), the ACL login the status probes already make, and
+  // **no session stored** whatever came back - `sessions_` is untouched, and the next job logs
+  // in afresh. True when the repeater answered, at any level or with the legacy refusal, which
+  // lands on ctx.probeAnsweredRole / ctx.probeRefused; false when it was silent.
+  bool probeReachable(const ClaimedJob& job, Context& ctx);
+  // A login at the job's class if none is live: agent/LoginSequence.h's two tries, with the
+  // probe between them on the one path that needs it. Returns Ok when there is a session to use.
   Outcome ensureSession(const ClaimedJob& job, Context& ctx);
+  // The sequence's logins on the air: agent/LoginSequence.h's exchange over this runner.
+  class LoginOnTheAir;
+  friend class LoginOnTheAir;
   // One request, with the bounded retry of EXIT-NODES §5: no reply once is retried once, and on
   // a reused session the retry logs in again first. Silence twice is `unreachable`.
   Outcome request(const ClaimedJob& job, Context& ctx, const char* what, uint8_t reqType, const uint8_t* data,

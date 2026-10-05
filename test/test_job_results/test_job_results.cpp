@@ -531,6 +531,25 @@ TEST(LoginBelowClassResult, ItSaysWhatWasGrantedAndWhatWasNeeded) {
   EXPECT_EQ(std::string(out, len), "{\"loggedInAs\":\"guest\",\"needed\":\"read-only\"}");
 }
 
+// LoginSilentResult(string Reason, string? ProbeAnsweredAs) as System.Text.Json writes it:
+// `reason` first, `probeAnsweredAs` second, both camelCase, the reason the one constant of
+// LoginSilentReasons. The server reads `reason` and treats `silentAfterReachable` exactly as a
+// refusal, so a misspelling here is a rotation that silently stays unverified (task p1.3-13).
+TEST(LoginSilentResult, ItIsTheOneReasonAndTheTierTheProbeWasAnsweredAt) {
+  char out[128];
+  std::size_t len = mm::writeLoginSilentResult("read-only", out, sizeof out);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ(std::string(out, len), "{\"reason\":\"silentAfterReachable\",\"probeAnsweredAs\":\"read-only\"}");
+  len = mm::writeLoginSilentResult("refused", out, sizeof out);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ(std::string(out, len), "{\"reason\":\"silentAfterReachable\",\"probeAnsweredAs\":\"refused\"}")
+      << "the legacy LOGIN_FAIL frame to the probe is an answer, and says so";
+  EXPECT_STREQ(mm::kLoginSilentAfterReachable, "silentAfterReachable");
+  len = mm::writeLoginSilentResult(nullptr, out, sizeof out);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ(std::string(out, len), "{\"reason\":\"silentAfterReachable\"}") << "a null tier is left out, as the record's null is";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {

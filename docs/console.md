@@ -121,6 +121,28 @@ command (`restore: cli 'setperm <own key> 1': ok`, then `the ACL entry of this
 exit node's key is back at read-only, as granted; the session is now read-only
 (task 60)`). A password is never an argument of any of those lines.
 
+A login is tried twice: `login (admin) try 1: no reply (flood)`, then `try 2`,
+and two silences are `unreachable`. Stock firmware answers a password it does
+not know with the same silence a repeater off the air gives, and in one place
+that matters: a job handed the **new** candidate of an unverified credential
+rotation (meshmaster.dk's CONFIGURATION §7 step 4), where the server's fallback
+to the old candidate is keyed to a refusal. So on that path alone a silent first
+try is followed by one **blank login** - this board's own key and no password,
+the `acl` login every status read makes, which any repeater on the air that
+holds the key's entry answers - before the second try: `reachability probe
+(blank login): answered at read-only (direct)`, and when the second try is then
+silent too the job is `unauthorized` rather than `unreachable`, its log ends
+`the repeater answered a blank login at read-only and then said nothing to the
+new candidate: on stock firmware that silence is a refusal of the password (task
+p4.7-95); the server will try the old candidate next`, and its `data` is
+`{"reason":"silentAfterReachable","probeAnsweredAs":"read-only"}`. A probe that
+is silent too (`the blank login was not answered either`) proves nothing and the
+job is `unreachable` as before; a probe the repeater refuses is an answer and
+says `probeAnsweredAs: refused`. One transaction more, only there - `jobs`
+counts **3** for that job - and no session is stored by the probe. An `old`
+candidate, or a job with none, never probes. The serial console says the same
+in one line per probe (`jobs: job N: reachability probe (blank login): …`).
+
 An `acl`-class `status` is the one read whose transaction count moves with what
 the claim asked for: it fetches the firmware version with a second request
 (`owner info (firmware)`) only when the claim's payload wants it, which the
@@ -283,7 +305,19 @@ server comes back. What the four lines say is a pure function of a struct
     repeater. With `log.frames on` the `password` frame and its reply print as
     two hex bytes and then stars. `jobs` counts **3** through an acl pair: the
     login, the password line, the restore. The next admin job logs in with the
-    new password.
+    new password. **A rotation whose reply was lost** (task p1.3-13): make the
+    repeater's answer go missing (power it off between the `password` line and
+    its echo, or rotate to a password the repeater will not take), so the
+    server marks the row `unverified`. The next admin job's log says `the claim
+    carries the new candidate of an unverified credential: logging in afresh
+    with it`, `login (admin) try 1: no reply`, then `reachability probe (blank
+    login): answered at read-only` and, after `try 2: no reply`, `the repeater
+    answered a blank login at read-only and then said nothing to the new
+    candidate …`; `jobs` counts **3** and `unauthorized`, the serial line says
+    `reported unauthorized (silentAfterReachable)`, the job's page shows
+    `reason: silentAfterReachable`, and the attempt after it is handed the old
+    candidate and logs in. With the repeater off the air instead, the probe
+    says `no reply` and the job is `unreachable` at 3, nothing noted.
 18. Staying up (task 06). Pull the router's uplink for ten minutes with a job
     in flight: the log backs off (`server: next attempt in 30 s (the 30 s
     step, jittered)`, then 60, then 120 and **120 again** — two minutes is the
