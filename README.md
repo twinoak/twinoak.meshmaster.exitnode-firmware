@@ -232,9 +232,12 @@ last call to meshmaster.dk was answered. Line three is when the server last
 heard from this board, `Heartbeat: none` until the first. Line four is what it
 is doing — `Job 1234 acl.set` while a job is on the air, `Idle, last 12:34:56`
 otherwise, `Idle, no jobs yet` before any — and when it is doing nothing
-because something is wrong, which of the three it is: `token revoked/wrong`
-after a 401, `no server: retry 30s` while backing off, `no wifi` when that is
-why. Line two's *no* says something is wrong; line four says what.
+because something is wrong, which of the four it is: `token revoked/wrong`
+after a 401, `no wifi` when the link is down, `no token: set it` when the link
+is up and no token has been set, `no server: retry 30s` while there is a wait
+before the next call — a doubling backoff, or the `Retry-After` a deploy's 503
+named. Line two's *no* says something is wrong; line four says what, and
+*Online* is `no` through a `Retry-After` hold as it is through a backoff.
 
 A **click on the PRG button** (GPIO 0) toggles the panel: off when it is on, on
 when it is off. `display.timeout` is the seconds of no button press after which

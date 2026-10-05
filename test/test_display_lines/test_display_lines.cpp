@@ -56,6 +56,7 @@ DisplayState working() {
   s.hasTime = true;
   s.nowEpoch = at("2026-10-04T12:03:14Z");
   s.wifiConnected = true;
+  s.serverConfigured = true;
   s.online = true;
   s.everHeartbeated = true;
   s.lastHeartbeatAtEpoch = at("2026-10-04T12:03:14Z");
@@ -155,7 +156,7 @@ TEST(LineFour, IdleWithTheNewestJobsTimeAndBeforeAnyJob) {
   EXPECT_EQ("Idle, no jobs yet", Frame(s).line[3]);
 }
 
-TEST(LineFour, TheThreeFaults) {
+TEST(LineFour, TheFourFaults) {
   DisplayState s = working();
 
   s.wifiConnected = false;
@@ -175,22 +176,53 @@ TEST(LineFour, TheThreeFaults) {
   s.tokenRefused = true;
   EXPECT_EQ(DisplayFault::TokenRefused, mm::faultOf(s));
   EXPECT_EQ("token revoked/wrong", Frame(s).line[3]);
+
+  // The state the first merged flash of task p1.2-11 leaves: WiFi up, no token, no heartbeat.
+  // It read `Idle, no jobs yet` under `Online: no` until task p1.3-12.
+  s = working();
+  s.serverConfigured = false;
+  s.online = false;
+  s.everHeartbeated = false;
+  s.hasLastJob = false;
+  EXPECT_EQ(DisplayFault::NoToken, mm::faultOf(s));
+  const Frame f(s);
+  EXPECT_EQ("WiFi: yes Online: no", f.line[1]);
+  EXPECT_EQ("Heartbeat: none", f.line[2]);
+  EXPECT_EQ("no token: set it", f.line[3]);
 }
 
-TEST(LineFour, ARefusedTokenComesFirstAndAMissingLinkBeforeTheBackoff) {
+TEST(LineFour, ARefusedTokenComesFirstThenTheLinkThenTheTokenThenTheBackoff) {
   DisplayState s = working();
   s.online = false;
   s.tokenRefused = true;
   s.wifiConnected = false;
+  s.serverConfigured = false;
   s.backingOff = true;
   s.retrySeconds = 45;
   EXPECT_EQ("token revoked/wrong", Frame(s).line[3]);
 
   s.tokenRefused = false;
-  EXPECT_EQ("no wifi", Frame(s).line[3]);
+  EXPECT_EQ("no wifi", Frame(s).line[3]) << "a board with no WiFi cannot use a token yet";
 
   s.wifiConnected = true;
+  EXPECT_EQ("no token: set it", Frame(s).line[3]) << "an unprovisioned board never gets as far as a backoff";
+
+  s.serverConfigured = true;
   EXPECT_EQ("no server: retry 45s", Frame(s).line[3]);
+}
+
+// The hold a deploy's 503 makes, which `online()` and `DisplayState.backingOff` both read from
+// `AgentLoop::retrySeconds()` since task p1.3-12: before it, a believed `Retry-After` moved no
+// counter, so the panel said `Online: yes` and `Idle` through the whole of it (finding 2).
+TEST(LineFour, ARetryAfterHoldReadsAsTheWaitItIs) {
+  DisplayState s = working();
+  s.online = false;      // AgentLoop::online() is false while the hold runs
+  s.backingOff = true;   // retrySeconds() > 0, and not one consecutive failure
+  s.retrySeconds = 45;   // the 503's own number
+  const Frame f(s);
+  EXPECT_EQ("WiFi: yes Online: no", f.line[1]);
+  EXPECT_EQ("Heartbeat: 12:03:14", f.line[2]) << "the heartbeat that did answer is still the last one";
+  EXPECT_EQ("no server: retry 45s", f.line[3]);
 }
 
 TEST(LineFour, AnOpenJobIsWhatItIsDoingWhateverElseIsWrong) {
@@ -245,13 +277,14 @@ TEST(TheFrame, NoLineIsEverWiderThanTheFont) {
     checkFrame(b);
   }
 
-  for (int mask = 0; mask < 32; mask++) {
+  for (int mask = 0; mask < 64; mask++) {
     DisplayState v = working();
     v.hasTime = (mask & 1) != 0;
     v.wifiConnected = (mask & 2) != 0;
     v.online = (mask & 4) != 0;
     v.everHeartbeated = (mask & 8) != 0;
     v.tokenRefused = (mask & 16) != 0;
+    v.serverConfigured = (mask & 32) != 0;
     v.publicKeyHex = (mask & 1) != 0 ? kKey : nullptr;
     checkFrame(v);
   }

@@ -79,8 +79,8 @@ class AgentLoop {
   void loop();
 
   // One heartbeat, from inside a job (task 06). A claim is run to the end before `claimAndRun`
-  // returns and a job is paced by the airtime budget, so a config.read of twenty transactions at
-  // two a minute is ten minutes and a region load is thirteen - during which, before this, no
+  // returns and a job is paced by the airtime budget, so a config.read of twenty-one transactions
+  // at two a minute is eleven minutes and a region load is thirteen - during which, before this, no
   // heartbeat could go and the exit node's page went *quiet* and then *offline* while the board
   // was working perfectly (the note tasks 03, 04 and 05 each left for this one). The job's own
   // waits are where the time is, so the pump that keeps the console and the OLED alive through
@@ -103,9 +103,14 @@ class AgentLoop {
   // first frame is drawn from main.cpp's setup() and the panel has no reason to know.
   bool everHeartbeated() const { return everHeartbeated_; }
   uint32_t lastHeartbeatAtEpoch() const { return lastHeartbeatAtEpoch_; }
-  // *Online* is the last call to MeshMaster having been answered: a heartbeat has happened,
-  // nothing has gone unanswered since, and the token has not been refused.
-  bool online() const { return everHeartbeated_ && counters_.consecutiveFailures == 0 && !halted_; }
+  // *Online* is the last call to MeshMaster having been answered and nothing standing between
+  // this board and the next call: a heartbeat has happened, nothing has gone unanswered since,
+  // the token has not been refused, and there is no wait running. The last of those is what a
+  // deploy's 503 makes: a believed `Retry-After` is deliberately **not** a consecutive failure
+  // (task p1.2-10, and the heartbeat's counters are unchanged by this), but a server that has
+  // said *come back in 45 s* has not answered either, so the panel must not read *Online: yes*
+  // through it (task p1.3-12).
+  bool online() const;
   // Seconds until the next attempt while backing off (or holding a 429's Retry-After); 0 when
   // the wait is over or there is none.
   uint32_t retrySeconds() const;

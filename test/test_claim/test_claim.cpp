@@ -539,15 +539,35 @@ TEST(Claim, TheConfigReadAndAclSetPayloadsAreRead) {
   ASSERT_TRUE(mm::parseClaimResponse(&empty[0], empty.size(), jobs, mm::kClaimMax, count, serverTime, err, sizeof err))
       << err;
   EXPECT_FALSE(jobs[0].hasConfigKeys);
-  std::string tooMany =
-      "{\"serverTime\":\"2026-09-18T10:00:03Z\",\"jobs\":[{\"id\":23,\"type\":\"config.read\",\"repeater\":{\"id\":17,"
-      "\"label\":\"x\",\"publicKey\":\"a1b2\"},\"credentialClass\":\"admin\",\"leaseUntil\":\"2026-09-18T10:02:03Z\","
-      "\"payload\":{\"keys\":[";
-  for (int i = 0; i <= mm::kMaxConfigKeys; i++) tooMany += std::string(i > 0 ? "," : "") + "\"k" + std::to_string(i) + "\"";
-  tooMany += "]}}]}";
+  // The cap is 32 since task p1.3-12: meshmaster.dk's task p4.9-102 makes the daily read carry
+  // every key the Configuration tab shows, about twenty-six on a V3 at v1.17, and twenty refused
+  // it. At the cap the claim parses whole; one past it is refused by name, which is the sentence
+  // the server reads.
+  const auto claimOfKeys = [](long long id, int keys) {
+    std::string text =
+        "{\"serverTime\":\"2026-09-18T10:00:03Z\",\"jobs\":[{\"id\":" + std::to_string(id) +
+        ",\"type\":\"config.read\",\"repeater\":{\"id\":17,"
+        "\"label\":\"x\",\"publicKey\":\"a1b2\"},\"credentialClass\":\"admin\",\"leaseUntil\":\"2026-09-18T10:02:03Z\","
+        "\"payload\":{\"keys\":[";
+    for (int i = 0; i < keys; i++) text += std::string(i > 0 ? "," : "") + "\"k" + std::to_string(i) + "\"";
+    return text + "]}}]}";
+  };
+
+  ASSERT_EQ(mm::kMaxConfigKeys, 32);
+  std::string atTheCap = claimOfKeys(23, mm::kMaxConfigKeys);
+  ASSERT_TRUE(
+      mm::parseClaimResponse(&atTheCap[0], atTheCap.size(), jobs, mm::kClaimMax, count, serverTime, err, sizeof err))
+      << err;
+  ASSERT_EQ(count, 1);
+  EXPECT_TRUE(jobs[0].hasConfigKeys);
+  EXPECT_EQ(jobs[0].configKeyCount, mm::kMaxConfigKeys);
+  EXPECT_STREQ(jobs[0].configKeys[0], "k0");
+  EXPECT_STREQ(jobs[0].configKeys[mm::kMaxConfigKeys - 1], "k31");
+
+  std::string tooMany = claimOfKeys(24, mm::kMaxConfigKeys + 1);
   EXPECT_FALSE(
       mm::parseClaimResponse(&tooMany[0], tooMany.size(), jobs, mm::kClaimMax, count, serverTime, err, sizeof err));
-  EXPECT_NE(std::string(err).find("more keys"), std::string::npos) << err;
+  EXPECT_STREQ(err, "a config.read asks for more keys than this firmware can read in one job");
 }
 
 // JobCredential.json is the one sample no real claim ever sends: all five fields at once,

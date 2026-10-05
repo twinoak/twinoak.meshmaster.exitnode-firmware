@@ -60,11 +60,22 @@ class JobLog {
 };
 
 // The scratch every job shares. Static, not automatic: the Arduino loop task has 8 KB of stack
-// and a neighbour list alone is more than that. A config read of the default list is the
-// largest result here - fifteen values, the ACL's 23 tokens, a raw line or two - and the data
-// buffer is sized for it with room over.
-constexpr size_t kDataCap = 4608;
-constexpr size_t kBodyCap = 6656;  // the data, the envelope and the log
+// and a neighbour list alone is more than that. A config read is the largest result here, and
+// since meshmaster.dk's task p4.9-102 the read it is asked for is the Configuration tab's whole
+// list - about twenty-six keys on a V3 at v1.17, `owner.info`'s 119 characters among them, the
+// regions listing, the ACL's 23 tokens and up to twelve raw lines for the keys that firmware
+// does not know. That is some 4.2 KB of JSON, which 4 608 bytes held only just; 8 192 holds it
+// twice over.
+//
+// It is **not** sized for the worst case the constants allow (some 10.9 KB unescaped, and
+// System.Text.Json's encoder can sextuple a byte), because that is a repeater answering 208
+// characters to every one of 32 keys and not a repeater. `writeConfigReadResult` degrades
+// instead - raw lines first, then trailing values, each said in the JSON - so the bound above is
+// what a real read needs and not what a read is allowed to need (ConfigRead.h).
+constexpr size_t kDataCap = 8192;
+constexpr size_t kBodyCap = 10240;  // the data, the envelope and the log
+static_assert(kDataCap >= kMinConfigReadResultCap, "the config read's result must always be writable");
+static_assert(kBodyCap > kDataCap + sizeof(JobLog), "the body carries the data, the envelope and the log");
 ClaimedJob g_jobs[kClaimMax];
 char g_data[kDataCap];
 char g_body[kBodyCap];
