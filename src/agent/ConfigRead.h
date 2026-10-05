@@ -20,8 +20,12 @@
 namespace mm {
 
 // The default `get` list, in the server's order: what is readable and is not a secret, with
-// `regions` and `acl` last - the two keys that are not a `get` at all.
-constexpr int kDefaultConfigKeyCount = 15;
+// `regions` and `acl` last - the two keys that are not a `get` at all. Sixteen since task
+// p1.3-12 put `agc.reset.interval` back where the server has it (fourteenth, before `regions`):
+// the list is `ConfigReadPayload.DefaultKeys` in meshmaster.dk's
+// `src/MeshMaster.Contracts/Payloads.cs` and nothing else, because a claim that carries no
+// `keys` is read against the server's own projection of its key table (CONFIGURATION §2, §3).
+constexpr int kDefaultConfigKeyCount = 16;
 extern const char* const kDefaultConfigKeys[kDefaultConfigKeyCount];
 
 // What is asked for after the keys, whatever the list: the firmware and the board, which the
@@ -39,11 +43,21 @@ int configReadTransactions(const char* const* keys, int count);
 // The bounds of a claim's `keys` and of a reply. A `get` reply is CommonCLI's 160-byte buffer;
 // the regions value is that listing and one line MeshMaster adds; the ACL is up to 23 tokens of
 // twelve hex characters, a colon and a level.
-constexpr int kMaxConfigKeys = 20;
+//
+// `kMaxConfigKeys` is **32** since task p1.3-12, and it is the number a claim is refused above:
+// meshmaster.dk's task p4.9-102 makes the daily read carry an explicit list of every key the
+// Configuration tab shows - about twenty-six on a V3 at v1.17 - and twenty refused it. It sizes
+// two things: `ClaimedJob::configKeys` (33 bytes a key) and `ConfigSnapshot::values`
+// (kMaxConfigValueLen + the key + two NULs, 241 bytes a slot).
+constexpr int kMaxConfigKeys = 32;
 constexpr size_t kMaxConfigKeyLen = 32;
 constexpr size_t kMaxConfigValueLen = 208;
 constexpr size_t kMaxAclValueLen = static_cast<size_t>(kAccessListMaxEntries) * 15;
-constexpr int kMaxConfigRawLines = 6;
+// The raw lines a snapshot keeps verbatim, and one slot beyond them for the count of what did
+// not fit. Twelve, not six: a V3 asked the full list at v1.17 answers `??` to the FEM gains and
+// to every other key its firmware does not know, and six of those were silently dropped.
+constexpr int kMaxConfigRawLines = 12;
+constexpr int kConfigRawSlots = kMaxConfigRawLines + 1;
 constexpr size_t kMaxConfigRawLen = 200;
 constexpr size_t kMaxConfigTextLen = 64;  // `ver` and `board`
 
@@ -62,8 +76,11 @@ struct ConfigSnapshot {
   bool hasAcl = false;
   char acl[kMaxAclValueLen + 1] = {0};
 
+  // `rawCount` counts the slots in use, the overflow note among them; `rawDropped` is how many
+  // lines are not in the list, which is what that note says out loud.
   int rawCount = 0;
-  char raw[kMaxConfigRawLines][kMaxConfigRawLen + 1] = {};
+  int rawDropped = 0;
+  char raw[kConfigRawSlots][kMaxConfigRawLen + 1] = {};
 
   char firmware[kMaxConfigTextLen + 1] = {0};
   char board[kMaxConfigTextLen + 1] = {0};
@@ -75,15 +92,32 @@ struct ConfigSnapshot {
 
   void clear();
   bool put(const char* key, const char* value);  // false when the table is full
-  bool addRaw(const char* line);                 // false when the lines are full
+  // Keep one raw line. False when the twelve are full: the line is not lost silently, it is
+  // counted, and the slot after the twelve becomes `<n> more raw line(s) ...` so a reader of
+  // the result knows the list is not everything the repeater said.
+  bool addRaw(const char* line);
   // How many keys were read, for the rule that silence on the ACL after keys were read is not
   // a failure (task p4-49): the values, the ACL not among them yet.
   int valuesRead() const { return count; }
 };
 
+// The smallest buffer `writeConfigReadResult` is ever handed: the skeleton with the ACL, the two
+// extras and `aclRestored` at their maximum and one cut note, so that a snapshot is always
+// written as *something* and a read that reached the repeater is never reported `failed` for
+// want of room. JobRunner's own buffer is far larger and asserts against this.
+constexpr size_t kMinConfigReadResultCap = 1024;
+
 // The result as ContractsJson writes ConfigReadResult: `values`, `raw`, then `firmware` and
 // `board` when read and `aclRestored` when it has a value. Returns the length, or 0 when it did
 // not fit.
+//
+// **It degrades rather than failing.** The unescaped worst case of the constants above is some
+// 10.9 KB (32 values at their maximum, the ACL at its maximum, twelve raw lines, the extras),
+// and System.Text.Json's encoder can turn one byte into six (a C0 control as a unicode
+// escape), so no buffer a board can afford holds every snapshot these bounds allow. When the
+// whole thing does not fit, the raw lines go first and the trailing values after them, and
+// what went is said as one more raw line: a long `owner.info` costs a raw line, never the
+// read.
 size_t writeConfigReadResult(const ConfigSnapshot& s, char* out, size_t cap);
 
 // ---------------------------------------------------------------------------------------------

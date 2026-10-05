@@ -43,6 +43,7 @@ char upperHex(char c) {
 DisplayFault faultOf(const DisplayState& state) {
   if (state.tokenRefused) return DisplayFault::TokenRefused;
   if (!state.wifiConnected) return DisplayFault::NoWifi;
+  if (!state.serverConfigured) return DisplayFault::NoToken;
   if (state.backingOff) return DisplayFault::Backoff;
   return DisplayFault::None;
 }
@@ -97,6 +98,11 @@ void renderLines(const DisplayState& state, char lines[kDisplayLines][kDisplayCo
       return;
     case DisplayFault::NoWifi:
       put(lines[3], "no wifi");
+      return;
+    case DisplayFault::NoToken:
+      // WiFi is up and there is nothing to call the server with: the state the first merged
+      // flash leaves, which used to read `Idle, no jobs yet` under `Online: no` (task p1.3-12).
+      put(lines[3], "no token: set it");
       return;
     case DisplayFault::Backoff: {
       // Three digits at most: the prefix is 17 characters of the font's 21. The backoff's own

@@ -7,9 +7,15 @@
 
 namespace mm {
 
+// `ConfigReadPayload.DefaultKeys`, in its order and complete: `agc.reset.interval` is the
+// fourteenth, before `regions` and `acl`, which is where CONFIGURATION §2's own paragraph on it
+// puts it ("it is on the default read list as the fourteenth key"). It is not a fixture - the
+// contract fixtures carry a `ConfigReadPayload` with a three-key list and not the default - so
+// `test_config_read` pins this against the literal and names the file it came from.
 const char* const kDefaultConfigKeys[kDefaultConfigKeyCount] = {
     "name",     "lat",  "lon",           "advert.interval", "flood.advert.interval", "repeat",  "dutycycle", "flood.max",
-    "flood.max.unscoped", "tx", "path.hash.mode", "multi.acks", "allow.read.only", "regions", "acl"};
+    "flood.max.unscoped", "tx", "path.hash.mode", "multi.acks", "allow.read.only", "agc.reset.interval", "regions",
+    "acl"};
 
 const char* const kConfigReadExtras[kConfigReadExtraCount] = {"ver", "board"};
 
@@ -58,7 +64,8 @@ void ConfigSnapshot::clear() {
   hasAcl = false;
   acl[0] = 0;
   rawCount = 0;
-  for (int i = 0; i < kMaxConfigRawLines; i++) raw[i][0] = 0;
+  rawDropped = 0;
+  for (int i = 0; i < kConfigRawSlots; i++) raw[i][0] = 0;
   firmware[0] = 0;
   board[0] = 0;
   hasAclRestored = false;
@@ -81,18 +88,33 @@ bool ConfigSnapshot::put(const char* key, const char* value) {
 }
 
 bool ConfigSnapshot::addRaw(const char* line) {
-  if (line == nullptr || rawCount >= kMaxConfigRawLines) return false;
-  std::snprintf(raw[rawCount], sizeof raw[rawCount], "%s", line);
-  rawCount++;
-  return true;
+  if (line == nullptr) return false;
+  if (rawCount < kMaxConfigRawLines) {
+    std::snprintf(raw[rawCount], sizeof raw[rawCount], "%s", line);
+    rawCount++;
+    return true;
+  }
+  // Full. The line itself is gone - there is nowhere to put 200 more characters - but the fact
+  // of it is not: the slot after the twelve counts what the list is missing, so the server
+  // reads a short list as a short list rather than as everything the repeater said.
+  rawDropped++;
+  std::snprintf(raw[kMaxConfigRawLines], sizeof raw[0], "raw: %d line(s) the repeater said did not fit this snapshot",
+                rawDropped);
+  rawCount = kConfigRawSlots;
+  return false;
 }
 
-size_t writeConfigReadResult(const ConfigSnapshot& s, char* out, size_t cap) {
+namespace {
+
+// One attempt at the result, with the first `values` values and the first `rawLines` raw lines.
+// When either is short of what the snapshot holds, one more raw line says so. 0 when it did not
+// fit, as the public writer's contract is.
+size_t writeResultAttempt(const ConfigSnapshot& s, int values, int rawLines, char* out, size_t cap) {
   JsonWriter w(out, cap);
   w.beginObject();
   w.key("values");
   w.beginObject();
-  for (int i = 0; i < s.count; i++) {
+  for (int i = 0; i < values; i++) {
     w.key(s.values[i].key);
     w.string(s.values[i].value);
   }
@@ -103,9 +125,16 @@ size_t writeConfigReadResult(const ConfigSnapshot& s, char* out, size_t cap) {
   w.endObject();
   w.key("raw");
   w.beginArray();
-  for (int i = 0; i < s.rawCount; i++) {
+  for (int i = 0; i < rawLines; i++) {
     w.comma();
     w.string(s.raw[i]);
+  }
+  if (values < s.count || rawLines < s.rawCount) {
+    char cut[kMaxConfigRawLen + 1];
+    std::snprintf(cut, sizeof cut, "result: %d value(s) and %d raw line(s) left out, it did not fit %lu bytes",
+                  s.count - values, s.rawCount - rawLines, static_cast<unsigned long>(cap));
+    w.comma();
+    w.string(cut);
   }
   w.endArray();
   if (s.firmware[0] != 0) {
@@ -122,6 +151,25 @@ size_t writeConfigReadResult(const ConfigSnapshot& s, char* out, size_t cap) {
   }
   w.endObject();
   return w.overflowed() ? 0 : w.length();
+}
+
+}  // namespace
+
+size_t writeConfigReadResult(const ConfigSnapshot& s, char* out, size_t cap) {
+  // The whole thing first: every snapshot a real repeater makes fits, and that attempt is the
+  // one the contract fixture is compared byte for byte against. Then less of it - the raw lines,
+  // which are what the repeater could not parse, and only then the values, which are what it
+  // could - until it fits. The loops are bounded by the snapshot's own counts and the last of
+  // them writes no values and no raw lines at all, which is inside kMinConfigReadResultCap.
+  for (int lines = s.rawCount; lines >= 0; lines--) {
+    const size_t n = writeResultAttempt(s, s.count, lines, out, cap);
+    if (n > 0) return n;
+  }
+  for (int values = s.count - 1; values >= 0; values--) {
+    const size_t n = writeResultAttempt(s, values, 0, out, cap);
+    if (n > 0) return n;
+  }
+  return 0;
 }
 
 const char* cliReplyValue(const char* reply) {

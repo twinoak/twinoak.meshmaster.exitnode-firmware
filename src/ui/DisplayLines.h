@@ -33,6 +33,7 @@ enum class DisplayFault : uint8_t {
   None,
   TokenRefused,  // a 401: nothing is sent until the token is set again (AgentLoop::halted)
   NoWifi,        // the link is down, so the server cannot be reached either
+  NoToken,       // the link is up and there is no token to use it with (AgentClient::configured)
   Backoff,       // the link is up and meshmaster.dk is not answering; counting down
 };
 
@@ -59,12 +60,22 @@ struct DisplayState {
   bool hasLastJob = false;
   uint32_t lastJobAtEpoch = 0;
   bool tokenRefused = false;   // AgentLoop::halted()
-  bool backingOff = false;     // AgentLoop::counters().consecutiveFailures > 0
+  // The server is set: a URL and a token (AgentClient::configured()). False is a board nobody
+  // has provisioned yet - exactly what the first merged flash of task p1.2-11 leaves behind -
+  // and the line says so rather than calling it idle.
+  bool serverConfigured = false;
+  // A wait before the next call, whatever its reason: a doubling backoff, or the Retry-After a
+  // deploy's 503 named. `AgentLoop::retrySeconds() > 0` and not the failure count, because a
+  // believed Retry-After is deliberately not a consecutive failure (task p1.2-10).
+  bool backingOff = false;
   uint32_t retrySeconds = 0;   // AgentLoop::retrySeconds(), the countdown to the next attempt
 };
 
-// Which of the three faults line four names, or None. The order is task 06's: a refused token
-// first (nothing is sent at all), then the missing link, then the server that is not answering.
+// Which of the four faults line four names, or None. The order is task 06's, with task p1.3-12's
+// fourth in the middle of it: a refused token first (nothing is sent at all), then the missing
+// link, then a link with no token to use it with, then the server that is not answering. *No
+// token* is below *no wifi* because a board with no WiFi cannot use a token yet, and above the
+// backoff because an unprovisioned board never gets as far as one.
 DisplayFault faultOf(const DisplayState& state);
 
 // The frame. Every line is NUL-terminated and at most kDisplayWidth characters long.

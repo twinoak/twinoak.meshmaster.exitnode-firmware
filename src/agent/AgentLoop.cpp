@@ -554,6 +554,13 @@ void AgentLoop::describe(char* out, size_t cap) const {
                 static_cast<unsigned long>(ring_.dropped()));
 }
 
+bool AgentLoop::online() const {
+  if (!everHeartbeated_ || counters_.consecutiveFailures != 0 || halted_) return false;
+  // `holdUntil_` is set to `millis()` by every success, so `elapsed` is true the moment a call
+  // is answered and this is only ever false while a wait is actually running.
+  return elapsed(millis(), holdUntil_);
+}
+
 uint32_t AgentLoop::retrySeconds() const {
   const int32_t left = static_cast<int32_t>(holdUntil_ - millis());
   return left > 0 ? static_cast<uint32_t>(left) / 1000 : 0;

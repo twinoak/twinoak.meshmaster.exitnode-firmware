@@ -110,7 +110,7 @@ A job is one line per step, and the same text goes to the server as the job's
 [12:31:27] I jobs: job 12346 telemetry for repeater 17 "Risskov Water Tower" (acl)
 [12:31:31] I jobs: job 12346: ok after 1 transaction(s)
 [13:00:04] I jobs: job 12400 config.read for repeater 17 "Risskov Water Tower" (admin)
-[13:04:51] I jobs: job 12400: ok after 20 transaction(s)
+[13:04:51] I jobs: job 12400: ok after 21 transaction(s)
 ```
 
 The job's own log, which the server shows on the job's page, says the same in
@@ -173,7 +173,7 @@ Idle, last 12:34:56
 | Line | What it says |
 |---|---|
 | 1 | the first four characters of the companion key - the prefix meshmaster.dk shows this exit node by - and the clock right-aligned, or `no time` until it is set. `no identity` alone when the radio made none. The IP address is not here; `status` has it |
-| 2 | `WiFi` is the link, `Online` is *the last call to meshmaster.dk was answered*: a heartbeat has happened, nothing has gone unanswered since, and the token has not been refused |
+| 2 | `WiFi` is the link, `Online` is *the last call to meshmaster.dk was answered and the next one is not waiting*: a heartbeat has happened, nothing has gone unanswered since, the token has not been refused, and no backoff or `Retry-After` hold is running |
 | 3 | when the server last heard from this board, `Heartbeat: none` until the first |
 | 4 | what it is doing, and when it is doing nothing, why - the table below |
 
@@ -186,8 +186,9 @@ something is wrong; line four says what.
 | `Idle, last 12:34:56` | nothing is running; the newest job ended then |
 | `Idle, no jobs yet` | nothing has run since this board started |
 | `token revoked/wrong` | a 401: nothing is sent until `set meshmaster.token <token>` or a reboot |
-| `no server: retry 30s` | the link is up and meshmaster.dk is not answering; the countdown is the next attempt |
 | `no wifi` | the link is down, so the server cannot be reached either |
+| `no token: set it` | the link is up and `meshmaster.token` is unset: `set meshmaster.token <token>` |
+| `no server: retry 30s` | the link is up and there is a wait before the next call - a backoff, or a 503's own `Retry-After` through a deploy - and the countdown is how long |
 
 The radio keeps running and hearing through all of it: the mesh is pumped by
 the same loop, the adverts go into the ring, and they are posted when the
@@ -243,8 +244,8 @@ server comes back. What the four lines say is a pure function of a struct
     entry set is this exit node's own: the session is now read-only`), and the
     verify's `status` at class `acl` logs in blank. `sessions` between the steps
     shows the one session and its level moving from admin to read-only.
-12. *Read the configuration* on the repeater's page: 18 transactions and the
-    login, 20 in all with the restore, and `log.frames on` shows the last CLI
+12. *Read the configuration* on the repeater's page: 19 transactions and the
+    login, 21 in all with the restore, and `log.frames on` shows the last CLI
     frame sent is `setperm <this board's key> 1`. The next read's `acl` value
     lists the board's key at level 1 (`<12 hex>:1`), and the result's
     `aclRestored` is `true`. With `set log.frames on` the login frame prints as

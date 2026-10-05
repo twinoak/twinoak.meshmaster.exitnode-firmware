@@ -376,7 +376,11 @@ void fillOled(char lines[mm::Oled::kLines][mm::Oled::kCols]) {
     state.lastJobAtEpoch = last->atEpoch;
   }
   state.tokenRefused = agent.halted();
-  state.backingOff = agent.counters().consecutiveFailures > 0;
+  state.serverConfigured = server.configured();
+  // Any wait before the next call, not only a doubling one: a 503 that named Retry-After is by
+  // design not a consecutive failure (task p1.2-10), and the panel still has to say *retry*
+  // through a deploy (task p1.3-12).
+  state.backingOff = agent.retrySeconds() > 0;
   state.retrySeconds = agent.retrySeconds();
 
   mm::renderLines(state, lines);

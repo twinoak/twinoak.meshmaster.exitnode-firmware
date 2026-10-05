@@ -42,6 +42,18 @@ every merged flash of `v0.1.1` erased a provisioned board's settings (bench,
 4 October 2026). A merged image ends where the application ends; NVS above the
 application is NVS a merged image cannot reach.
 
+**The fill stops at `otadata`, and `otadata` stays where the framework put
+it.** The `0xFF` runs from `0x9000` to `0xDFFF` and no further, because
+`FLASH_EXTRA_IMAGES` names the framework's own `boot_app0.bin` at `0xE000`:
+the same merge writes its 8 192 bytes over both `otadata` sectors, and what
+lands there is the record that says *boot `app0`* - which is exactly what the
+bootloader wants to find on a board that has never done an OTA. (Checked on
+this repository's own merged V3 image, 5 October 2026: `0x9000`-`0xDFFF` is
+all `0xFF`, and `0xE000`-`0xFFFF` is `boot_app0.bin` byte for byte.) So
+`otadata` is not a casualty of the merge and needs no protecting; moving it
+above the application to "protect" it would leave that write landing in a hole
+and the bootloader reading an erased `otadata`.
+
 What **does not move**, and why it is held in CI rather than promised:
 
 - **`spiffs`** keeps the default's offset and size on both boards. The identity

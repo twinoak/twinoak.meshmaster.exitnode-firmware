@@ -97,7 +97,9 @@ Idle, last 12:34:56        <- what it is doing, or why it is doing nothing
 
 Line one is `no identity` alone if the radio did not come up - the console
 still works and the board hears nothing. Line two is the glance: *WiFi* is the
-link, *Online* is the last call having been answered. Line three is
+link, *Online* is the last call having been answered **and** nothing waiting
+before the next - so a deploy's 503 that says *come back in 45 s* makes it
+`no`, because that is a wait and not an answer. Line three is
 `Heartbeat: none` until the first one.
 
 **Line four is the one to read when something is wrong.** Line two's *no* says
@@ -109,11 +111,16 @@ something is wrong; line four says what:
 | `Idle, last 12:34:56` | nothing is running; the newest job ended then | nothing |
 | `Idle, no jobs yet` | nothing has run since this board started | nothing, unless line two says *no* |
 | `no wifi` | the WiFi link is down, so the server cannot be reached either | `status` says how far the retry has got; §6 |
-| `no server: retry 45s` | the link is up and meshmaster.dk is not answering | §6; the countdown is the next attempt |
+| `no token: set it` | the link is up and no agent token has been set | `set meshmaster.token <token>` from the exit node's page; §2 |
+| `no server: retry 45s` | the link is up and there is a wait before the next call | §6; the countdown is the next attempt, whether it is a backoff or a 503's `Retry-After` |
 | `token revoked/wrong` | the token was revoked, or is wrong | §6; nothing is sent until it is set again |
 
 A board that is up but unprovisioned shows `WiFi: no Online: no` and `no wifi`:
-there is no SSID to join. The console's `status` and `server` have everything
+there is no SSID to join. Give it one and the line becomes `no token: set it`
+until the token is set, which is the state the first merged flash leaves
+behind. Through a deploy of meshmaster.dk the line reads
+`no server: retry Ns` and *Online* is `no` - the server answered 503 and said
+when to come back, which is a wait and not an answer. The console's `status` and `server` have everything
 the lines leave out - the IP address, the certificate root, the config call's
 own answer, the poll interval.
 
