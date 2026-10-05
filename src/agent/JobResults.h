@@ -55,6 +55,19 @@ size_t writeTraceResult(const TraceHop* hops, int count, char* out, size_t cap);
 // guest" from "the entry is gone", which carries no data at all.
 size_t writeLoginBelowClassResult(const char* loggedInAs, const char* needed, char* out, size_t cap);
 
+//   LoginSilentResult(string Reason, string? ProbeAnsweredAs)
+//
+// The data of an `unauthorized` whose login was *silent* right after a blank login the repeater
+// answered (task p1.3-13; meshmaster.dk's task p4.7-95 and CONFIGURATION §7 step 4): the one
+// case where a silence is reported as the refusal it is, during an unverified credential
+// rotation. `reason` is always `silentAfterReachable` - the one reason the record has
+// (LoginSilentReasons) - and the server reads it and treats it exactly as a refusal, so the
+// spelling is the rail. `probeAnsweredAs` is the tier the blank login was answered at (`guest`,
+// `read-only`, `read-write`, `admin`) or `refused` for the legacy frame; nullptr leaves it out,
+// as the record's null does.
+extern const char kLoginSilentAfterReachable[];
+size_t writeLoginSilentResult(const char* probeAnsweredAs, char* out, size_t cap);
+
 //   DiscoverResult(PathInfo? Path, string? LoggedInAs); PathInfo(IReadOnlyList<string> Hops, string? Source,
 //                  DateTime? LearnedAt)
 //   AclSetResult(string PublicKey, int Level, bool Confirmed, string? Reply)

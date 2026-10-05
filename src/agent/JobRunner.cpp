@@ -296,6 +296,36 @@ JobRunner::LoginResult JobRunner::loginOnce(const ClaimedJob& job, Context& ctx,
   return LoginResult::Ok;
 }
 
+// The login sequence's exchange over this runner (agent/LoginSequence.h): a login with the job's
+// material is loginOnce(), the blank login between the tries is probeReachable(), and the log is
+// the job's. The sequence decides what a silence means; this puts each login on the air once.
+class JobRunner::LoginOnTheAir : public LoginExchange {
+ public:
+  LoginOnTheAir(JobRunner& runner, const ClaimedJob& job, Context& ctx, const char* material)
+      : runner_(runner), job_(job), ctx_(ctx), material_(material) {}
+
+  LoginTry login(int attempt) override {
+    char what[40];
+    std::snprintf(what, sizeof what, "login (%s) try %d", credentialClassName(job_.credentialClass), attempt);
+    return runner_.loginOnce(job_, ctx_, material_, what);
+  }
+
+  ProbeAnswer probe(uint8_t& role) override {
+    if (!runner_.probeReachable(job_, ctx_)) return ProbeAnswer::NoReply;
+    if (ctx_.probeRefused) return ProbeAnswer::Refused;
+    role = ctx_.probeAnsweredRole;
+    return ProbeAnswer::Answered;
+  }
+
+  void log(const char* line) override { g_log.add("%s", line); }
+
+ private:
+  JobRunner& runner_;
+  const ClaimedJob& job_;
+  Context& ctx_;
+  const char* material_;
+};
+
 Outcome JobRunner::ensureSession(const ClaimedJob& job, Context& ctx) {
   if (job.credentialClass == CredentialClass::None) return Outcome::Ok;  // a trace asks nobody
 
@@ -312,20 +342,64 @@ Outcome JobRunner::ensureSession(const ClaimedJob& job, Context& ctx) {
   const char* material = loginMaterial(job);
   if (material == nullptr) return Outcome::Unauthorized;
 
-  for (int attempt = 1; attempt <= 2; attempt++) {
-    char what[40];
-    std::snprintf(what, sizeof what, "login (%s) try %d", credentialClassName(job.credentialClass), attempt);
-    switch (loginOnce(job, ctx, material, what)) {
-      case LoginResult::Ok: return Outcome::Ok;
-      case LoginResult::Refused: return Outcome::Unauthorized;
-      case LoginResult::Failed: return Outcome::Failed;
-      case LoginResult::Timeout: return Outcome::Timeout;
-      case LoginResult::NoReply: break;  // once more
-    }
+  // The two tries, and on the one path that needs it the blank login between them (task
+  // p1.3-13): a job carrying the `new` candidate of an unverified rotation. The policy is
+  // agent/LoginSequence.h's, on a host; this puts its logins on the air.
+  const bool probes = probesBetweenTries(job.credentialCandidate, material);
+  LoginOnTheAir exchange(*this, job, ctx, material);
+  const LoginVerdict verdict = loginSequence(exchange, probes);
+  if (verdict.silentAfterReachable) {
+    ctx.silentAfterReachable = true;
+    LOG_W("jobs: job %lld: the repeater answered a blank login at %s and then said nothing to the new candidate; "
+          "reported unauthorized (silentAfterReachable)",
+          job.id, probeAnsweredAs(verdict));
   }
-  // Two tries and then `unreachable`, which is what the .NET agent reports for the same: on
-  // stock firmware a refused key is silence, and silence is all a board can see.
-  return Outcome::Unreachable;
+  return verdict.outcome;
+}
+
+bool JobRunner::probeReachable(const ClaimedJob& job, Context& ctx) {
+  ctx.probeRefused = false;
+  ctx.probeAnsweredRole = 0;
+  if (!spend(job, ctx)) {
+    g_log.add("reachability probe (blank login): not sent, the lease ran out");
+    return false;
+  }
+  uint32_t tag = 0;
+  const SendResult sent = mesh_->sendLogin("", tag);
+  if (sent == SendResult::Failed) {
+    g_log.add("reachability probe (blank login): the packet could not be built");
+    return false;
+  }
+  const char* how = sent == SendResult::Direct ? "direct" : "flood";
+  if (!mesh_->awaitReply(tag, loginWaitMs(job), pump_)) {
+    g_log.add("reachability probe (blank login): no reply (%s)", how);
+    g_log.add("the blank login was not answered either: nothing is known about the password - the repeater is off "
+              "the air, or it has a guest password set and no entry for this exit node's key (task p4.7-95)");
+    LOG_I("jobs: job %lld: reachability probe (blank login): no reply; nothing is known about the password", job.id);
+    return false;
+  }
+  // No session is stored from this reply, whatever it says: the next job is a candidate job and
+  // logs in afresh, and a session another login opened would make its verdict a lie.
+  const MeshReply& reply = mesh_->reply();
+  LoginReply login;
+  if (reply.kind != MeshReply::Kind::Response || !parseLoginReply(reply.data, reply.len, login)) {
+    ctx.probeRefused = true;
+    g_log.add("reachability probe (blank login): refused (%s)", how);
+    g_log.add("the repeater is on the air: it refused the blank login, so a silence to the new candidate right after "
+              "it is a refusal (task p4.7-95)");
+    LOG_I("jobs: job %lld: reachability probe (blank login): refused; the repeater is on the air", job.id);
+    return true;
+  }
+  const uint8_t permissions = login.hasAclPermissions ? login.aclPermissions : login.role();
+  ctx.probeAnsweredRole = static_cast<uint8_t>(permissions & kPermRoleMask);
+  const char* tier = permissionName(ctx.probeAnsweredRole);
+  g_log.add("reachability probe (blank login): answered at %s%s (%s)", tier, login.legacy ? " (a legacy reply)" : "",
+            how);
+  g_log.add("the repeater is on the air: it answered the blank login at %s, so a silence to the new candidate right "
+            "after it is a refusal (task p4.7-95)",
+            tier);
+  LOG_I("jobs: job %lld: reachability probe (blank login): answered at %s; the repeater is on the air", job.id, tier);
+  return true;
 }
 
 // ------------------------------------------------------------------ one exchange
@@ -1437,6 +1511,12 @@ int JobRunner::claimAndRun() {
     if (dataLen == 0 && outcome == Outcome::Unauthorized && ctx.grantedBelowClass) {
       dataLen = writeLoginBelowClassResult(permissionName(ctx.grantedRole),
                                            permissionName(roleNeededFor(job.credentialClass)), g_data, kDataCap);
+    } else if (dataLen == 0 && outcome == Outcome::Unauthorized && ctx.silentAfterReachable) {
+      // The candidate's silence right after a blank login the repeater answered (task p1.3-13):
+      // the server reads `reason` and treats it exactly as a refusal, notes the candidate
+      // refused, and hands the next attempt the old one (CONFIGURATION §7 step 4).
+      dataLen = writeLoginSilentResult(
+          ctx.probeRefused ? kProbeAnsweredRefused : permissionName(ctx.probeAnsweredRole), g_data, kDataCap);
     }
 
     // The path the mesh holds *after* the exchange, which is the claim's own unless a flooded

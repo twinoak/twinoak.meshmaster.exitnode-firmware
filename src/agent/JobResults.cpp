@@ -149,6 +149,21 @@ size_t writeLoginBelowClassResult(const char* loggedInAs, const char* needed, ch
   return w.overflowed() ? 0 : w.length();
 }
 
+const char kLoginSilentAfterReachable[] = "silentAfterReachable";
+
+size_t writeLoginSilentResult(const char* probeAnsweredAs, char* out, size_t cap) {
+  JsonWriter w(out, cap);
+  w.beginObject();
+  w.key("reason");
+  w.string(kLoginSilentAfterReachable);
+  if (probeAnsweredAs != nullptr) {
+    w.key("probeAnsweredAs");
+    w.string(probeAnsweredAs);
+  }
+  w.endObject();
+  return w.overflowed() ? 0 : w.length();
+}
+
 const char kPathSourceLogin[] = "login";
 const char kPathSourceDiscovery[] = "discovery";
 
