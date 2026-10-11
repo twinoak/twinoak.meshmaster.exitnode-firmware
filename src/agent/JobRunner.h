@@ -201,7 +201,10 @@ class JobRunner {
   Outcome learned(const ClaimedJob& job, Context& ctx, LoginResult from, const char* source, size_t& dataLen);
 
   // The login material of the job's class: the password the claim carried, "" for the ACL login
-  // (class acl and none), nullptr when the class needs one and the claim carried none.
+  // (class acl and none) and for a guest-class job the claim carried no password for - the guest
+  // door's blank login, which a repeater with no guest password answers at guest (task p1.4-14) -
+  // and nullptr only at class admin with no admin password, because there is no admin login
+  // without one.
   const char* loginMaterial(const ClaimedJob& job) const;
   // One login: counted, logged, the session bookkeeping a reply implies, and no policy beyond
   // that. ensureSession() is this twice; a discover is this once, for the path.

@@ -211,32 +211,15 @@ bool JobRunner::spend(const ClaimedJob& job, Context& ctx, bool escape) {
 // ------------------------------------------------------------------ the login
 
 const char* JobRunner::loginMaterial(const ClaimedJob& job) const {
-  switch (job.credentialClass) {
-    case CredentialClass::Admin:
-      if (!job.credential.hasAdminPassword) {
-        g_log.add("the claim carried no admin material; nothing to log in with");
-        return nullptr;
-      }
-      if (job.credential.adminPasswordCut) {
-        g_log.add("the admin password is longer than %u bytes; the first %u are sent, as a companion sends them",
-                  static_cast<unsigned>(kMaxPasswordLen), static_cast<unsigned>(kMaxPasswordLen));
-      }
-      return job.credential.adminPassword;
-    case CredentialClass::Guest:
-      if (!job.credential.hasGuestPassword) {
-        g_log.add("the claim carried no guest material; nothing to log in with");
-        return nullptr;
-      }
-      if (job.credential.guestPasswordCut) {
-        g_log.add("the guest password is longer than %u bytes; the first %u are sent, as a companion sends them",
-                  static_cast<unsigned>(kMaxPasswordLen), static_cast<unsigned>(kMaxPasswordLen));
-      }
-      return job.credential.guestPassword;
-    default:
-      // Empty material at class none or acl is not missing material: it is the ACL login, which
-      // offers the repeater our own key and nothing else.
-      return "";
-  }
+  // Which material a class logs in with - the password, the blank login of `acl`, `none` and the
+  // guest door, or nothing at all at `admin` - is agent/LoginSequence.h's decision, on a host, so
+  // that every branch of it is walked natively (test/test_rotation_probe) rather than held on
+  // this file's text. This puts its one line into the job's log, and no log line ever takes the
+  // value as an argument.
+  char note[kLoginNoteCap] = {0};
+  const char* material = loginMaterialFor(job, note, sizeof note);
+  if (note[0] != '\0') g_log.add("%s", note);
+  return material;
 }
 
 JobRunner::LoginResult JobRunner::loginOnce(const ClaimedJob& job, Context& ctx, const char* material,
@@ -743,8 +726,10 @@ Outcome JobRunner::learned(const ClaimedJob& job, Context& ctx, LoginResult from
     return dataLen > 0 ? Outcome::Unauthorized : Outcome::Failed;
   }
   if (ctx.hasSession) {
-    g_log.add("the admin session is open for %lu s: the next job for this repeater logs in again only if it has gone",
-              static_cast<unsigned long>(SessionStore::kLifetimeMs / 1000));
+    // The session's own tier, not the word "admin": a discover at the guest door opens a guest
+    // one (task p1.4-14), and the association step reads the level the reply granted.
+    g_log.add("the %s session is open for %lu s: the next job for this repeater logs in again only if it has gone",
+              permissionName(ctx.sessionRole), static_cast<unsigned long>(SessionStore::kLifetimeMs / 1000));
     dataLen = writeDiscoverResult(true, g_pathPtrs, hopCount, source, learnedAt, permissionName(ctx.sessionRole),
                                   g_data, kDataCap);
     return dataLen > 0 ? Outcome::Ok : Outcome::Failed;
@@ -764,7 +749,10 @@ Outcome JobRunner::runDiscover(const ClaimedJob& job, Context& ctx, size_t& data
   // path-discovery request is what a v1.17.1 repeater ten metres away forwarded twice and never
   // answered, so it is the last resort. Which login (task p3.5-40): the admin password, because
   // a login with none is the ACL login, and a repeater that has not granted our key an entry
-  // answers that with nothing at all.
+  // answers that with nothing at all. At class `guest` - the guest door's pairing step, which
+  // the server sends at that class since its task p4.7-94 (task p1.4-14) - it is the guest
+  // password the claim carried, or, for a pair the door made at its empty form, the blank login
+  // of the empty door itself, which a repeater with no guest password answers at guest.
   const char* material = loginMaterial(job);
   if (material != nullptr) {
     if (mesh_->hasPath()) {

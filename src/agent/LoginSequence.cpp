@@ -9,6 +9,47 @@ namespace mm {
 
 const char kProbeAnsweredRefused[] = "refused";
 
+namespace {
+
+void note(char* out, size_t cap, const char* text) {
+  if (out == nullptr || cap == 0) return;
+  std::snprintf(out, cap, "%s", text);
+}
+
+void noteCut(char* out, size_t cap, const char* which) {
+  if (out == nullptr || cap == 0) return;
+  std::snprintf(out, cap, "the %s password is longer than %u bytes; the first %u are sent, as a companion sends them",
+                which, static_cast<unsigned>(kMaxPasswordLen), static_cast<unsigned>(kMaxPasswordLen));
+}
+
+}  // namespace
+
+const char* loginMaterialFor(const ClaimedJob& job, char* out, size_t cap) {
+  if (out != nullptr && cap > 0) out[0] = '\0';
+  switch (job.credentialClass) {
+    case CredentialClass::Admin:
+      if (!job.credential.hasAdminPassword) {
+        note(out, cap, "the claim carried no admin material; nothing to log in with");
+        return nullptr;
+      }
+      if (job.credential.adminPasswordCut) noteCut(out, cap, "admin");
+      return job.credential.adminPassword;
+    case CredentialClass::Guest:
+      if (!job.credential.hasGuestPassword) {
+        note(out, cap,
+             "no guest password in the claim: the blank login, which a repeater with no guest password answers at "
+             "guest");
+        return "";
+      }
+      if (job.credential.guestPasswordCut) noteCut(out, cap, "guest");
+      return job.credential.guestPassword;
+    default:
+      // Empty material at class none or acl is not missing material either: it is the ACL login,
+      // which offers the repeater our own key and nothing else.
+      return "";
+  }
+}
+
 bool probesBetweenTries(const char* credentialCandidate, const char* material) {
   return credentialCandidate != nullptr && std::strcmp(credentialCandidate, "new") == 0 && material != nullptr &&
          material[0] != '\0';
