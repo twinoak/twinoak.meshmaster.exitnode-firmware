@@ -77,8 +77,19 @@ bool typeAllowsClass(const char* type, CredentialClass c) {
       std::strcmp(type, "neighbours") == 0) {
     return c == CredentialClass::Guest || c == CredentialClass::Acl || c == CredentialClass::Admin;
   }
-  // discover, acl.set, config.read, and everything that writes: the admin password, and nothing
-  // less.
+  // `discover` at the guest door. The server sends the pairing step of a guest pair at class
+  // `guest` since its task p4.7-94 (`JobTypes.CredentialClasses`: `Discover => [Guest, Admin]`),
+  // because a guest login teaches the path like any other and a repeater whose owner never set a
+  // guest password answers a blank one *at guest* (DECISIONS A-4, task p4.5-81) - and this board
+  // answered `unsupported` where the .NET agent logged in, which ended meshmaster.dk's
+  // association 9 `failed` on 11 October 2026 before anything went on the air. `admin` is still
+  // the class a discover nobody chose one for gets (`LowestCredentialClass`), and `acl` and
+  // `none` stay refused: at either the login carries no password, which is the ACL login, and a
+  // repeater that has not granted our key an entry answers that with silence (task p3.5-40).
+  if (std::strcmp(type, "discover") == 0) {
+    return c == CredentialClass::Guest || c == CredentialClass::Admin;
+  }
+  // acl.set, config.read, and everything that writes: the admin password, and nothing less.
   return c == CredentialClass::Admin;
 }
 

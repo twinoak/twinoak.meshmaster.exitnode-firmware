@@ -362,6 +362,83 @@ TEST(Claim, TheReadsRunAtGuestAclAndAdmin) {
   EXPECT_NE(std::string(why).find("class guest"), std::string::npos) << why;
 }
 
+// `discover` at the guest door (task p1.4-14). The server sends the pairing step of a guest pair
+// at class `guest` since its task p4.7-94 (`JobTypes.CredentialClasses`: `Discover => [Guest,
+// Admin]`), because a guest login teaches the path like any other and a repeater whose owner never
+// set a guest password answers a blank one at guest; this board answered `unsupported` where the
+// .NET agent logged in, which ended meshmaster.dk's association 9 `failed` on 11 October 2026
+// before anything went on the air. `acl` and `none` stay refused, and so does everything else
+// this firmware answers to admin alone.
+TEST(Claim, DiscoverRunsAtGuestAndAtAdminAndAtNothingElse) {
+  std::string reply = recordedClaim();
+  mm::ClaimedJob jobs[mm::kClaimMax];
+  int count = 0;
+  uint32_t serverTime = 0;
+  char err[96] = {0};
+  ASSERT_TRUE(mm::parseClaimResponse(&reply[0], reply.size(), jobs, mm::kClaimMax, count, serverTime, err, sizeof err))
+      << err;
+  char why[200] = {0};
+
+  mm::ClaimedJob job = jobs[1];
+  std::snprintf(job.type, sizeof job.type, "discover");
+  // The guest door makes no grant, so the claim carries no `acl` level for such a pair.
+  job.hasAclLevel = false;
+  job.aclLevel = 0;
+  for (mm::CredentialClass c : {mm::CredentialClass::Guest, mm::CredentialClass::Admin}) {
+    job.credentialClass = c;
+    EXPECT_TRUE(mm::canRun(job, why, sizeof why)) << "discover at " << mm::credentialClassName(c) << ": " << why;
+  }
+  for (mm::CredentialClass c : {mm::CredentialClass::Acl, mm::CredentialClass::None}) {
+    job.credentialClass = c;
+    EXPECT_FALSE(mm::canRun(job, why, sizeof why)) << "discover at " << mm::credentialClassName(c);
+    EXPECT_NE(std::string(why).find("cannot run at class"), std::string::npos) << why;
+  }
+
+  // The grant rule stands over the new class as it does over `neighbours`: a guest login from a
+  // key that holds a grant would demote the entry, so a claim carrying both is refused here.
+  job.credentialClass = mm::CredentialClass::Guest;
+  job.hasAclLevel = true;
+  job.aclLevel = 1;
+  EXPECT_FALSE(mm::canRun(job, why, sizeof why));
+  EXPECT_NE(std::string(why).find("grant"), std::string::npos) << why;
+
+  // And the two reads beside it in task 04 are untouched: the admin password, and nothing less.
+  for (const char* type : {"acl.set", "config.read"}) {
+    mm::ClaimedJob other = jobs[1];
+    std::snprintf(other.type, sizeof other.type, "%s", type);
+    other.hasAclLevel = false;
+    other.credentialClass = mm::CredentialClass::Guest;
+    EXPECT_FALSE(mm::canRun(other, why, sizeof why)) << type << " at guest";
+    EXPECT_NE(std::string(why).find("class guest"), std::string::npos) << why;
+  }
+}
+
+// What the server actually sends for a pair the guest door made at its empty form: a job at class
+// `guest` with **no `credential` object at all** (`AgentProtocol`: "the job goes out with none and
+// the agent logs in blank"). It parses to no password, no `acl` level - so the grant rule above
+// cannot trip on it - and it runs.
+TEST(Claim, AGuestJobTheServerSentWithNoCredentialAtAllIsRunnable) {
+  std::string reply =
+      "{\"serverTime\":\"2026-10-11T18:30:00Z\",\"jobs\":[{\"id\":9001,\"type\":\"discover\","
+      "\"repeater\":{\"id\":10,\"label\":\"Foreign repeater\",\"publicKey\":\"a1b2\"},"
+      "\"credentialClass\":\"guest\",\"leaseUntil\":\"2026-10-11T18:40:00Z\","
+      "\"timeouts\":{\"perHopMs\":4000,\"loginMs\":8000},\"payload\":{}}]}";
+  mm::ClaimedJob jobs[mm::kClaimMax];
+  int count = 0;
+  uint32_t serverTime = 0;
+  char err[96] = {0};
+  ASSERT_TRUE(mm::parseClaimResponse(&reply[0], reply.size(), jobs, mm::kClaimMax, count, serverTime, err, sizeof err))
+      << err;
+  ASSERT_EQ(count, 1);
+  EXPECT_EQ(jobs[0].credentialClass, mm::CredentialClass::Guest);
+  EXPECT_FALSE(jobs[0].credential.hasGuestPassword) << "the claim carried no credential object";
+  EXPECT_FALSE(jobs[0].credential.hasAdminPassword);
+  EXPECT_FALSE(jobs[0].hasAclLevel) << "the guest door makes no grant, so there is none to demote";
+  EXPECT_STREQ(jobs[0].credentialCandidate, "") << "no candidate, so the rotation probe stays out of it";
+  char why[200] = {0};
+  EXPECT_TRUE(mm::canRun(jobs[0], why, sizeof why)) << why;
+}
+
 // Every type of API §3, in JobTypes.All's order - which is the order AgentHeartbeat.json carries
 // them, so test_envelopes holds the heartbeat's bytes to the fixture with this very list.
 TEST(Claim, TheThirteenTypesAreTheOnesThisFirmwareAdvertisesInTheFixturesOrder) {

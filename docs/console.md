@@ -143,6 +143,20 @@ counts **3** for that job - and no session is stored by the probe. An `old`
 candidate, or a job with none, never probes. The serial console says the same
 in one line per probe (`jobs: job N: reachability probe (blank login): …`).
 
+A **guest** job whose claim carried no password at all logs in **blank**, and its log
+says so in one line: `no guest password in the claim: the blank login, which a
+repeater with no guest password answers at guest`. That is meshmaster.dk's guest
+door in its empty form (its tasks p4.7-94 and p4.11-111, and task p1.4-14 here),
+and the pair's `discover` runs at class `guest` too: `handleLoginReq` compares the
+password with `_prefs.guest_password`, which the firmware leaves empty, so a
+repeater whose owner never set one answers that login *at guest* and the job runs
+on the session it opened (`the guest session is open for 600 s`). A repeater that
+*does* have a guest password answers the same login with silence, and the job is
+`unreachable` after the two tries - by design on both sides. An **admin** job whose
+claim carried no admin password is still `unauthorized` with nothing sent at all
+(`the claim carried no admin material; nothing to log in with`): there is no admin
+login without one.
+
 An `acl`-class `status` is the one read whose transaction count moves with what
 the claim asked for: it fetches the firmware version with a second request
 (`owner info (firmware)`) only when the claim's payload wants it, which the
@@ -330,3 +344,17 @@ server comes back. What the four lines say is a pure function of a struct
     restart), `reboots` (`Power-on reset` and an empty log on a board that has
     just been plugged in), and `dump` (the last 4 kB of exactly what the port
     printed - no secret can be in it that was not on the terminal already).
+19. The guest door at its empty form (task p1.4-14), on a repeater whose owner
+    never set a guest password - meshmaster.dk's repeater 10 through this exit
+    node is the one waiting. Associate it from the wizard's second door, *I have
+    the guest password only — or none*, with the field left empty. The pairing
+    `discover` now runs at class **guest** instead of being answered
+    `unsupported`: the log says `no guest password in the claim: the blank login,
+    …`, then `flooded login, for the path its reply comes back along: logged in
+    as guest`, `path of N hop(s), learned from the login` and `the guest session
+    is open for 600 s`; the job is `ok` with `loggedInAs: guest`, the verify's
+    `status` at guest reuses that session, and the pair goes `active`. `sessions`
+    shows one **guest** session, and the Neighbours tab's read - which asks at
+    guest once the pair is active - fills. On a repeater that *does* have a guest
+    password the same `discover` is `no reply` twice and `unreachable`, which is
+    the right answer and not a fault.

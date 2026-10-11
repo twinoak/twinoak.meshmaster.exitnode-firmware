@@ -187,12 +187,14 @@ TEST(Credential, TheGuestPasswordIsRefusedOnAPairThatHoldsAGrant) {
 
 // ------------------------------------------------------------------ no store, no file
 
-// The password passes through four modules: the credential itself, the claim envelope that
-// fills it, the runner that uses it and the mesh that sends it. None of them may name the NVS
-// API, the file systems or the settings store; a grep says so, the way the TLS policy's does.
+// The password passes through five modules: the credential itself, the claim envelope that
+// fills it, the login policy that chooses which class sends which (task p1.4-14), the runner that
+// uses it and the mesh that sends it. None of them may name the NVS API, the file systems or the
+// settings store; a grep says so, the way the TLS policy's does.
 TEST(Credential, NoModuleThePasswordPassesThroughNamesTheStoreOrAFileSystem) {
   const char* const files[] = {"src/agent/Credentials.h",  "src/agent/Credentials.cpp", "src/agent/JobEnvelopes.h",
-                               "src/agent/JobEnvelopes.cpp", "src/agent/JobRunner.h",     "src/agent/JobRunner.cpp",
+                               "src/agent/JobEnvelopes.cpp", "src/agent/LoginSequence.h", "src/agent/LoginSequence.cpp",
+                               "src/agent/JobRunner.h",     "src/agent/JobRunner.cpp",
                                "src/mesh/AgentMesh.h",     "src/mesh/AgentMesh.cpp"};
   // Split, so this file does not contain what it forbids.
   const std::vector<std::string> forbidden = {

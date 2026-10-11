@@ -31,11 +31,36 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 #include "JobEnvelopes.h"
 
 namespace mm {
+
+// The login material of a job's class, and the one line the job's log gets about it
+// (EXIT-NODES §7; `JobContext.LoginMaterial` on the .NET agent, Handlers.cs):
+//
+//   - the **password** the claim carried for the class, with a line when the claim carried more
+//     than the companion sends (`kMaxPasswordLen`) and never the value;
+//   - `""` for a login that carries **no password at all**, which is not missing material: the
+//     `acl` login at class `acl` and `none` - this exit node's own key and nothing else - and
+//     since the guest door (task p1.4-14; meshmaster.dk's p4.7-94, reading p4.5-81) the **blank
+//     login** at class `guest` when the claim carried no guest password. For a pair that door
+//     made with no password the claim carries no credential at all (`AgentProtocol`: the job
+//     goes out with none and the agent logs in blank), and the frame this sends is the frame the
+//     `acl` login sends: `handleLoginReq` compares the password with `_prefs.guest_password`,
+//     which `NodePrefs()` leaves empty, so a repeater whose owner never set one answers it *at
+//     guest* and the job runs, and one that *has* a guest password answers it with silence,
+//     which the two tries below report as `unreachable` - by design on both sides
+//     (EXIT-NODES §4.1 step 2);
+//   - `nullptr` at class **`admin`** with no admin password, which every caller turns into
+//     `unauthorized` at no transaction, because there is no admin login without one.
+//
+// `note` takes the line and is left empty when there is nothing to say; it never carries a
+// password. Here rather than in `JobRunner` so that every branch is walked on a host.
+constexpr size_t kLoginNoteCap = 160;
+const char* loginMaterialFor(const ClaimedJob& job, char* note, size_t noteCap);
 
 // What one login came to - the runner's own reading of a reply. `Refused` is a reply that was
 // not a login-ok, and a login answered below the class it was for (task p3.5-41); `NoReply` is

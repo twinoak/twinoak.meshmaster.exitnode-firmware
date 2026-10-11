@@ -6,10 +6,16 @@
 // candidate, and a blank material never probe, that the probe costs one transaction, and that it
 // stores no session.
 //
+// Beside it, and in the same file because it is the same module: **the guest door** (task
+// p1.4-14; meshmaster.dk's tasks p4.7-94 and p4.11-111). `loginMaterialFor` is the material of a
+// job's class, and what is not missing material - the blank login of `acl`, `none` and, with no
+// guest password in the claim, `guest` - against the one case that is, an admin job with no admin
+// password.
+//
 // The policy is src/agent/LoginSequence.cpp; the board's exchange is JobRunner's LoginOnTheAir and
 // probeReachable, which a host cannot run, so the last tests hold that file's text to what the
-// probe must and must not do - one spend, a blank login, no session - as test_config_apply holds
-// the writes.
+// probe must and must not do - one spend, a blank login, no session - and to where the door's
+// material comes from, as test_config_apply holds the writes.
 
 #include <gtest/gtest.h>
 
@@ -266,6 +272,118 @@ TEST(RotationProbe, TheOldCandidateAndNoCandidateWalkTheTwoTriesAsBefore) {
   }
 }
 
+// ------------------------------------------------------------------ the guest door (task p1.4-14)
+
+mm::ClaimedJob jobAt(const char* type, mm::CredentialClass c) {
+  mm::ClaimedJob job;
+  std::snprintf(job.type, sizeof job.type, "%s", type);
+  job.credentialClass = c;
+  return job;
+}
+
+struct Material {
+  const char* material = nullptr;
+  std::string note;
+};
+
+Material materialOf(const mm::ClaimedJob& job) {
+  char note[mm::kLoginNoteCap] = {0};
+  const char* m = mm::loginMaterialFor(job, note, sizeof note);
+  return Material{m, std::string(note)};
+}
+
+// A guest-class job the claim carried no password for is the guest door's empty case: the blank
+// login, which a repeater whose owner never set a guest password answers *at guest*. It is the
+// class that decides this and not the type, so the door's `discover` and the probes that follow
+// it read the same.
+TEST(GuestDoor, AGuestClaimWithNoPasswordIsTheBlankLoginAndSaysSo) {
+  for (const char* type : {"discover", "status", "telemetry", "neighbours"}) {
+    const mm::ClaimedJob job = jobAt(type, mm::CredentialClass::Guest);
+    const Material m = materialOf(job);
+    ASSERT_NE(m.material, nullptr) << type << ": no guest password is not missing material";
+    EXPECT_STREQ(m.material, "") << type;
+    EXPECT_EQ(m.note,
+              "no guest password in the claim: the blank login, which a repeater with no guest password answers at "
+              "guest")
+        << type;
+    EXPECT_FALSE(mm::probesBetweenTries(job.credentialCandidate, m.material))
+        << type << ": a blank material is the probe itself, so the rotation probe is untouched by the door";
+  }
+}
+
+TEST(GuestDoor, AGuestClaimWithAPasswordStillSendsIt) {
+  mm::ClaimedJob job = jobAt("discover", mm::CredentialClass::Guest);
+  job.credential.setGuestPassword("gu3st");
+  const Material m = materialOf(job);
+  EXPECT_STREQ(m.material, "gu3st");
+  EXPECT_EQ(m.note, "") << "nothing to say about a password the claim carried whole";
+
+  // Longer than the companion sends: cut, with a line that names neither the value nor its length.
+  mm::ClaimedJob long_ = jobAt("status", mm::CredentialClass::Guest);
+  long_.credential.setGuestPassword("0123456789abcdefghij");
+  const Material cut = materialOf(long_);
+  ASSERT_NE(cut.material, nullptr);
+  EXPECT_EQ(std::strlen(cut.material), mm::kMaxPasswordLen);
+  EXPECT_NE(cut.note.find("the guest password is longer than 15 bytes"), std::string::npos) << cut.note;
+  EXPECT_EQ(cut.note.find("0123456789"), std::string::npos) << "no log line takes the value";
+}
+
+// The one case that really is missing material, and it is unchanged: there is no admin login
+// without an admin password.
+TEST(GuestDoor, AnAdminClaimWithNoAdminPasswordStillHasNothingToLogInWith) {
+  const Material m = materialOf(jobAt("config.read", mm::CredentialClass::Admin));
+  EXPECT_EQ(m.material, nullptr);
+  EXPECT_EQ(m.note, "the claim carried no admin material; nothing to log in with");
+
+  mm::ClaimedJob job = jobAt("config.read", mm::CredentialClass::Admin);
+  job.credential.setAdminPassword("s3cret");
+  EXPECT_STREQ(materialOf(job).material, "s3cret");
+}
+
+TEST(GuestDoor, AclAndNoneAreTheAclLoginAsTheyAlwaysWere) {
+  for (mm::CredentialClass c : {mm::CredentialClass::Acl, mm::CredentialClass::None}) {
+    const Material m = materialOf(jobAt("status", c));
+    ASSERT_NE(m.material, nullptr) << mm::credentialClassName(c);
+    EXPECT_STREQ(m.material, "") << mm::credentialClassName(c);
+    EXPECT_EQ(m.note, "") << mm::credentialClassName(c);
+  }
+}
+
+// The blank login through the sequence: answered at guest the job runs on the session it opened,
+// and two silences are `unreachable` - which is what a repeater that *does* have a guest password
+// answers it with, and what the server expects there (EXIT-NODES §4.1 step 2).
+TEST(GuestDoor, ABlankGuestLoginAnsweredAtGuestRunsAndASilentOneIsUnreachableAtTwo) {
+  ScriptedRepeater answered;
+  answered.logins = {mm::LoginTry::Ok};
+  const mm::LoginVerdict ok = mm::loginSequence(answered, false);
+  EXPECT_EQ(ok.outcome, mm::Outcome::Ok);
+  EXPECT_EQ(answered.loginCalls, 1) << "one blank login, and the job runs on the session it opened";
+  EXPECT_EQ(answered.probeCalls, 0);
+  EXPECT_EQ(answered.transactions, 1);
+  EXPECT_EQ(answered.sessionsStored, 1);
+
+  ScriptedRepeater silent;
+  silent.logins = {mm::LoginTry::NoReply, mm::LoginTry::NoReply};
+  const mm::LoginVerdict none = mm::loginSequence(silent, false);
+  EXPECT_EQ(none.outcome, mm::Outcome::Unreachable);
+  EXPECT_FALSE(none.silentAfterReachable) << "nothing is known, and nothing is claimed";
+  EXPECT_EQ(silent.loginCalls, 2);
+  EXPECT_EQ(silent.probeCalls, 0);
+  EXPECT_EQ(silent.transactions, 2);
+  EXPECT_TRUE(silent.logged.empty());
+}
+
+// What the door's `discover` reports: the path, and the tier the reply granted, which is what the
+// server's association step reads (`DiscoverResult.LoggedInAs`).
+TEST(GuestDoor, TheDiscoverAtGuestReportsThePathAndLoggedInAsGuest) {
+  const char* hops[] = {"a1b2c3"};
+  char out[200];
+  const size_t len = mm::writeDiscoverResult(true, hops, 1, mm::kPathSourceLogin, 0,
+                                             mm::permissionName(mm::kPermGuest), out, sizeof out);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ(std::string(out, len), "{\"path\":{\"hops\":[\"a1b2c3\"],\"source\":\"login\"},\"loggedInAs\":\"guest\"}");
+}
+
 // ------------------------------------------------------------------ the board's half, on its text
 
 // A host cannot run JobRunner, so what the probe must and must not do on the air is held on the
@@ -334,6 +452,52 @@ TEST(RotationProbeOnTheBoard, TheSequenceIsTheRunnersAndItsVerdictIsTheResultsDa
   EXPECT_NE(branch.find("ctx.probeRefused ? kProbeAnsweredRefused : permissionName(ctx.probeAnsweredRole)"),
             std::string::npos)
       << "the tier is the probe's role in the server's words, or `refused`";
+}
+
+// The runner's half of the door, on the file's text: the material is the policy's decision and
+// not a branch of its own, nothing goes on the air for a class that has none, and the discover's
+// session line names the tier the reply granted rather than the word "admin".
+TEST(GuestDoorOnTheBoard, TheRunnerTakesItsMaterialFromThePolicyAndSendsNothingWhenThereIsNone) {
+  const std::string runner = readFile(fs::path(PROJECT_DIR) / "src/agent/JobRunner.cpp");
+  const size_t from = runner.find("const char* JobRunner::loginMaterial(");
+  const size_t to = runner.find("JobRunner::LoginResult JobRunner::loginOnce(", from);
+  ASSERT_NE(from, std::string::npos);
+  ASSERT_NE(to, std::string::npos);
+  const std::string body = runner.substr(from, to - from);
+  EXPECT_NE(body.find("loginMaterialFor(job, note, sizeof note)"), std::string::npos)
+      << "one decision, on a host; the runner only puts its line in the job's log";
+  EXPECT_EQ(body.find("hasGuestPassword"), std::string::npos) << "the branch lives in LoginSequence.cpp";
+  EXPECT_EQ(body.find("hasAdminPassword"), std::string::npos);
+
+  const size_t ensure = runner.find("Outcome JobRunner::ensureSession(");
+  const size_t probe = runner.find("bool JobRunner::probeReachable(", ensure);
+  ASSERT_NE(ensure, std::string::npos);
+  ASSERT_NE(probe, std::string::npos);
+  const std::string session = runner.substr(ensure, probe - ensure);
+  const size_t nothing = session.find("if (material == nullptr) return Outcome::Unauthorized;");
+  const size_t sequence = session.find("loginSequence(exchange, probes)");
+  ASSERT_NE(nothing, std::string::npos);
+  ASSERT_NE(sequence, std::string::npos);
+  EXPECT_LT(nothing, sequence) << "an admin job with no admin password is unauthorized with nothing sent";
+}
+
+TEST(GuestDoorOnTheBoard, TheDiscoversSessionLineNamesTheTierTheReplyGranted) {
+  const std::string runner = readFile(fs::path(PROJECT_DIR) / "src/agent/JobRunner.cpp");
+  const size_t from = runner.find("Outcome JobRunner::learned(");
+  const size_t to = runner.find("Outcome JobRunner::runDiscover(", from);
+  ASSERT_NE(from, std::string::npos);
+  ASSERT_NE(to, std::string::npos);
+  const std::string body = runner.substr(from, to - from);
+  EXPECT_NE(body.find("the %s session is open for %lu s"), std::string::npos);
+  EXPECT_NE(body.find("permissionName(ctx.sessionRole)"), std::string::npos)
+      << "a discover at the guest door opens a guest session, not an admin one";
+  EXPECT_EQ(body.find("the admin session is open"), std::string::npos);
+
+  // And runDiscover logs in with the class's material, whatever the class is; the paragraph that
+  // says which login names the guest door's two.
+  const std::string discover = runner.substr(to, 1600);
+  EXPECT_NE(discover.find("const char* material = loginMaterial(job);"), std::string::npos);
+  EXPECT_NE(discover.find("At class `guest`"), std::string::npos) << "the \"which login\" paragraph says so";
 }
 
 }  // namespace
