@@ -59,7 +59,7 @@ them. Say in the report that the task was done in more than one session.
   once and the whole suite is seconds after that:
 
   ```bash
-  docker run --rm -v "C:/Users/<you>/path/to/meshmaster-agent-firmware:/w" -w /w python:3.11-slim \
+  docker run --rm -v "C:/Users/<you>/path/to/twinoak.meshmaster.exitnode-firmware:/w" -w /w python:3.11-slim \
     bash -c "apt-get update -qq && apt-get install -y -qq g++ git && pip install -q platformio && pio test -e native"
   ```
 

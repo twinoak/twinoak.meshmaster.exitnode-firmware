@@ -82,7 +82,7 @@ mornings and on demand:
 workflows on such a pull request as *action required* rather than starting them
 — its guard against a workflow that sets itself off. So the run waits for
 **Approve and run** on the Actions tab (or
-`gh api -X POST repos/twinoak/meshmaster-agent-firmware/actions/runs/<id>/approve`),
+`gh api -X POST repos/twinoak/twinoak.meshmaster.exitnode-firmware/actions/runs/<id>/approve`),
 and that click is the same click as reading the bump. What would remove it is a
 personal access token in a repository secret for `gh pr create` to use instead
 of the built-in one; that is Thomas's to decide, and one button a month is

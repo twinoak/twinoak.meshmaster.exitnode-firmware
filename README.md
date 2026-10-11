@@ -1,4 +1,4 @@
-# MeshMaster agent firmware — an exit node that is one board
+# MeshMaster exit-node firmware — an exit node that is one board
 
 An exit node that is one board. A Heltec V3 (ESP32-S3, SX1262, WiFi, an OLED)
 on USB power at a window joins WiFi, registers with
