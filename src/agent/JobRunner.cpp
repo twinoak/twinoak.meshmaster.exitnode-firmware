@@ -1,10 +1,6 @@
 #include "JobRunner.h"
 
-#include <Arduino.h>
-#include <esp_system.h>
-
 #include <cinttypes>
-#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 
@@ -17,86 +13,32 @@ namespace mm {
 
 namespace {
 
-// A result's free text, bounded here rather than at the envelope: 4 000 characters is what API §3
-// allows and a kilobyte is more than any of these jobs has to say. When it fills, the oldest
-// half goes - what a job did last is what a reader of its page wants. Nothing that could need
-// redacting ever reaches it: a password is never an argument of any line below, and the .NET
-// agent's redactor has nothing to do here because there is nothing to redact.
-class JobLog {
- public:
-  void clear() {
-    len_ = 0;
-    buf_[0] = '\0';
-  }
-
-  void add(const char* fmt, ...) __attribute__((format(printf, 2, 3))) {
-    if (len_ + 2 >= sizeof buf_) drop();
-    if (len_ > 0) {
-      buf_[len_++] = ';';
-      buf_[len_++] = ' ';
-      buf_[len_] = '\0';
-    }
-    va_list args;
-    va_start(args, fmt);
-    const int n = std::vsnprintf(&buf_[len_], sizeof buf_ - len_, fmt, args);
-    va_end(args);
-    if (n > 0) {
-      len_ += static_cast<size_t>(n) < sizeof buf_ - len_ ? static_cast<size_t>(n) : sizeof buf_ - len_ - 1;
-    }
-    buf_[len_] = '\0';
-  }
-
-  const char* text() const { return buf_; }
-
- private:
-  void drop() {
-    const size_t half = sizeof buf_ / 2;
-    std::memmove(buf_, buf_ + half, len_ - half + 1);
-    len_ -= half;
-  }
-
-  char buf_[1024] = {0};
-  size_t len_ = 0;
-};
-
-// The scratch every job shares. Static, not automatic: the Arduino loop task has 8 KB of stack
-// and a neighbour list alone is more than that. A config read is the largest result here, and
-// since meshmaster.dk's task p4.9-102 the read it is asked for is the Configuration tab's whole
-// list - about twenty-six keys on a V3 at v1.17, `owner.info`'s 119 characters among them, the
-// regions listing, the ACL's 23 tokens and up to twelve raw lines for the keys that firmware
-// does not know. That is some 4.2 KB of JSON, which 4 608 bytes held only just; 8 192 holds it
-// twice over.
-//
-// It is **not** sized for the worst case the constants allow (some 10.9 KB unescaped, and
-// System.Text.Json's encoder can sextuple a byte), because that is a repeater answering 208
-// characters to every one of 32 keys and not a repeater. `writeConfigReadResult` degrades
-// instead - raw lines first, then trailing values, each said in the JSON - so the bound above is
-// what a real read needs and not what a read is allowed to need (ConfigRead.h).
-constexpr size_t kDataCap = 8192;
-constexpr size_t kBodyCap = 10240;  // the data, the envelope and the log
-static_assert(kDataCap >= kMinConfigReadResultCap, "the config read's result must always be writable");
-static_assert(kBodyCap > kDataCap + sizeof(JobLog), "the body carries the data, the envelope and the log");
-ClaimedJob g_jobs[kClaimMax];
-char g_data[kDataCap];
-char g_body[kBodyCap];
-JobLog g_log;
-Neighbour g_neighbours[kMaxNeighbours];
-LppReading g_readings[kMaxLppReadings];
-TraceHop g_hops[kMaxTraceHops + 1];
-char g_pathHops[kMaxClaimPathHops][8];
-const char* g_pathPtrs[kMaxClaimPathHops];
-uint8_t g_pathBytes[kMaxClaimPathHops * 3];
-uint8_t g_roundTrip[MAX_PATH_SIZE];
-ConfigSnapshot g_snapshot;
-AccessListEntry g_acl[kAccessListMaxEntries];
-char g_cliReply[kMaxCliReplyLen + 1];       // the last CLI reply, as the repeater wrote it
-char g_regionListing[kMaxCliReplyLen + 1];  // the `region` reply, kept across `region default`
-char g_regionValue[kMaxConfigValueLen + 1];
-char g_command[kPublicKeyHexLen + 32];
-ConfigApplyOutcome g_applyOutcome;
-// The one line of this file that carries a secret: `password <new>` or `set guest.password
-// <new>`, built from the claim's credential right before the send and wiped right after it.
-char g_secretLine[kMaxCliCommandLen + 1];
+// The scratch every job shares is the runner's own since task p1.5-15 (JobRunner::Scratch): one
+// instance, statically allocated by the board as part of `jobs`, and no longer a translation
+// unit's statics. The names below are the ones the buffers had as file statics - the host tests
+// hold this file's text, and these names are in it - so each is the scratch's member under its
+// old name, and nothing else in this file is a macro.
+#define g_jobs (scratch_.jobs)
+#define g_data (scratch_.data)
+#define g_body (scratch_.body)
+#define g_log (scratch_.log)
+#define g_neighbours (scratch_.neighbours)
+#define g_readings (scratch_.readings)
+#define g_hops (scratch_.hops)
+#define g_pathHops (scratch_.pathHops)
+#define g_pathPtrs (scratch_.pathPtrs)
+#define g_pathBytes (scratch_.pathBytes)
+#define g_roundTrip (scratch_.roundTrip)
+#define g_snapshot (scratch_.snapshot)
+#define g_acl (scratch_.acl)
+#define g_cliReply (scratch_.cliReply)
+#define g_regionListing (scratch_.regionListing)
+#define g_regionValue (scratch_.regionValue)
+#define g_command (scratch_.command)
+#define g_applyOutcome (scratch_.applyOutcome)
+#define g_secretLine (scratch_.secretLine)
+constexpr size_t kDataCap = JobRunner::kDataCap;
+constexpr size_t kBodyCap = JobRunner::kBodyCap;
 // How long a line that expects no reply is given to leave the radio before the next is queued:
 // the region loader resolves a line's parent by indent against a stack, so order matters, and
 // MeshCore's outbound queue is pumped by the loop this waits in.
@@ -145,10 +87,11 @@ bool sameKey(const char* a, const char* b) {
 
 }  // namespace
 
-void JobRunner::begin(AgentMesh& mesh, AgentClient& server, AgentClock& clock, void (*pump)()) {
+void JobRunner::begin(IMesh& mesh, IUplink& server, IPlatform& platform, void (*pump)()) {
   mesh_ = &mesh;
   server_ = &server;
-  clock_ = &clock;
+  platform_ = &platform;
+  clock_ = &platform.clock();
   pump_ = pump;
 }
 
@@ -156,7 +99,7 @@ void JobRunner::setIdentity(const char* publicKeyHex) { publicKey_ = publicKeyHe
 
 void JobRunner::randomBytes(uint8_t* out, size_t len) {
   for (size_t i = 0; i < len; i += 4) {
-    const uint32_t r = esp_random();
+    const uint32_t r = platform_->random();
     for (size_t b = 0; b < 4 && i + b < len; b++) out[i + b] = static_cast<uint8_t>(r >> (8 * b));
   }
 }
@@ -166,7 +109,7 @@ void JobRunner::idle(uint32_t ms) {
   while (static_cast<int32_t>(millis() - deadline) < 0) {
     mesh_->loop();
     if (pump_ != nullptr) pump_();
-    delay(1);
+    platform_->delayMs(1);
   }
 }
 
@@ -210,7 +153,7 @@ bool JobRunner::spend(const ClaimedJob& job, Context& ctx, bool escape) {
 
 // ------------------------------------------------------------------ the login
 
-const char* JobRunner::loginMaterial(const ClaimedJob& job) const {
+const char* JobRunner::loginMaterial(const ClaimedJob& job) {
   // Which material a class logs in with - the password, the blank login of `acl`, `none` and the
   // guest door, or nothing at all at `admin` - is agent/LoginSequence.h's decision, on a host, so
   // that every branch of it is walked natively (test/test_rotation_probe) rather than held on
@@ -300,7 +243,7 @@ class JobRunner::LoginOnTheAir : public LoginExchange {
     return ProbeAnswer::Answered;
   }
 
-  void log(const char* line) override { g_log.add("%s", line); }
+  void log(const char* line) override { runner_.scratch_.log.add("%s", line); }
 
  private:
   JobRunner& runner_;
@@ -429,18 +372,18 @@ Outcome JobRunner::request(const ClaimedJob& job, Context& ctx, const char* what
 }
 
 Outcome JobRunner::cliLine(const ClaimedJob& job, Context& ctx, const char* what, const char* command, bool retry,
-                           uint32_t timestamp, bool sensitive, bool escape) {
+                           uint32_t* timestampUsed, bool sensitive, bool escape) {
   g_cliReply[0] = '\0';
-  // Each attempt is its own sender timestamp, strictly above the last (uniqueTime, the one
-  // series every tag and every line of this board come from): the repeater answers an equal one
-  // with nothing and runs nothing, and drops a lower one. A caller that took the timestamp from
-  // that series already (the apply engine) hands it in for the first attempt.
+  // Each attempt is its own sender timestamp, strictly above the last: the mesh draws it from the
+  // one series every tag and every line of this board come from and hands it back (IMesh::sendCli,
+  // task p1.5-15), because the repeater answers an equal one with nothing and runs nothing, and
+  // drops a lower one. A CLI reply carries no tag, so the timestamp stands in for one here.
   return exchange(
       job, ctx, what, retry, true,
       [&](uint32_t& tag) {
-        tag = timestamp != 0 ? timestamp : mesh_->uniqueTime();
-        timestamp = 0;
-        return mesh_->sendCli(command, tag, sensitive);
+        const SendResult sent = mesh_->sendCli(command, sensitive, tag);
+        if (timestampUsed != nullptr) *timestampUsed = tag;
+        return sent;
       },
       escape);
 }
@@ -521,7 +464,7 @@ Outcome JobRunner::runStatus(const ClaimedJob& job, Context& ctx, size_t& dataLe
   const Outcome session = ensureSession(job, ctx);
   if (session != Outcome::Ok) return session;
 
-  const Outcome got = request(job, ctx, "status request", AgentMesh::kReqTypeGetStatus, nullptr, 0);
+  const Outcome got = request(job, ctx, "status request", kReqTypeGetStatus, nullptr, 0);
   if (got != Outcome::Ok) return got;
 
   StatusReading reading;
@@ -540,7 +483,7 @@ Outcome JobRunner::runStatus(const ClaimedJob& job, Context& ctx, size_t& dataLe
     // meshmaster.dk's task p4.3-68 only when the claim asks for it, which is when the server's
     // record is stale or this pair has recorded none. Forty-seven of a repeater's forty-eight
     // daily reads are one transaction instead of two.
-    if (request(job, ctx, "owner info (firmware)", AgentMesh::kReqTypeGetOwnerInfo, nullptr, 0) == Outcome::Ok) {
+    if (request(job, ctx, "owner info (firmware)", kReqTypeGetOwnerInfo, nullptr, 0) == Outcome::Ok) {
       const MeshReply& owner = mesh_->reply();
       parseOwnerInfoFirmware(owner.data, owner.len, firmware, sizeof firmware);
     } else {
@@ -562,7 +505,7 @@ Outcome JobRunner::runTelemetry(const ClaimedJob& job, Context& ctx, size_t& dat
   // sender may have) and four random bytes, for a packet hash nothing repeats.
   uint8_t data[8] = {0};
   randomBytes(&data[4], 4);
-  const Outcome got = request(job, ctx, "telemetry request", AgentMesh::kReqTypeGetTelemetry, data, sizeof data);
+  const Outcome got = request(job, ctx, "telemetry request", kReqTypeGetTelemetry, data, sizeof data);
   if (got != Outcome::Ok) return got;
 
   const MeshReply& reply = mesh_->reply();
@@ -595,7 +538,7 @@ Outcome JobRunner::runNeighbours(const ClaimedJob& job, Context& ctx, size_t& da
 
     char what[40];
     std::snprintf(what, sizeof what, "neighbours page at %d", offset);
-    const Outcome got = request(job, ctx, what, AgentMesh::kReqTypeGetNeighbours, data, sizeof data);
+    const Outcome got = request(job, ctx, what, kReqTypeGetNeighbours, data, sizeof data);
     if (got != Outcome::Ok) {
       // A page that never came back after some already did is still a reading: the server gets
       // what was heard rather than nothing at all.
@@ -659,7 +602,7 @@ Outcome JobRunner::runTrace(const ClaimedJob& job, Context& ctx, size_t& dataLen
     std::memcpy(&g_roundTrip[n], &g_pathBytes[i * hashSize], hashSize);
     n += hashSize;
   }
-  if (n > MAX_PATH_SIZE) {
+  if (n > kMeshPathCap) {
     g_log.add("the round trip is %u bytes, more than a trace packet's path", static_cast<unsigned>(n));
     return Outcome::Unsupported;
   }
@@ -904,7 +847,7 @@ Outcome JobRunner::readAccessList(const ClaimedJob& job, Context& ctx, ConfigSna
   // The ACL is a binary request and not a `get` (task p3.5-43): `get acl` is answered on the
   // repeater's local serial console alone. Admin only; both reserved bytes zero.
   const uint8_t data[2] = {0, 0};
-  const Outcome got = request(job, ctx, "access-list request (the ACL)", AgentMesh::kReqTypeGetAccessList, data,
+  const Outcome got = request(job, ctx, "access-list request (the ACL)", kReqTypeGetAccessList, data,
                               sizeof data);
   if (got != Outcome::Ok) {
     if ((got == Outcome::Unreachable || got == Outcome::Timeout) && snapshot.valuesRead() > 0) {
@@ -1046,18 +989,19 @@ class JobRunner::ApplyOnTheAir : public ApplyExchange {
       // radio before the next one is queued behind it. One transaction, as the .NET agent
       // counts it.
       if (!runner_.spend(job_, ctx_, s.escape)) return Sent::LeaseOut;
-      const SendResult sent = runner_.mesh_->sendCli(s.line, s.timestamp);
+      uint32_t timestamp = 0;
+      const SendResult sent = runner_.mesh_->sendCli(s.line, false, timestamp);
       if (sent == SendResult::Failed) {
-        g_log.add("%s: the packet could not be built", s.what);
+        runner_.scratch_.log.add("%s: the packet could not be built", s.what);
         return Sent::NotSent;
       }
-      g_log.add("%s: sent (%s)", s.what, sent == SendResult::Direct ? "direct" : "flood");
+      runner_.scratch_.log.add("%s: sent (%s)", s.what, sent == SendResult::Direct ? "direct" : "flood");
       runner_.idle(kLineSettleMs);
       return Sent::Answered;
     }
-    switch (runner_.cliLine(job_, ctx_, s.what, s.line, s.retry, s.timestamp, false, s.escape)) {
+    switch (runner_.cliLine(job_, ctx_, s.what, s.line, s.retry, nullptr, false, s.escape)) {
       case Outcome::Ok:
-        std::snprintf(reply, cap, "%s", g_cliReply);
+        std::snprintf(reply, cap, "%s", runner_.scratch_.cliReply);
         return Sent::Answered;
       case Outcome::Unreachable: return Sent::NoReply;
       case Outcome::Timeout: return Sent::LeaseOut;
@@ -1069,11 +1013,14 @@ class JobRunner::ApplyOnTheAir : public ApplyExchange {
     }
   }
 
-  uint32_t nextTimestamp() override { return runner_.mesh_->uniqueTime(); }
+  // 0: the mesh draws every line's sender timestamp at the send and hands it back (IMesh::sendCli,
+  // task p1.5-15), so the engine's series is the host test's alone. Before this the engine drew
+  // it here, from the same uniqueTime() the mesh draws from now - the frames are the same.
+  uint32_t nextTimestamp() override { return 0; }
 
   bool readRegions(ConfigSnapshot& snapshot) override { return runner_.readRegions(job_, ctx_, snapshot) == Outcome::Ok; }
 
-  void log(const char* line) override { g_log.add("%s", line); }
+  void log(const char* line) override { runner_.scratch_.log.add("%s", line); }
 
  private:
   JobRunner& runner_;
@@ -1341,8 +1288,12 @@ Outcome JobRunner::runJob(const ClaimedJob& job, Context& ctx, size_t& dataLen) 
     LOG_W("jobs: job %lld %s: the lease had already run out; nothing was sent", job.id, job.type);
     return Outcome::Timeout;
   }
+  // A type that is none of the thirteen is the extension's to run or decline (IJobExtension.h),
+  // and the class rules of canRun() are the thirteen's; with no extension set it is `unsupported`
+  // there, as before.
+  const bool offered = extension_ != nullptr && !isKnownJobType(job.type);
   char why[200] = {0};
-  if (!canRun(job, why, sizeof why)) {
+  if (!offered && !canRun(job, why, sizeof why)) {
     g_log.add("%s", why);
     return Outcome::Unsupported;
   }
@@ -1369,7 +1320,55 @@ Outcome JobRunner::runJob(const ClaimedJob& job, Context& ctx, size_t& dataLen) 
   if (std::strcmp(job.type, "clock.sync") == 0) return runClockSync(job, ctx, dataLen);
   if (std::strcmp(job.type, "password.set") == 0) return runPasswordSet(job, ctx, dataLen);
   if (std::strcmp(job.type, "reboot") == 0) return runReboot(job, ctx, dataLen);
+  if (offered) return runExtension(job, ctx, dataLen);
   return Outcome::Unsupported;
+}
+
+// ------------------------------------------------------------------ the extension (IJobExtension.h)
+
+// What the runner lends an extension for one job, and where the extension's result lands: the
+// pacing and the lease through spend(), the job's log, and the data buffer every handler writes
+// into. One class for both halves, because they are one job's.
+class JobRunner::ExtensionJob : public JobContext, public ResultWriter {
+ public:
+  ExtensionJob(JobRunner& runner, const ClaimedJob& job, Context& ctx, size_t& dataLen)
+      : runner_(runner), job_(job), ctx_(ctx), dataLen_(dataLen) {}
+
+  IMesh& mesh() override { return *runner_.mesh_; }
+  IPlatform& platform() override { return *runner_.platform_; }
+  bool spend() override { return runner_.spend(job_, ctx_); }
+  uint32_t replyWaitMs() const override { return runner_.requestWaitMs(job_); }
+  void log(const char* line) override { runner_.scratch_.log.add("%s", line); }
+
+  bool data(const char* json, size_t len) override {
+    if (json == nullptr || len == 0 || len >= kDataCap) {
+      dataLen_ = 0;
+      return false;
+    }
+    std::memcpy(runner_.scratch_.data, json, len);
+    runner_.scratch_.data[len] = '\0';
+    dataLen_ = len;
+    return true;
+  }
+  void outcome(Outcome o) override { outcome_ = o; }
+  Outcome result() const { return outcome_; }
+
+ private:
+  JobRunner& runner_;
+  const ClaimedJob& job_;
+  Context& ctx_;
+  size_t& dataLen_;
+  Outcome outcome_ = Outcome::Failed;
+};
+
+Outcome JobRunner::runExtension(const ClaimedJob& job, Context& ctx, size_t& dataLen) {
+  ExtensionJob ext(*this, job, ctx, dataLen);
+  if (!extension_->run(job, ext, ext)) {
+    dataLen = 0;
+    g_log.add("no handler for job type '%s' in this firmware or its extension", job.type);
+    return Outcome::Unsupported;
+  }
+  return ext.result();
 }
 
 bool JobRunner::post(long long jobId, const char* body, size_t len) {
@@ -1516,8 +1515,8 @@ int JobRunner::claimAndRun() {
     mesh_->endJob();
 
     char clientId[48];
-    std::snprintf(clientId, sizeof clientId, "%lld-%08" PRIx32 "%08" PRIx32 "%08" PRIx32, job.id, esp_random(),
-                  esp_random(), esp_random());
+    std::snprintf(clientId, sizeof clientId, "%lld-%08" PRIx32 "%08" PRIx32 "%08" PRIx32, job.id,
+                  platform_->random(), platform_->random(), platform_->random());
 
     JobReport report;
     report.clientId = clientId;
@@ -1554,7 +1553,7 @@ int JobRunner::claimAndRun() {
   return count;
 }
 
-void JobRunner::report(Stream& out) const {
+void JobRunner::report(TextOut& out) const {
   out.printf("budget    %d/min, gap %d s; %lu transaction(s) sent, %lu s waited for the budget\r\n",
              gate_.budget().maxTransactionsPerMinute, gate_.budget().minGapSeconds,
              static_cast<unsigned long>(gate_.transmissions()), static_cast<unsigned long>(gate_.totalWaitMs() / 1000));
@@ -1589,7 +1588,7 @@ void JobRunner::report(Stream& out) const {
   }
 }
 
-void JobRunner::reportSessions(Stream& out) const {
+void JobRunner::reportSessions(TextOut& out) const {
   const uint32_t now = millis();
   out.printf("sessions  %u live of %u slots, lifetime %lu s; a repeater's session is a key, a class, a level and an "
              "age - no secret is in one\r\n",
@@ -1618,5 +1617,25 @@ void JobRunner::describe(char* out, size_t cap) const {
                 static_cast<unsigned long>(gate_.transmissions()), r.id, r.type, outcomeName(r.outcome),
                 r.transactions);
 }
+
+#undef g_jobs
+#undef g_data
+#undef g_body
+#undef g_log
+#undef g_neighbours
+#undef g_readings
+#undef g_hops
+#undef g_pathHops
+#undef g_pathPtrs
+#undef g_pathBytes
+#undef g_roundTrip
+#undef g_snapshot
+#undef g_acl
+#undef g_cliReply
+#undef g_regionListing
+#undef g_regionValue
+#undef g_command
+#undef g_applyOutcome
+#undef g_secretLine
 
 }  // namespace mm

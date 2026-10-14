@@ -15,6 +15,7 @@ namespace {
 
 uint32_t (*s_clock)() = nullptr;
 LogLevel s_level = LogLevel::Info;
+LogSink s_sink = nullptr;
 
 char levelLetter(LogLevel l) {
   switch (l) {
@@ -29,6 +30,8 @@ char levelLetter(LogLevel l) {
 }  // namespace
 
 void logBegin(uint32_t (*clock)()) { s_clock = clock; }
+
+void logSetSink(LogSink sink) { s_sink = sink; }
 
 void logSetLevel(LogLevel level) { s_level = level; }
 
@@ -75,6 +78,11 @@ void logf(LogLevel level, const char* fmt, ...) {
 
   const int n = std::snprintf(full, sizeof full, "[%s] %c %s\r\n", stamp, levelLetter(level), line);
   const size_t len = n < 0 ? 0 : (static_cast<size_t>(n) < sizeof full ? static_cast<size_t>(n) : sizeof full - 1);
+  if (s_sink != nullptr) {
+    // Another platform's port (agent/IPlatform.h): the same bytes, formatted the same way.
+    s_sink(full, len);
+    return;
+  }
   Serial.print(full);
   // And the same bytes into the ring `dump` prints (LogRing.h): whatever redaction the line has
   // had, it has had before this point - a line that could carry a secret here would already have

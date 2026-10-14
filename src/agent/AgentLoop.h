@@ -1,6 +1,6 @@
 // The agent's loop: the part of EXIT-NODES §5 and §6 a board with no jobs does.
 //
-// Once WiFi is up: GET /agent/v1/config once, then POST /agent/v1/heartbeat every
+// Once the link is up: GET /agent/v1/config once, then POST /agent/v1/heartbeat every
 // `pollIntervalS` the server last answered (30 when work waits, 120 when none does), and
 // between heartbeats POST /agent/v1/observations with the adverts the radio heard - a batch when
 // twenty are waiting or when the oldest has waited a minute, whichever comes first.
@@ -13,11 +13,12 @@
 // posted first, in order, with the timestamps it was made with - then the claim, then the
 // observation batch. And the wait after a failure carries jitter (src/Backoff.h), so a hundred
 // boards that lost the same server do not all come back at the same second; past
-// `kRebootAfterFailures` consecutive unanswered calls **with the WiFi link up**, over
-// `kRebootAfterFailingMs`, the board restarts itself and says why (src/Health.h), because a TLS
-// stack that has failed for an hour and a half against a live link is not going to recover by
-// being asked again - and the hour and a half is a condition of its own since task p1.2-10
-// lowered the proven link's backoff ceiling to two minutes.
+// `kRebootAfterFailures` consecutive unanswered calls **with the link up**, over
+// `kRebootAfterFailingMs`, the board restarts itself and says why (IPlatform::rebootForHealth,
+// which is src/Health.h on the Heltec), because a TLS stack that has failed for an hour and a
+// half against a live link is not going to recover by being asked again - and the hour and a
+// half is a condition of its own since task p1.2-10 lowered the proven link's backoff ceiling
+// to two minutes.
 //
 // What the server's answers do here:
 //   200   the budget, the poll interval and the clock are taken, and `jobsWaiting` makes a claim
@@ -31,30 +32,57 @@
 //         the same: a deploy of meshmaster.dk says how long it will be, and that is believed
 //         rather than doubled past it (task p1.2-10)
 //   5xx, no reply
-//         backoff, 30 s doubling to **two minutes** once this board's own link is proven - WiFi
-//         up and a time off the network - and to ten minutes while it is not, reset by the first
-//         answer
+//         backoff, 30 s doubling to **two minutes** once this board's own link is proven - the
+//         link up and a time off the network - and to ten minutes while it is not, reset by the
+//         first answer
 //
 // `jobTypes` is the thirteen types JobRunner has a handler for - every type of API §3 since
-// task 05 - and routing sends nothing else, because it requires the type advertised.
+// task 05 - and the types of the extension the board set, if any (IJobExtension.h); routing
+// sends nothing else, because it requires the type advertised.
+//
+// Host-portable since task p1.5-15: the server, the platform and the mesh are the three seams
+// (IUplink.h, IPlatform.h, IMesh.h), and what the heartbeat says about this board - the version,
+// the board, the companion firmware, the radio - comes in as values (HeartbeatIdentity) that the
+// board fills and refreshes, rather than being read from its settings here.
 
 #pragma once
-
-#include <Stream.h>
 
 #include <cstddef>
 #include <cstdint>
 
-#include "AgentClient.h"
+#include "Envelopes.h"
+#include "IMesh.h"
+#include "IPlatform.h"
+#include "IUplink.h"
 #include "JobRunner.h"
 #include "Observations.h"
 #include "ServerPolicy.h"
-#include "mesh/AgentMesh.h"
-#include "net/Clock.h"
-#include "net/WifiLink.h"
-#include "settings/Store.h"
+#include "TextOut.h"
 
 namespace mm {
+
+// What earns a reboot: consecutive server failures - with the link up, so the link is not the
+// reason - for long enough that the stack and not the server is the suspect. Task 06 wrote the
+// count alone, and twelve of them at a backoff doubling to ten minutes *was* about an hour and a
+// half; task p1.2-10 lowered that ceiling to two minutes for a board whose link is proven, which
+// would have brought twelve within about twenty - and twenty minutes of a server being down is
+// an ordinary deploy, not a wedged stack. So both have to be true, and the sentence task 06
+// wrote stays true of either backoff: a board reboots at most about once an hour and a half
+// through a long outage, and once is usually all a wedged stack needs. What a reboot costs is
+// the buffers (the advert ring and the results waiting to be posted late), which is exactly what
+// a server outage fills. (Moved here from src/Health.h by task p1.5-15; the restart itself is
+// the platform's, IPlatform::rebootForHealth.)
+constexpr uint32_t kRebootAfterFailures = 12;
+constexpr uint32_t kRebootAfterFailingMs = 90u * 60000u;
+
+// What the heartbeat says about this board, as values the board fills (main.cpp) and refreshes
+// when a `radio.*` setting changes: the library reads no setting of its own.
+struct HeartbeatIdentity {
+  const char* agentVersion = "";           // meshmaster_agent_version()
+  const char* board = nullptr;             // boardName(); nullptr leaves the field out
+  const char* companionFirmware = nullptr; // meshcoreTag() on the Heltec, whose companion firmware is the one it is built from
+  RadioParameters radio;                   // what the radio is programmed with; sent while there is an identity
+};
 
 class AgentLoop {
  public:
@@ -70,8 +98,8 @@ class AgentLoop {
     uint32_t consecutiveFailures = 0;  // calls that got no answer since the last one that did
   };
 
-  void begin(SettingsStore& settings, AgentClient& server, AgentClock& clock, WifiLink& wifi, AgentMesh& mesh,
-             JobRunner& jobs);
+  // `identity` is read at every heartbeat, so the board keeps the object and refreshes it.
+  void begin(IUplink& server, IPlatform& platform, IMesh& mesh, JobRunner& jobs, const HeartbeatIdentity& identity);
 
   // The board's own identity, as 64 lowercase hex, or nullptr while the radio has made none.
   void setIdentity(const char* publicKeyHex);
@@ -88,8 +116,9 @@ class AgentLoop {
   // no batch, one blocking call inside a wait that was going to be spent waiting.
   void heartbeatIfOverdue();
 
-  // A new WiFi link: the config call is due again, and the heartbeat schedule starts over.
-  void onWifiUp();
+  // A new link (WiFi associated, on the Heltec): the config call is due again, and the heartbeat
+  // schedule starts over.
+  void onLinkUp();
 
   // After `set meshmaster.*` or `erase confirm`: forget a 401 and start again.
   void reconfigure();
@@ -116,10 +145,10 @@ class AgentLoop {
   uint32_t retrySeconds() const;
 
   // `server` on the console: the last heartbeat, the next, the last batch, the counters.
-  void report(Stream& out) const;
+  void report(TextOut& out) const;
 
   // `errors` on the console: every counter the heartbeat carries, and the ones beside them.
-  void reportErrors(Stream& out) const;
+  void reportErrors(TextOut& out) const;
 
   // One line for `status`.
   void describe(char* out, size_t cap) const;
@@ -130,26 +159,31 @@ class AgentLoop {
   void doPendingResults();
   void doObservations();
   void doJobs();
-  void buildHeartbeat(Heartbeat& hb) const;
+  void buildHeartbeat(Heartbeat& hb);
   // Acts on what the answer means (ServerPolicy.h) and says which action that was.
-  ServerAction noteFailure(const AgentClient::Call& call);
-  // WiFi up and a time that came off the network: the ceiling the backoff doubles to
+  ServerAction noteFailure(const IUplink::Call& call);
+  // The link up and a time that came off the network: the ceiling the backoff doubles to
   // (ServerPolicy.h's maxBackoffMs) is the lower one when this is true.
   bool linkProven() const;
   void succeeded();
   size_t buildBatch(uint32_t nowMs, char* out, size_t cap);
   uint32_t epochOf(uint32_t heardAtMillis, uint32_t nowMs) const;
+  // The platform's millisecond clock, under the name every line of AgentLoop.cpp already used
+  // when it was Arduino's.
+  uint32_t millis() const { return platform_->millis(); }
 
-  SettingsStore* settings_ = nullptr;
-  AgentClient* server_ = nullptr;
-  AgentClock* clock_ = nullptr;
-  WifiLink* wifi_ = nullptr;
-  AgentMesh* mesh_ = nullptr;
+  IUplink* server_ = nullptr;
+  IPlatform* platform_ = nullptr;
+  IClock* clock_ = nullptr;  // platform_->clock(): read for the timestamps, offered the server's time
+  IMesh* mesh_ = nullptr;
   JobRunner* jobs_ = nullptr;
+  const HeartbeatIdentity* identity_ = nullptr;
 
   ObservationRing ring_;
   Counters counters_;
   const char* publicKey_ = nullptr;
+  // The heartbeat's `jobTypes`: the thirteen, then the extension's (IJobExtension.h).
+  const char* jobTypes_[kJobTypeCount + kMaxExtensionTypes] = {};
 
   bool halted_ = false;         // a 401: nothing but the console from here
   bool inHeartbeat_ = false;    // a heartbeat is on the wire: the job pump may not start another

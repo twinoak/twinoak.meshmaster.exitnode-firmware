@@ -9,9 +9,12 @@
 //   JobResultReport(string ClientId, Outcome Outcome, DateTime StartedAt, DateTime FinishedAt,
 //                   IReadOnlyList<string>? PathUsed, int? Hops, int? RttMs, int? Transactions,
 //                   JsonElement? Data, string? Log)
+//   ExtendRequest(int Seconds) / ExtendReply(long JobId, DateTime LeaseUntil)
+//   ProgressReport(JsonElement? Data, string? Note) / ProgressReply(long JobId, DateTime RecordedAt)
 //
 // (src/MeshMaster.Contracts/Envelopes.cs in twinoak/meshmaster.dk; the bytes are held against
-// tests/fixtures/contracts/ClaimedJob.json and JobResultReport.json.)
+// tests/fixtures/contracts/ClaimedJob.json, JobResultReport.json, ExtendRequest.json,
+// ExtendReply.json, ProgressReport.json and ProgressReply.json.)
 //
 // Host-portable, like the envelopes beside it: the claim is read with ArduinoJson and the result
 // is written by JsonWriter.h, and both are what test/test_claim exercises without a board.
@@ -207,5 +210,31 @@ struct JobReport {
 };
 
 size_t writeJobResult(const JobReport& r, char* out, size_t cap);
+
+// ---------------------------------------------------------------------------------------------
+// The two calls the protocol has for a job that runs past its lease (API §3; task p1.5-15). The
+// reference agent never makes them and nothing on the Heltec does yet; the uplink seam
+// (IUplink.h) carries them so that another firmware can.
+
+// POST /agent/v1/jobs/{id}/extend's body: `{"seconds":N}`, 1-1800 (ExtendRequest).
+size_t writeExtendRequest(int seconds, char* out, size_t cap);
+
+struct ExtendReply {
+  long long jobId = 0;
+  char leaseUntil[40] = {0};   // as sent
+  uint32_t leaseUntilUnix = 0; // as parsed (Iso8601.h)
+};
+bool parseExtendReply(const char* json, size_t len, ExtendReply& out, char* err, size_t errCap);
+
+// POST /agent/v1/jobs/{id}/progress's body: `{"data":<object>,"note":"..."}` (ProgressReport).
+// `dataJson` is a JSON value already written, or nullptr to leave the field out; `note` likewise.
+size_t writeProgressReport(const char* dataJson, const char* note, char* out, size_t cap);
+
+struct ProgressReply {
+  long long jobId = 0;
+  char recordedAt[40] = {0};
+  uint32_t recordedAtUnix = 0;
+};
+bool parseProgressReply(const char* json, size_t len, ProgressReply& out, char* err, size_t errCap);
 
 }  // namespace mm

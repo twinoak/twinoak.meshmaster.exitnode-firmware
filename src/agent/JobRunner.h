@@ -1,11 +1,11 @@
 // One job at a time: claim, run, report (EXIT-NODES §5, §6, §7).
 //
 // The .NET agent's JobRunner has a companion on a cable and a handler per type; here the board
-// **is** the companion, so each handler is a direct call into MeshCore's mesh layer - the same
-// primitives the companion firmware runs when a phone asks - and the reply arrives in the
-// callbacks src/mesh/AgentMesh.h has. Simpler on the wire, and the same result shapes on the
-// server: what is posted is held to the .NET agent's bytes by test/test_job_results and
-// test/test_config_read.
+// **is** the companion, so each handler is a direct call into the mesh - the same primitives the
+// companion firmware runs when a phone asks, behind IMesh (IMesh.h) since task p1.5-15 - and the
+// reply arrives in the callbacks src/mesh/AgentMesh.h has. Simpler on the wire, and the same
+// result shapes on the server: what is posted is held to the .NET agent's bytes by
+// test/test_job_results and test/test_config_read.
 //
 // Thirteen types. Four of them log in as this board and nothing else (task 03):
 //
@@ -52,6 +52,10 @@
 //                 restore (there is no session after it, and before it a restore would make the
 //                 command unanswerable), the session dropped
 //
+// A fourteenth and after: a type that is none of the thirteen is offered to the extension the
+// board set, if any (IJobExtension.h), before it is answered `unsupported`. The runner still owns
+// the pacing, the lease, the envelope and the log; the extension writes the data and the outcome.
+//
 // **Every admin session on a repeater where this exit node holds a grant ends with the restore**
 // (task p4.1-60): `setperm <own key> <granted level>` as the session's last command, because on
 // stock firmware the login table *is* the ACL and the admin login has just rewritten our entry
@@ -65,26 +69,75 @@
 // The pacing is the budget the heartbeat last carried (agent/Airtime.h): one transaction at a
 // time, the gap between two, the ceiling in a minute. A board has one thread, so a job's waiting
 // is the loop's waiting - `pump` is what keeps the console and the OLED alive through it.
+//
+// Host-portable since task p1.5-15: the mesh, the server and the platform are the three seams
+// (IMesh.h, IUplink.h, IPlatform.h), and the scratch every job shares is this object's own
+// (Scratch, below) rather than a translation unit's statics.
 
 #pragma once
 
-#include <Stream.h>
-
+#include <cstdarg>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 
 #include "Airtime.h"
-#include "AgentClient.h"
 #include "ConfigApply.h"
 #include "ConfigRead.h"
+#include "IJobExtension.h"
+#include "IMesh.h"
+#include "IPlatform.h"
+#include "IUplink.h"
 #include "JobEnvelopes.h"
 #include "LoginSequence.h"
 #include "ResultBuffer.h"
 #include "Sessions.h"
-#include "mesh/AgentMesh.h"
-#include "net/Clock.h"
+#include "TextOut.h"
 
 namespace mm {
+
+// A result's free text, bounded here rather than at the envelope: 4 000 characters is what API §3
+// allows and a kilobyte is more than any of these jobs has to say. When it fills, the oldest
+// half goes - what a job did last is what a reader of its page wants. Nothing that could need
+// redacting ever reaches it: a password is never an argument of any line the runner adds, and
+// the .NET agent's redactor has nothing to do here because there is nothing to redact.
+class JobLog {
+ public:
+  void clear() {
+    len_ = 0;
+    buf_[0] = '\0';
+  }
+
+  void add(const char* fmt, ...) __attribute__((format(printf, 2, 3))) {
+    if (len_ + 2 >= sizeof buf_) drop();
+    if (len_ > 0) {
+      buf_[len_++] = ';';
+      buf_[len_++] = ' ';
+      buf_[len_] = '\0';
+    }
+    va_list args;
+    va_start(args, fmt);
+    const int n = std::vsnprintf(&buf_[len_], sizeof buf_ - len_, fmt, args);
+    va_end(args);
+    if (n > 0) {
+      len_ += static_cast<size_t>(n) < sizeof buf_ - len_ ? static_cast<size_t>(n) : sizeof buf_ - len_ - 1;
+    }
+    buf_[len_] = '\0';
+  }
+
+  const char* text() const { return buf_; }
+
+ private:
+  void drop() {
+    const size_t half = sizeof buf_ / 2;
+    std::memmove(buf_, buf_ + half, len_ - half + 1);
+    len_ -= half;
+  }
+
+  char buf_[1024] = {0};
+  size_t len_ = 0;
+};
 
 class JobRunner {
  public:
@@ -99,9 +152,61 @@ class JobRunner {
   };
   static constexpr int kRemembered = 10;
 
-  void begin(AgentMesh& mesh, AgentClient& server, AgentClock& clock, void (*pump)());
+  // The result's data and the whole body. A config read is the largest result here, and since
+  // meshmaster.dk's task p4.9-102 the read it is asked for is the Configuration tab's whole list
+  // - about twenty-six keys on a V3 at v1.17, `owner.info`'s 119 characters among them, the
+  // regions listing, the ACL's 23 tokens and up to twelve raw lines for the keys that firmware
+  // does not know. That is some 4.2 KB of JSON, which 4 608 bytes held only just; 8 192 holds it
+  // twice over.
+  //
+  // It is **not** sized for the worst case the constants allow (some 10.9 KB unescaped, and
+  // System.Text.Json's encoder can sextuple a byte), because that is a repeater answering 208
+  // characters to every one of 32 keys and not a repeater. `writeConfigReadResult` degrades
+  // instead - raw lines first, then trailing values, each said in the JSON - so the bound above is
+  // what a real read needs and not what a read is allowed to need (ConfigRead.h).
+  static constexpr size_t kDataCap = 8192;
+  static constexpr size_t kBodyCap = 10240;  // the data, the envelope and the log
+
+  // The scratch every job shares. One instance, the runner's own, and not automatic: the
+  // Arduino loop task has 8 KB of stack and a neighbour list alone is more than that. Until task
+  // p1.5-15 these were file statics of JobRunner.cpp; as the runner's they are still allocated
+  // once by the board (main.cpp's `jobs` is a namespace-scope object), a second runner in a host
+  // test gets its own, and the library puts no globals in a translation unit it does not control.
+  struct Scratch {
+    ClaimedJob jobs[kClaimMax];
+    char data[kDataCap];
+    char body[kBodyCap];
+    JobLog log;
+    Neighbour neighbours[kMaxNeighbours];
+    LppReading readings[kMaxLppReadings];
+    TraceHop hops[kMaxTraceHops + 1];
+    char pathHops[kMaxClaimPathHops][8];
+    const char* pathPtrs[kMaxClaimPathHops];
+    uint8_t pathBytes[kMaxClaimPathHops * 3];
+    uint8_t roundTrip[kMeshPathCap];
+    ConfigSnapshot snapshot;
+    AccessListEntry acl[kAccessListMaxEntries];
+    char cliReply[kMaxCliReplyLen + 1];       // the last CLI reply, as the repeater wrote it
+    char regionListing[kMaxCliReplyLen + 1];  // the `region` reply, kept across `region default`
+    char regionValue[kMaxConfigValueLen + 1];
+    char command[kPublicKeyHexLen + 32];
+    ConfigApplyOutcome applyOutcome;
+    // The one buffer of the runner's that carries a secret: `password <new>` or `set
+    // guest.password <new>`, built from the claim's credential right before the send and wiped
+    // right after it.
+    char secretLine[kMaxCliCommandLen + 1];
+  };
+  static_assert(kDataCap >= kMinConfigReadResultCap, "the config read's result must always be writable");
+  static_assert(kBodyCap > kDataCap + sizeof(JobLog), "the body carries the data, the envelope and the log");
+
+  void begin(IMesh& mesh, IUplink& server, IPlatform& platform, void (*pump)());
   void setIdentity(const char* publicKeyHex);
   void setBudget(const AgentBudget& budget) { gate_.setBudget(budget); }
+
+  // The handlers compiled in beside the thirteen (IJobExtension.h), or nullptr: the Heltec sets
+  // none. The heartbeat advertises its types after the thirteen.
+  void setExtension(IJobExtension* extension) { extension_ = extension; }
+  const IJobExtension* extension() const { return extension_; }
 
   // One claim and everything it hands over, each result posted as the job ends. Returns how many
   // jobs ran, or -1 when the claim itself did not come back - the caller's backoff then applies.
@@ -133,11 +238,11 @@ class JobRunner {
   uint32_t resultsDropped() const { return results_.dropped(); }
 
   // `jobs` on the console: the last ten with their outcome and their transactions.
-  void report(Stream& out) const;
+  void report(TextOut& out) const;
 
   // `sessions` on the console: per repeater, the class, the level and the age. No secret is in
   // a session - a key, a class, a role byte and a time.
-  void reportSessions(Stream& out) const;
+  void reportSessions(TextOut& out) const;
 
   // One line for `status`.
   void describe(char* out, size_t cap) const;
@@ -187,6 +292,10 @@ class JobRunner {
   Outcome runClockSync(const ClaimedJob& job, Context& ctx, size_t& dataLen);
   Outcome runPasswordSet(const ClaimedJob& job, Context& ctx, size_t& dataLen);
   Outcome runReboot(const ClaimedJob& job, Context& ctx, size_t& dataLen);
+  // A type that is none of the thirteen, offered to the extension (IJobExtension.h).
+  Outcome runExtension(const ClaimedJob& job, Context& ctx, size_t& dataLen);
+  class ExtensionJob;
+  friend class ExtensionJob;
   // The admin session every write needs: a login answered below admin is `unauthorized` at the
   // login, and nothing is sent (a CLI line is answered to admin only on this firmware).
   Outcome adminSession(const ClaimedJob& job, Context& ctx);
@@ -205,7 +314,7 @@ class JobRunner {
   // door's blank login, which a repeater with no guest password answers at guest (task p1.4-14) -
   // and nullptr only at class admin with no admin password, because there is no admin login
   // without one.
-  const char* loginMaterial(const ClaimedJob& job) const;
+  const char* loginMaterial(const ClaimedJob& job);
   // One login: counted, logged, the session bookkeeping a reply implies, and no policy beyond
   // that. ensureSession() is this twice; a discover is this once, for the path.
   LoginResult loginOnce(const ClaimedJob& job, Context& ctx, const char* material, const char* what);
@@ -227,12 +336,13 @@ class JobRunner {
   Outcome request(const ClaimedJob& job, Context& ctx, const char* what, uint8_t reqType, const uint8_t* data,
                   uint8_t len);
   // One CLI line, the same way; the reply's text lands in the runner's own buffer. With `retry`
-  // false it is sent once whatever comes back, which is what a write needs. `timestamp` is the
-  // sender timestamp of the first attempt (0: the RTC's unique second, which a second attempt
-  // always takes); `sensitive` stars the frame's body in the frame log (a `password` line);
-  // `escape` is the one line that goes out past the lease, the region loader's terminator.
+  // false it is sent once whatever comes back, which is what a write needs. The mesh draws the
+  // sender timestamp of every attempt (IMesh::sendCli) and hands it back; `timestampUsed`, when
+  // given, receives the one of the last attempt, for a caller that records it. `sensitive` stars
+  // the frame's body in the frame log (a `password` line); `escape` is the one line that goes out
+  // past the lease, the region loader's terminator.
   Outcome cliLine(const ClaimedJob& job, Context& ctx, const char* what, const char* command, bool retry,
-                  uint32_t timestamp = 0, bool sensitive = false, bool escape = false);
+                  uint32_t* timestampUsed = nullptr, bool sensitive = false, bool escape = false);
   // The common shape of the two: the send, the wait, the retry and the re-login.
   template <typename Send>
   Outcome exchange(const ClaimedJob& job, Context& ctx, const char* what, bool retry, bool text, Send send,
@@ -254,12 +364,17 @@ class JobRunner {
   bool post(long long jobId, const char* body, size_t len);
   // Every remembered job with this id is marked posted, once its result has gone through.
   void markPosted(long long jobId);
+  // The platform's millisecond clock, under the name every line of JobRunner.cpp already used
+  // when it was Arduino's.
+  uint32_t millis() const { return platform_->millis(); }
 
-  AgentMesh* mesh_ = nullptr;
-  AgentClient* server_ = nullptr;
-  AgentClock* clock_ = nullptr;
+  IMesh* mesh_ = nullptr;
+  IUplink* server_ = nullptr;
+  IPlatform* platform_ = nullptr;
+  const IClock* clock_ = nullptr;  // platform_->clock(), for the lease and the timestamps
   void (*pump_)() = nullptr;
   const char* publicKey_ = nullptr;
+  IJobExtension* extension_ = nullptr;
 
   AirtimeGate gate_;
   SessionStore sessions_;
@@ -278,6 +393,8 @@ class JobRunner {
   // was written with, so the server de-duplicates it however many times it arrives (API §3), and
   // the buffer is bounded and drops from the oldest end (ResultBuffer.h).
   ResultBuffer results_;
+
+  Scratch scratch_;
 };
 
 }  // namespace mm

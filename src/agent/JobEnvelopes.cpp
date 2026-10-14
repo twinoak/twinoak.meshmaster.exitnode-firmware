@@ -423,4 +423,91 @@ size_t writeJobResult(const JobReport& r, char* out, size_t cap) {
   return w.overflowed() ? 0 : w.length();
 }
 
+// ---------------------------------------------------------------------------------------------
+// extend and progress (task p1.5-15)
+
+namespace {
+
+// The `{jobId, <when>}` answer both calls give: the id as a number, the time as the server
+// writes it, kept as sent and as parsed.
+bool parseJobStamp(const char* json, size_t len, const char* whenKey, long long& jobId, char* when, size_t whenCap,
+                   uint32_t& whenUnix, char* err, size_t errCap) {
+  JsonDocument doc;
+  const DeserializationError e = deserializeJson(doc, json, len);
+  if (e) {
+    char msg[96];
+    std::snprintf(msg, sizeof msg, "not JSON: %s", e.c_str());
+    say(err, errCap, msg);
+    return false;
+  }
+  JsonObjectConst root = doc.as<JsonObjectConst>();
+  if (root.isNull()) {
+    say(err, errCap, "not a JSON object");
+    return false;
+  }
+  JsonVariantConst id = root["jobId"];
+  if (id.isNull() || !id.is<long long>()) {
+    say(err, errCap, "missing or not a number: jobId");
+    return false;
+  }
+  const char* text = root[whenKey];
+  uint32_t epoch = 0;
+  if (text == nullptr || !parseUtc(text, epoch)) {
+    char msg[64];
+    std::snprintf(msg, sizeof msg, "missing or malformed: %s", whenKey);
+    say(err, errCap, msg);
+    return false;
+  }
+  jobId = id.as<long long>();
+  std::snprintf(when, whenCap, "%s", text);
+  whenUnix = epoch;
+  return true;
+}
+
+}  // namespace
+
+size_t writeExtendRequest(int seconds, char* out, size_t cap) {
+  JsonWriter w(out, cap);
+  w.beginObject();
+  w.key("seconds");
+  w.integer(seconds);
+  w.endObject();
+  return w.overflowed() ? 0 : w.length();
+}
+
+bool parseExtendReply(const char* json, size_t len, ExtendReply& out, char* err, size_t errCap) {
+  ExtendReply r;
+  if (!parseJobStamp(json, len, "leaseUntil", r.jobId, r.leaseUntil, sizeof r.leaseUntil, r.leaseUntilUnix, err,
+                     errCap)) {
+    return false;
+  }
+  out = r;
+  return true;
+}
+
+size_t writeProgressReport(const char* dataJson, const char* note, char* out, size_t cap) {
+  JsonWriter w(out, cap);
+  w.beginObject();
+  if (dataJson != nullptr) {
+    w.key("data");
+    w.raw(dataJson);
+  }
+  if (note != nullptr) {
+    w.key("note");
+    w.string(note);
+  }
+  w.endObject();
+  return w.overflowed() ? 0 : w.length();
+}
+
+bool parseProgressReply(const char* json, size_t len, ProgressReply& out, char* err, size_t errCap) {
+  ProgressReply r;
+  if (!parseJobStamp(json, len, "recordedAt", r.jobId, r.recordedAt, sizeof r.recordedAt, r.recordedAtUnix, err,
+                     errCap)) {
+    return false;
+  }
+  out = r;
+  return true;
+}
+
 }  // namespace mm
