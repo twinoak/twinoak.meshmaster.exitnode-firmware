@@ -57,21 +57,56 @@ MeshCore's core, the Heltec variant and its display driver are compiled from the
 pinned package beside it, and no example of upstream's is built.
 
 [`lib/agent-core/`](lib/agent-core/library.json) is **the agent**, a library
-with a name and a version of its own since pile 1.5: the job runner and the
-agent loop, the envelopes and results of the agent API, the reply codec, the
-ISO-8601 helper, the credential buffer, the config read, the apply engine and
-the CLI reply rules, the airtime budget, the session cache, the observation
-ring, the rate limiter, the offline result buffer, the log ring and the log's
-formatting, the backoff, and the policy that reads the server's status codes.
-It stands on three seams — `lib/agent-core/include/agent/IMesh.h`, `IUplink.h`,
-`IPlatform.h` — with this board's mesh, WiFi client and ESP32 behind them, it
+with a name and a version of its own since pile 1.5 — the next section is what
+it is and who it is for. The files of `src/` the native tests still reach are
+the key table, the console parser, the OLED's four lines and the version
+string; the rest of `src/` needs a board.
+
+## The library
+
+Since pile 1.5 the portable half of the agent is
+[`lib/agent-core/`](lib/agent-core/library.json), a library with a manifest, an
+ESP-IDF component file and a version of its own: the job runner and the agent
+loop, the envelopes and results of the agent API, the reply codec, the ISO-8601
+helper, the credential buffer, the config read, the apply engine and the CLI
+reply rules, the airtime budget, the session cache, the observation ring, the
+rate limiter, the offline result buffer, the log ring and the log's formatting,
+the backoff, and the policy that reads the server's status codes. It stands on
+three seams — `lib/agent-core/include/agent/IMesh.h`, `IUplink.h`,
+`IPlatform.h` — with this board's mesh, WiFi client and ESP32 behind them; it
 includes nothing of Arduino, the ESP-IDF, WiFi, NVS or MeshCore
-(`test/test_library` is that boundary, checked), and `pio test -e native`
-compiles the whole of it on the host. A second firmware takes it at a tag the
-way this one takes MeshCore — [`docs/upstream.md`](docs/upstream.md) says what
-pinning it means — and the files of `src/` the native tests still reach are the
-key table, the console parser, the OLED's four lines and the version string;
-the rest of `src/` needs a board.
+(`test/test_library` is that boundary, as an allow list over every include);
+and `pio test -e native` compiles and runs the whole of it on a host.
+
+**A second firmware takes it at a tag**, the way this one takes MeshCore.
+[`docs/library.md`](docs/library.md) is the page for that firmware: what it
+gets and what it must provide, the three interfaces method by method, the
+lifecycle, the rails it inherits and must keep, the fixtures that are the wire
+contract, and what a bump may change.
+[`docs/upstream.md`](docs/upstream.md) says what pinning it means and
+[`CHANGELOG.md`](CHANGELOG.md) is what a consumer watches. The first consumer
+is the Walter of a repeater-v2 unit, whose platform is the ESP-IDF and whose
+mesh is a RAK on a serial link — which is why there are three interfaces and
+not one.
+
+**Where things stand at `v0.2.0`.** The tree moved and the behaviour did not.
+The Heltec does exactly what it did at `v0.1.4`: every native test that existed
+before this pile passes with **no assertion changed**, and against that release
+the V3 image is **208 bytes more RAM and 8.4 kB less flash** (the V4, 208 and
+8.3 kB). Both figures are one thing: 17 kB of the agent's buffers were
+*initialised* data that the image carried and the boot copied into RAM, and as
+members of one scratch object they are zero-initialised instead — `.dram0.data`
+−16 896, `.dram0.bss` +17 104 — against which code and read-only data grew 8.3
+kB for the seams, the two new uplink calls and the one-wake mode.
+`tasks/phase-1.5/reports/` has it task by task and symbol by symbol.
+
+What is new is where the agent *lives* and how much of it can be tested without
+a board — the host suite now runs the loop, the runner and all thirteen job
+types end to end against a scripted repeater, a scripted server and a clock
+that only moves when a test says so ([`docs/host.md`](docs/host.md)) — and that
+the loop has a second way to be driven, `wake(intent, budget)`, for a device
+that sleeps. The Heltec does not call it, and the linker leaves it out of the
+board image altogether.
 
 ## Flashing it
 
