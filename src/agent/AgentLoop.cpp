@@ -1,17 +1,12 @@
 #include "AgentLoop.h"
 
-#include <Arduino.h>
-#include <esp_system.h>
-
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
 
 #include "Backoff.h"
-#include "Health.h"
 #include "Iso8601.h"
 #include "Log.h"
-#include "version.h"
 
 namespace mm {
 
@@ -44,14 +39,14 @@ bool elapsed(uint32_t now, uint32_t deadline) { return static_cast<int32_t>(now 
 
 }  // namespace
 
-void AgentLoop::begin(SettingsStore& settings, AgentClient& server, AgentClock& clock, WifiLink& wifi,
-                      AgentMesh& mesh, JobRunner& jobs) {
-  settings_ = &settings;
+void AgentLoop::begin(IUplink& server, IPlatform& platform, IMesh& mesh, JobRunner& jobs,
+                      const HeartbeatIdentity& identity) {
   server_ = &server;
-  clock_ = &clock;
-  wifi_ = &wifi;
+  platform_ = &platform;
+  clock_ = &platform.clock();
   mesh_ = &mesh;
   jobs_ = &jobs;
+  identity_ = &identity;
   mesh_->setRing(&ring_);
   budget_.maxTransactionsPerMinute = kDefaultMaxTransactionsPerMinute;
   budget_.minGapSeconds = kDefaultMinGapSeconds;
@@ -63,9 +58,10 @@ void AgentLoop::setIdentity(const char* publicKeyHex) {
   jobs_->setIdentity(publicKeyHex);
 }
 
-void AgentLoop::onWifiUp() {
+void AgentLoop::onLinkUp() {
   // The first link is not a reconnection; every one after it is.
-  counters_.wifiReconnects = wifi_->connects() > 0 ? static_cast<uint32_t>(wifi_->connects() - 1) : 0;
+  const IUplink::LinkState link = server_->link();
+  counters_.wifiReconnects = link.connects > 0 ? link.connects - 1 : 0;
   configDue_ = true;
   configAt_ = millis() + 1500;  // a moment for DNS and SNTP to get going
   heartbeatScheduled_ = false;
@@ -78,13 +74,13 @@ void AgentLoop::reconfigure() {
   halted_ = false;
   backoffMs_ = 0;
   holdUntil_ = millis();
-  configDue_ = wifi_ != nullptr && wifi_->connected();
+  configDue_ = server_ != nullptr && server_->link().up;
   configAt_ = millis();
   heartbeatScheduled_ = false;
 }
 
 void AgentLoop::loop() {
-  if (server_ == nullptr || halted_ || !server_->configured() || !wifi_->connected()) return;
+  if (server_ == nullptr || halted_ || !server_->configured() || !server_->link().up) return;
   const uint32_t now = millis();
   if (!elapsed(now, holdUntil_)) return;
 
@@ -133,45 +129,46 @@ void AgentLoop::doConfig() {
   nextHeartbeatAt_ = millis();  // the first heartbeat goes as soon as the hold, if any, is over
 }
 
-void AgentLoop::buildHeartbeat(Heartbeat& hb) const {
-  hb.agentVersion = meshmaster_agent_version();
+void AgentLoop::buildHeartbeat(Heartbeat& hb) {
+  hb.agentVersion = identity_->agentVersion;
   hb.transport = "onboard";
   hb.at = clock_->now();
   hb.companionPublicKey = publicKey_;              // nullptr while the radio has made no identity
-  hb.companionFirmware = publicKey_ == nullptr ? nullptr : meshcoreTag();
+  hb.companionFirmware = publicKey_ == nullptr ? nullptr : identity_->companionFirmware;
   hb.hasRadio = publicKey_ != nullptr;
-  if (hb.hasRadio) {
-    hb.radio.freqMHz = settings_->numberDouble(*findKey("radio.freq"));
-    hb.radio.bwKHz = settings_->numberDouble(*findKey("radio.bw"));
-    hb.radio.sf = static_cast<int>(settings_->number(*findKey("radio.sf")));
-    hb.radio.cr = static_cast<int>(settings_->number(*findKey("radio.cr")));
+  if (hb.hasRadio) hb.radio = identity_->radio;
+  // The thirteen this firmware has a handler for - every type of API §3 since task 05 - and
+  // after them the types of the extension the board compiled in, if any (IJobExtension.h):
+  // routing requires the type advertised, so this list is what the server may send and nothing
+  // else (task p3-53). The Heltec sets no extension, and sends the thirteen.
+  int count = 0;
+  for (int i = 0; i < kJobTypeCount; i++) jobTypes_[count++] = kJobTypes[i];
+  if (const IJobExtension* extension = jobs_->extension()) {
+    const int extra = extension->typeCount() < kMaxExtensionTypes ? extension->typeCount() : kMaxExtensionTypes;
+    for (int i = 0; i < extra; i++) jobTypes_[count++] = extension->type(i);
   }
-  // The thirteen this firmware has a handler for - every type of API §3 since task 05: routing
-  // requires the type advertised, so this list is what the server may send and nothing else
-  // (task p3-53).
   hb.hasJobTypes = true;
-  hb.jobTypes = kJobTypes;
-  hb.jobTypeCount = kJobTypeCount;
+  hb.jobTypes = jobTypes_;
+  hb.jobTypeCount = count;
   hb.hasBudget = true;
   hb.budget = budget_;
   // The radio is the companion here: "connected" is "the SX1262 came up", and a board whose
   // radio did not is an exit node that hears nothing, which is what the alert of §10 is for.
   hb.companionConnected = publicKey_ != nullptr;
   hb.queueDepth = jobs_->queueDepth();
-  hb.board = boardName();
+  hb.board = identity_->board;
 }
 
-// The board's own link, proven: WiFi associated *and* a time that came off the network. An RTC
-// that held a plausible time across a software reset proves nothing about the network, so it is
-// not enough; SNTP having answered, or the server's own time having been taken, means a packet
-// of ours left this board and something answered it (task p1.2-10).
+// The board's own link, proven: the link up *and* a time that came off the network. An RTC that
+// held a plausible time across a software reset proves nothing about the network, so it is not
+// enough; SNTP having answered, or the server's own time having been taken, means a packet of
+// ours left this board and something answered it (task p1.2-10; IClock::fromNetwork).
 bool AgentLoop::linkProven() const {
-  if (wifi_ == nullptr || !wifi_->connected() || clock_ == nullptr) return false;
-  const AgentClock::Source source = clock_->source();
-  return source == AgentClock::Source::Sntp || source == AgentClock::Source::Server;
+  if (server_ == nullptr || clock_ == nullptr || !server_->link().up) return false;
+  return clock_->fromNetwork();
 }
 
-ServerAction AgentLoop::noteFailure(const AgentClient::Call& call) {
+ServerAction AgentLoop::noteFailure(const IUplink::Call& call) {
   const ServerAction action = actionFor(call.reachable, call.httpStatus, call.retryAfterS);
   switch (action) {
     case ServerAction::Halt:
@@ -207,7 +204,7 @@ ServerAction AgentLoop::noteFailure(const AgentClient::Call& call) {
       // while it is not: a server that is back deserves a call within minutes, and a WiFi that
       // associates and goes nowhere deserves the long wait it always had (task p1.2-10).
       backoffMs_ = nextBackoffMs(backoffMs_, linkProven());
-      const uint32_t wait = withJitter(backoffMs_, esp_random());
+      const uint32_t wait = withJitter(backoffMs_, platform_->random());
       holdUntil_ = millis() + wait;
       LOG_I("server: next attempt in %lu s (the %lu s step, jittered)", static_cast<unsigned long>(wait / 1000),
             static_cast<unsigned long>(backoffMs_ / 1000));
@@ -218,14 +215,14 @@ ServerAction AgentLoop::noteFailure(const AgentClient::Call& call) {
       // and twenty minutes of a server being away is a deploy (src/Health.h).
       const uint32_t failingForMs = millis() - firstFailureAtMillis_;
       if (counters_.consecutiveFailures >= kRebootAfterFailures && failingForMs >= kRebootAfterFailingMs &&
-          wifi_ != nullptr && wifi_->connected()) {
-        char why[kMaxRebootWhyLen + 1];
-        // 41 characters and two counts of at most ten digits each: inside kMaxRebootWhyLen, which
-        // -Werror=format-truncation is what checks.
+          server_->link().up) {
+        char why[64];
+        // 41 characters and two counts of at most ten digits each: inside Health.h's
+        // kMaxRebootWhyLen (63), which -Werror=format-truncation is what checks.
         std::snprintf(why, sizeof why, "%lu server calls unanswered in %lu min, wifi up",
                       static_cast<unsigned long>(counters_.consecutiveFailures),
                       static_cast<unsigned long>(failingForMs / 60000));
-        healthRebootNow(why);
+        platform_->rebootForHealth(why);
       }
       break;
     }
@@ -241,7 +238,7 @@ void AgentLoop::succeeded() {
 
 void AgentLoop::heartbeatIfOverdue() {
   if (halted_ || inHeartbeat_ || server_ == nullptr || !server_->configured() || !heartbeatScheduled_) return;
-  if (wifi_ == nullptr || !wifi_->connected()) return;
+  if (!server_->link().up) return;
   const uint32_t now = millis();
   if (!elapsed(now, holdUntil_) || !elapsed(now, nextHeartbeatAt_)) return;
   LOG_D("server: the heartbeat is due inside a job; sending it from the job's own wait");
@@ -261,7 +258,7 @@ void AgentLoop::doHeartbeat() {
       // how many times this board restarted itself to clear a wedged stack (src/Health.h). The
       // reboot count is in RTC memory, so it survives the restart it counts.
       {"resultsDropped", jobs_->resultsDropped()},
-      {"reboots", selfReboots()},
+      {"reboots", platform_->selfReboots()},
   };
   hb.errors = errors;
   hb.errorCount = static_cast<int>(sizeof errors / sizeof errors[0]);
@@ -379,8 +376,8 @@ size_t AgentLoop::buildBatch(uint32_t nowMs, char* out, size_t cap) {
   if (count == 0) return 0;
   if (batchId_[0] == '\0') {
     // "obs-" and 32 hex, the shape the .NET observer's Guid gives its batches.
-    std::snprintf(batchId_, sizeof batchId_, "obs-%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32, esp_random(),
-                  esp_random(), esp_random(), esp_random());
+    std::snprintf(batchId_, sizeof batchId_, "obs-%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32,
+                  platform_->random(), platform_->random(), platform_->random(), platform_->random());
   }
   return writeObservationBatch(batchId_, g_items, static_cast<int>(count), out, cap);
 }
@@ -444,7 +441,7 @@ void AgentLoop::doJobs() {
   succeeded();
 }
 
-void AgentLoop::report(Stream& out) const {
+void AgentLoop::report(TextOut& out) const {
   const uint32_t now = millis();
   char when[24];
 
@@ -452,7 +449,7 @@ void AgentLoop::report(Stream& out) const {
     out.println("state     halted: the server refused the token (http 401). Set meshmaster.token again.");
   } else if (!server_->configured()) {
     out.println("state     not configured: meshmaster.token is needed");
-  } else if (!wifi_->connected()) {
+  } else if (!server_->link().up) {
     out.println("state     waiting for wifi");
   } else if (!elapsed(now, holdUntil_)) {
     out.printf("state     holding off for %lu s\r\n", static_cast<unsigned long>((holdUntil_ - now) / 1000));
@@ -494,21 +491,22 @@ void AgentLoop::report(Stream& out) const {
              "resultsDropped %lu, reboots %lu; `errors` has the rest\r\n",
              static_cast<unsigned long>(mesh_->overheard()), static_cast<unsigned long>(counters_.wifiReconnects),
              static_cast<unsigned long>(counters_.httpFailures), static_cast<unsigned long>(ring_.dropped()),
-             static_cast<unsigned long>(jobs_->resultsDropped()), static_cast<unsigned long>(selfReboots()));
+             static_cast<unsigned long>(jobs_->resultsDropped()), static_cast<unsigned long>(platform_->selfReboots()));
   out.printf("requests  %u in the last minute of the 120 the policy allows, %lu held back; %lu batch(es) refused\r\n",
              static_cast<unsigned>(server_->limiter().inWindow(now)), static_cast<unsigned long>(server_->limiter().held()),
              static_cast<unsigned long>(counters_.observationsRefused));
 }
 
-void AgentLoop::reportErrors(Stream& out) const {
+void AgentLoop::reportErrors(TextOut& out) const {
   // The six the heartbeat carries, first and by their wire names, so that a figure on the exit
   // node's page can be found here without a translation.
+  const IUplink::LinkState link = server_->link();
   out.println("heartbeat the six counters the heartbeat reports, by the names the server shows");
   out.printf("  overheard            %lu  (mesh messages counted and dropped unread - a busy channel, not a fault)\r\n",
              static_cast<unsigned long>(mesh_->overheard()));
   out.printf("  wifiReconnects       %lu  (%u link(s) in all, %u drop(s))\r\n",
-             static_cast<unsigned long>(counters_.wifiReconnects), static_cast<unsigned>(wifi_->connects()),
-             static_cast<unsigned>(wifi_->drops()));
+             static_cast<unsigned long>(counters_.wifiReconnects), static_cast<unsigned>(link.connects),
+             static_cast<unsigned>(link.drops));
   out.printf("  httpFailures         %lu  (%lu in a row now, failing for %lu min; it restarts itself at %lu in "
              "a row and %lu min)\r\n",
              static_cast<unsigned long>(counters_.httpFailures),
@@ -524,7 +522,7 @@ void AgentLoop::reportErrors(Stream& out) const {
              static_cast<unsigned long>(jobs_->resultsDropped()), jobs_->queueDepth(),
              static_cast<unsigned long>(counters_.resultsPosted));
   out.printf("  reboots              %lu  (restarts this firmware asked for; `reboots` says why)\r\n",
-             static_cast<unsigned long>(selfReboots()));
+             static_cast<unsigned long>(platform_->selfReboots()));
   out.println("beside    counters the server does not get, for a person at the port");
   out.printf("  claims unanswered    %lu\r\n", static_cast<unsigned long>(counters_.claimFailures));
   out.printf("  results not taken    %lu  (at the first attempt)\r\n",

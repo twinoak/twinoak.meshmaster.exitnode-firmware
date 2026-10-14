@@ -54,7 +54,10 @@ session cache, the observation ring, the offline result buffer, the log ring,
 the rate limiter, the backoff, the reply codec, the policy that reads the
 server's status codes, the OLED's four lines and the version string) are what
 the native tests
-exercise; the rest needs a board.
+exercise; the rest needs a board. Since pile 1.5 the job runner and the agent
+loop stand on three seams (`src/agent/IMesh.h`, `IUplink.h`, `IPlatform.h`)
+with the board's mesh, WiFi client and ESP32 behind them, so that another
+firmware can run the same job logic over its own.
 
 ## Flashing it
 

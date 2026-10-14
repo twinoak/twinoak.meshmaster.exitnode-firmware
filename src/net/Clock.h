@@ -14,11 +14,14 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "agent/IPlatform.h"
 #include "mesh/MeshCoreHeaders.h"
 
 namespace mm {
 
-class AgentClock {
+// The clock half of the platform seam (agent/IPlatform.h's IClock): what the runner's lease
+// check, the heartbeat's `at` and every result's timestamps read.
+class AgentClock : public IClock {
  public:
   enum class Source : uint8_t {
     None,    // the RTC holds MeshCore's placeholder (15 May 2024) or something implausible
@@ -36,14 +39,18 @@ class AgentClock {
 
   void loop();
 
-  bool hasTime() const { return source_ != Source::None; }
-  uint32_t now() const;
+  bool hasTime() const override { return source_ != Source::None; }
+  uint32_t now() const override;
   Source source() const { return source_; }
-  const char* sourceName() const;
+  const char* sourceName() const override;
+  // SNTP having answered, or the server's own time having been taken, means a packet of ours
+  // left this board and something answered it; an RTC that held a time across a software reset
+  // proves nothing about the network (task p1.2-10).
+  bool fromNetwork() const override { return source_ == Source::Sntp || source_ == Source::Server; }
 
   // Offer the server's time. Returns true when the clock was set from it; `difference` is
   // server minus local before any change, for the log.
-  bool takeServerTime(uint32_t serverEpoch, int32_t& difference);
+  bool takeServerTime(uint32_t serverEpoch, int32_t& difference) override;
 
   // One line for `status`: "2026-09-28T12:03:14Z (sntp)" or "no time (sntp not answered yet)".
   void describe(char* out, size_t cap) const;

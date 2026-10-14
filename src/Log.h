@@ -11,9 +11,14 @@
 //     strings; this firmware never holds one as a printable thing;
 //   - every line also goes into the four-kilobyte ring `dump` prints (LogRing.h), which is a
 //     board's answer to the Pi agent's journal: the same bytes the port carried, and no others.
+//
+// Where a formatted line goes is the platform's (agent/IPlatform.h, task p1.5-15): the Heltec
+// leaves logSetSink() alone and gets its serial port and the ring; another platform sets a sink
+// and gets every line the same way, formatted here.
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace mm {
@@ -28,6 +33,12 @@ LogLevel logLevel();
 const char* logLevelName(LogLevel level);
 
 void logf(LogLevel level, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
+
+// The sink one formatted line goes to - the stamped line, CR LF and all, and its length. Unset (the
+// default, and the Heltec's), a line goes to the serial port and into the ring; set, it goes to
+// the sink and nowhere else - the sink owns the ring then, if it wants one.
+using LogSink = void (*)(const char* line, size_t len);
+void logSetSink(LogSink sink);
 
 }  // namespace mm
 

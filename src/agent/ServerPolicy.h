@@ -31,7 +31,7 @@ enum class ServerAction : uint8_t {
 
 // `reachable` is false when no reply arrived at all - DNS, TCP, the TLS handshake, a timeout -
 // and then `httpStatus` is not read. `retryAfterS` is the answer's Retry-After in seconds
-// (AgentClient::Call::retryAfterS), 0 when it carried none this client could parse: it is read
+// (IUplink::Call::retryAfterS), 0 when it carried none this client could parse: it is read
 // for the statuses of `saysWhenToComeBack` below and ignored for every other.
 ServerAction actionFor(bool reachable, int httpStatus, uint32_t retryAfterS);
 

@@ -14,7 +14,11 @@
 //   net/        WiFi with backoff, and the clock (SNTP, the server as fallback)
 //   agent/      the TLS client, the root it verifies against, the envelopes and the reply
 //               structs (host-portable), the observation ring, the airtime budget, the session
-//               cache, the job runner, and the loop that drives them
+//               cache, the job runner, and the loop that drives them - the runner and the loop
+//               on three seams since task p1.5-15 (IMesh, IUplink, IPlatform), which this file
+//               wires to the real things below
+//   platform/   the Arduino-on-ESP32 end of the platform seam: millis, delay, random, the heap,
+//               the reboot for health
 //   mesh/       the mesh in companion role: hears adverts, forwards nothing, and speaks a job
 //   ui/         the OLED's four lines, as a pure function over a struct this file fills
 //   Log.h       what the serial port prints besides the console's replies, and the 4 kB ring
@@ -38,9 +42,11 @@
 #include "agent/Iso8601.h"
 #include "agent/JobRunner.h"
 #include "console/Console.h"
+#include "console/StreamOut.h"
 #include "mesh/AgentMesh.h"
 #include "net/Clock.h"
 #include "net/WifiLink.h"
+#include "platform/Esp32Platform.h"
 #include "settings/Store.h"
 #include "ui/DisplayLines.h"
 #include "ui/Oled.h"
@@ -55,9 +61,11 @@ namespace {
 mm::SettingsStore settings;
 mm::WifiLink wifi;
 mm::AgentClock agentClock;
+mm::Esp32Platform platform(agentClock);
 mm::AgentClient server;
-mm::JobRunner jobs;
+mm::JobRunner jobs;  // the scratch every job shares is inside it (JobRunner::Scratch), as .bss
 mm::AgentLoop agent;
+mm::HeartbeatIdentity identity;  // what the heartbeat says about this board; refreshed on `set radio.*`
 mm::Console console;
 mm::Oled oled;
 
@@ -89,6 +97,20 @@ void applyRadioSettings() {
   radio_driver.setParams(freq, bw, static_cast<uint8_t>(sf), static_cast<uint8_t>(cr));
   radio_driver.setTxPower(static_cast<int8_t>(tx));
   LOG_I("radio: %.3f MHz, bw %.1f kHz, sf %d, cr %d, tx %d dBm", static_cast<double>(freq), static_cast<double>(bw), sf, cr, tx);
+}
+
+// What the heartbeat says about this board (src/agent/AgentLoop.h): the version, the board, the
+// companion firmware this image is built from, and the radio block as the settings have it -
+// read here, once at boot and again on every `set radio.*` and `erase confirm`, so that the loop
+// reads no setting of its own.
+void fillIdentity() {
+  identity.agentVersion = meshmaster_agent_version();
+  identity.board = mm::boardName();
+  identity.companionFirmware = mm::meshcoreTag();
+  identity.radio.freqMHz = settings.numberDouble(*mm::findKey("radio.freq"));
+  identity.radio.bwKHz = settings.numberDouble(*mm::findKey("radio.bw"));
+  identity.radio.sf = static_cast<int>(settings.number(*mm::findKey("radio.sf")));
+  identity.radio.cr = static_cast<int>(settings.number(*mm::findKey("radio.cr")));
 }
 
 void applyLogSettings() {
@@ -233,20 +255,33 @@ void printMesh(Stream& out) {
 }
 
 // `server`: the heartbeat and the observation batches - the last, the next, and the counters
-// the heartbeat itself carries.
-void printServer(Stream& out) { agent.report(out); }
+// the heartbeat itself carries. The library's reports write to a TextOut (src/agent/TextOut.h);
+// StreamOut is the serial port behind one.
+void printServer(Stream& out) {
+  mm::StreamOut text(out);
+  agent.report(text);
+}
 
 // `jobs`: the budget in force, what has been claimed, and the last ten with their outcome and
 // their transaction count.
-void printJobs(Stream& out) { jobs.report(out); }
+void printJobs(Stream& out) {
+  mm::StreamOut text(out);
+  jobs.report(text);
+}
 
 // `sessions`: the repeater logins held - per repeater the class, the level and the age. A
 // session is a key, a class, a role byte and a time; no secret is in one.
-void printSessions(Stream& out) { jobs.reportSessions(out); }
+void printSessions(Stream& out) {
+  mm::StreamOut text(out);
+  jobs.reportSessions(text);
+}
 
 // `errors`: every counter the heartbeat carries, by the name the server shows it under, and the
 // ones beside them that only a person at the port ever sees.
-void printErrors(Stream& out) { agent.reportErrors(out); }
+void printErrors(Stream& out) {
+  mm::StreamOut text(out);
+  agent.reportErrors(text);
+}
 
 // `reboots`: why this board restarted, the last five, from RTC memory - which a power cut clears
 // and a watchdog reset does not (src/Health.h).
@@ -328,6 +363,7 @@ void onSettingChanged(const mm::KeyDef& key) {
     server.reconfigure();
     agent.reconfigure();
   } else if (std::strncmp(key.name, "radio.", 6) == 0) {
+    fillIdentity();  // the next heartbeat says what the radio is now programmed with
     if (radio_ok) applyRadioSettings();
   } else if (std::strncmp(key.name, "log.", 4) == 0) {
     applyLogSettings();
@@ -342,6 +378,7 @@ void onErased() {
   server.reconfigure();
   agent.reconfigure();
   wifi.reconfigure();
+  fillIdentity();
   if (radio_ok) applyRadioSettings();
 }
 
@@ -432,9 +469,13 @@ void setup() {
 
   agentClock.begin(rtc_clock);
   wifi.begin(settings);
-  server.begin(settings, agentClock, meshmaster_agent_version());
-  jobs.begin(the_mesh, server, agentClock, &pumpDuringAJob);
-  agent.begin(settings, server, agentClock, wifi, the_mesh, jobs);
+  server.begin(settings, agentClock, wifi, meshmaster_agent_version());
+  fillIdentity();
+  // The runner and the loop on their three seams (src/agent/IMesh.h, IUplink.h, IPlatform.h):
+  // the mesh in this process, the WiFi client, and Arduino on this ESP32. The Heltec sets no job
+  // extension (IJobExtension.h).
+  jobs.begin(the_mesh, server, platform, &pumpDuringAJob);
+  agent.begin(server, platform, the_mesh, jobs, identity);
   agent.setIdentity(public_key_hex[0] != 0 ? public_key_hex : nullptr);
   if (!server.configured()) LOG_I("server: not configured; set meshmaster.token (meshmaster.url is https://meshmaster.dk unless set)");
   if (display_ok) {
@@ -458,7 +499,7 @@ void loop() {
 
   if (wifi.takeConnectedEdge()) {
     agentClock.startSntp();
-    agent.onWifiUp();
+    agent.onLinkUp();
   }
 
   // The config call, the heartbeat every pollIntervalS and the observation batches between them:

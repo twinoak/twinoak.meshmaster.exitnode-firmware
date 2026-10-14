@@ -324,7 +324,8 @@ SendResult AgentMesh::sendRequest(uint8_t reqType, const uint8_t* data, uint8_t 
   return dispatch(createDatagram(PAYLOAD_TYPE_REQ, peer_, sharedSecret(), temp, 5u + len));
 }
 
-SendResult AgentMesh::sendCli(const char* text, uint32_t timestamp, bool sensitive) {
+SendResult AgentMesh::sendCli(const char* text, bool sensitive, uint32_t& timestamp) {
+  timestamp = 0;
   if (!peerSet_ || text == nullptr) return SendResult::Failed;
   sensitiveAwait_ = sensitive;
   const size_t len = std::strlen(text);
@@ -333,8 +334,11 @@ SendResult AgentMesh::sendCli(const char* text, uint32_t timestamp, bool sensiti
   // The shape BaseChatMesh::sendMessage gives a CLI line (src/helpers/BaseChatMesh.cpp:442-470
   // at d9296435): the sender timestamp, a flags byte of attempt 0 and TXT_TYPE_CLI_DATA in the
   // upper bits, then the text. The repeater runs it when the timestamp is above the last it saw
-  // from this key, answers nothing to an equal one, and drops a lower one as a replay.
+  // from this key, answers nothing to an equal one, and drops a lower one as a replay. The
+  // timestamp is drawn here, from the one series every tag and every line of this board come
+  // from, and handed back to the caller (agent/IMesh.h): a retry calls again and gets a fresh one.
   uint8_t temp[MAX_PACKET_PAYLOAD];
+  timestamp = uniqueTime();
   std::memcpy(temp, &timestamp, 4);
   temp[4] = static_cast<uint8_t>(kTxtTypeCliData << 2);
   std::memcpy(&temp[5], text, len);

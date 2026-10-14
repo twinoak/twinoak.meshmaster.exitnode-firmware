@@ -77,11 +77,21 @@ uint32_t parseRetryAfter(const String& value) {
 
 const char* AgentClient::rootName(Root r) { return r == Root::IsrgRootX1 ? "ISRG Root X1" : "the core's bundle"; }
 
-void AgentClient::begin(SettingsStore& settings, AgentClock& clock, const char* agentVersion) {
+void AgentClient::begin(SettingsStore& settings, AgentClock& clock, WifiLink& wifi, const char* agentVersion) {
   settings_ = &settings;
   clock_ = &clock;
+  wifi_ = &wifi;
   version_ = agentVersion;
   reconfigure();
+}
+
+IUplink::LinkState AgentClient::link() const {
+  LinkState state;
+  if (wifi_ == nullptr) return state;
+  state.up = wifi_->connected();
+  state.connects = wifi_->connects();
+  state.drops = wifi_->drops();
+  return state;
 }
 
 void AgentClient::reconfigure() {
@@ -172,7 +182,7 @@ bool AgentClient::call(const char* method, const char* endpoint, const char* req
   out = Call();
   out.atMillis = millis();
   out.atEpoch = clock_->now();
-  out.root = root_;
+  out.via = rootName(root_);
 
   if (!configured()) {
     std::snprintf(out.error, sizeof out.error, "not configured: meshmaster.token is needed");
@@ -198,7 +208,7 @@ bool AgentClient::call(const char* method, const char* endpoint, const char* req
     const Root other = root_ == Root::IsrgRootX1 ? Root::CoreBundle : Root::IsrgRootX1;
     LOG_W("server: the certificate chain did not verify against %s; trying %s", rootName(root_), rootName(other));
     root_ = other;
-    out.root = root_;
+    out.via = rootName(root_);
     out.error[0] = '\0';
     limiter_.took(millis());
     code = request(root_, method, path, requestBody, requestLen, body, bodyCap, bodyLen, tlsError, out);
@@ -223,7 +233,7 @@ bool AgentClient::fetchConfig() {
   o.attempted = true;
   o.atMillis = c.atMillis;
   o.atEpoch = c.atEpoch;
-  o.root = c.root;
+  o.via = c.via;
   o.heapAfter = ESP.getFreeHeap();
   std::snprintf(o.error, sizeof o.error, "%s", c.error);
   LOG_I("heap: %lu free after the call (%lu before), min ever %lu", static_cast<unsigned long>(o.heapAfter),
@@ -371,23 +381,69 @@ bool AgentClient::claimJobs(ClaimedJob* jobs, int max, int& count) {
   return true;
 }
 
-bool AgentClient::postJobResult(long long jobId, const char* requestBody, size_t len) {
+bool AgentClient::postToJob(long long jobId, const char* action, const char* what, const char* requestBody, size_t len,
+                            char* body, size_t bodyCap, size_t& bodyLen) {
   char endpoint[48];
-  std::snprintf(endpoint, sizeof endpoint, "/agent/v1/jobs/%lld/result", jobId);
+  std::snprintf(endpoint, sizeof endpoint, "/agent/v1/jobs/%lld/%s", jobId, action);
 
-  static char body[256];
-  size_t bodyLen = 0;
   Call c;
-  if (!call("POST", endpoint, requestBody, len, body, sizeof body, bodyLen, c)) {
-    LOG_W("server: result for job %lld: no reply: %s", jobId, c.error);
+  if (!call("POST", endpoint, requestBody, len, body, bodyCap, bodyLen, c)) {
+    LOG_W("server: %s for job %lld: no reply: %s", what, jobId, c.error);
     return false;
   }
   if (!c.ok) {
-    LOG_W("server: result for job %lld: http %d", jobId, c.httpStatus);
+    LOG_W("server: %s for job %lld: http %d", what, jobId, c.httpStatus);
     if (bodyLen > 0) LOG_D("server: body (%u bytes): %.200s", static_cast<unsigned>(bodyLen), body);
     return false;
   }
-  LOG_D("server: result for job %lld taken: %.200s", jobId, body);
+  return true;
+}
+
+namespace {
+// The short replies of the three per-job POSTs - a result's `{jobId, duplicate, ...}`, an
+// extend's new lease, a progress's `recordedAt` - share one buffer: the loop makes one call at
+// a time, and three statics of 256 would be two more than the board had before task p1.5-15.
+char g_jobReply[256];
+}  // namespace
+
+bool AgentClient::postJobResult(long long jobId, const char* requestBody, size_t len) {
+  size_t bodyLen = 0;
+  if (!postToJob(jobId, "result", "result", requestBody, len, g_jobReply, sizeof g_jobReply, bodyLen)) return false;
+  LOG_D("server: result for job %lld taken: %.200s", jobId, g_jobReply);
+  return true;
+}
+
+bool AgentClient::extendLease(long long jobId, int seconds, uint32_t& leaseUntil) {
+  leaseUntil = 0;
+  char request[32];
+  const size_t requestLen = writeExtendRequest(seconds, request, sizeof request);
+  size_t bodyLen = 0;
+  if (!postToJob(jobId, "extend", "extend", request, requestLen, g_jobReply, sizeof g_jobReply, bodyLen)) return false;
+  ExtendReply r;
+  char err[64];
+  if (!parseExtendReply(g_jobReply, bodyLen, r, err, sizeof err)) {
+    lastCall_.ok = false;
+    std::snprintf(lastCall_.error, sizeof lastCall_.error, "http 200 but the reply did not parse: %s", err);
+    LOG_E("server: extend for job %lld: %s", jobId, lastCall_.error);
+    return false;
+  }
+  leaseUntil = r.leaseUntilUnix;
+  LOG_D("server: the lease of job %lld now ends at %s", jobId, r.leaseUntil);
+  return true;
+}
+
+bool AgentClient::postProgress(long long jobId, const char* requestBody, size_t len) {
+  size_t bodyLen = 0;
+  if (!postToJob(jobId, "progress", "progress", requestBody, len, g_jobReply, sizeof g_jobReply, bodyLen)) return false;
+  ProgressReply r;
+  char err[64];
+  if (!parseProgressReply(g_jobReply, bodyLen, r, err, sizeof err)) {
+    lastCall_.ok = false;
+    std::snprintf(lastCall_.error, sizeof lastCall_.error, "http 200 but the reply did not parse: %s", err);
+    LOG_E("server: progress for job %lld: %s", jobId, lastCall_.error);
+    return false;
+  }
+  LOG_D("server: progress of job %lld recorded at %s", jobId, r.recordedAt);
   return true;
 }
 
@@ -410,12 +466,12 @@ void AgentClient::describe(char* out, size_t cap) const {
   if (last_.ok) {
     std::snprintf(out, cap, "%s: config ok at %s, agent %lld \"%s\", transport %s, budget %d/min gap %d s, poll %d s, root %s",
                   url_, when, config_.agentId, config_.label, config_.transport, config_.budget.maxTransactionsPerMinute,
-                  config_.budget.minGapSeconds, config_.pollIntervalS, rootName(last_.root));
+                  config_.budget.minGapSeconds, config_.pollIntervalS, last_.via);
   } else if (last_.httpStatus != 0) {
     std::snprintf(out, cap, "%s: http %d at %s%s%s, root %s", url_, last_.httpStatus, when, last_.error[0] ? ", " : "",
-                  last_.error, rootName(last_.root));
+                  last_.error, last_.via);
   } else {
-    std::snprintf(out, cap, "%s: failed at %s: %s (root %s)", url_, when, last_.error, rootName(last_.root));
+    std::snprintf(out, cap, "%s: failed at %s: %s (root %s)", url_, when, last_.error, last_.via);
   }
 }
 

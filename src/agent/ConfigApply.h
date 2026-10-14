@@ -141,7 +141,7 @@ struct ConfigApplyOutcome {
 struct ApplySend {
   const char* what = "";    // for the log: the line, or a name for it
   const char* line = "";
-  uint32_t timestamp = 0;   // the sender timestamp, from ApplyExchange::nextTimestamp()
+  uint32_t timestamp = 0;   // the sender timestamp from ApplyExchange::nextTimestamp(), or 0 when the exchange draws its own at the send
   bool awaitReply = true;   // false: sent and not waited for (a line the firmware answers with nothing)
   bool retry = false;       // the bounded retry a read gets - never for a write
   bool escape = false;      // the loader's blank line: goes out even past the lease
@@ -159,9 +159,11 @@ class ApplyExchange {
 
   virtual ~ApplyExchange() = default;
   virtual Sent send(const ApplySend& s, char* reply, size_t cap) = 0;
-  // The next sender timestamp: strictly above every one this board has sent to this repeater,
-  // which on the board is the RTC's getCurrentTimeUnique() - the one series every tag and every
-  // CLI line come from.
+  // The next sender timestamp: strictly above every one this board has sent to this repeater -
+  // or 0, when the exchange draws it at the moment of the send. The board's does since task
+  // p1.5-15 (IMesh::sendCli hands back the one it put in the packet, from the RTC's
+  // getCurrentTimeUnique(), the one series every tag and every CLI line come from); a host fake
+  // keeps its own series here, and the test holds that series strictly increasing.
   virtual uint32_t nextTimestamp() = 0;
   // The `regions` key read back (`region`, `region default`): true when the read stands, with
   // the value or a raw line in the snapshot; false when the repeater stopped answering.

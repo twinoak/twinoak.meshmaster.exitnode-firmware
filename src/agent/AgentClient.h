@@ -1,11 +1,13 @@
-// The HTTPS client to meshmaster.dk: the three calls this firmware makes, with the certificate
-// chain verified.
+// The HTTPS client to meshmaster.dk: the WiFi implementation of the uplink seam (IUplink.h), with
+// the certificate chain verified.
 //
-//   GET  /agent/v1/config           once per WiFi connection, for the budget and the clock
-//   POST /agent/v1/heartbeat        every pollIntervalS, the self-description of EXIT-NODES §5
-//   POST /agent/v1/observations     a batch of adverts heard, client id and all
-//   POST /agent/v1/jobs/claim       when the heartbeat says jobs are waiting (task 03)
-//   POST /agent/v1/jobs/{id}/result one per job, once, with its client id
+//   GET  /agent/v1/config             once per WiFi connection, for the budget and the clock
+//   POST /agent/v1/heartbeat          every pollIntervalS, the self-description of EXIT-NODES §5
+//   POST /agent/v1/observations       a batch of adverts heard, client id and all
+//   POST /agent/v1/jobs/claim         when the heartbeat says jobs are waiting (task 03)
+//   POST /agent/v1/jobs/{id}/result   one per job, once, with its client id
+//   POST /agent/v1/jobs/{id}/extend   a longer lease for a job that runs past its own (task p1.5-15;
+//   POST /agent/v1/jobs/{id}/progress   nothing on the Heltec calls these two yet)
 //
 // How the server's certificate is checked, for every task after task 01:
 //   1. The chain is verified - the client is never told to accept an unverified one, and
@@ -21,79 +23,53 @@
 //
 // The 120-a-minute ceiling of the server's `agent` rate-limit policy is kept on this side too
 // (RateLimit.h): a call that would break it is not made.
+//
+// Board-only: the URL and the token are NVS's (settings/Store.h), the link is WiFi's
+// (net/WifiLink.h), and the root the chain verified against is this file's business - the
+// library sees it as the one word `via` of a Call.
 
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
 
-#include "ConfigReply.h"
-#include "Envelopes.h"
-#include "JobEnvelopes.h"
-#include "RateLimit.h"
+#include "IUplink.h"
 #include "net/Clock.h"
+#include "net/WifiLink.h"
 #include "settings/Store.h"
 
 namespace mm {
 
-class AgentClient {
+class AgentClient : public IUplink {
  public:
   enum class Root : uint8_t { IsrgRootX1, CoreBundle };
 
-  // What one request came back with, whatever it asked for.
-  struct Call {
-    bool reachable = false;   // a reply arrived, whatever its status
-    bool ok = false;          // 2xx and the body parsed
-    int httpStatus = 0;
-    uint32_t retryAfterS = 0;  // the 429's Retry-After, in seconds
-    int rateLimitRemaining = -1;
-    char error[128] = {0};
-    uint32_t atEpoch = 0;
-    uint32_t atMillis = 0;
-    Root root = Root::IsrgRootX1;
-  };
-
-  // The config call keeps a little more, because `status` reports it.
-  struct Outcome {
-    bool attempted = false;
-    bool ok = false;
-    int httpStatus = 0;
-    char error[128] = {0};
-    uint32_t atMillis = 0;
-    uint32_t atEpoch = 0;
-    Root root = Root::IsrgRootX1;
-    uint32_t heapAfter = 0;  // free heap right after the call, the number later tasks budget from
-  };
-
-  void begin(SettingsStore& settings, AgentClock& clock, const char* agentVersion);
+  void begin(SettingsStore& settings, AgentClock& clock, WifiLink& wifi, const char* agentVersion);
 
   // After `set meshmaster.*`: re-read the URL and forget the last outcome.
   void reconfigure();
 
-  bool configured() const { return url_[0] != '\0' && tokenSet_; }
+  // ------------------------------------------------------------------ IUplink
 
-  // GET /agent/v1/config, once. Blocking. The reply is kept and describe() reports it.
-  bool fetchConfig();
+  bool configured() const override { return url_[0] != '\0' && tokenSet_; }
+  LinkState link() const override;
 
-  // POST /agent/v1/heartbeat. True when the server answered 200 and the reply parsed.
-  bool postHeartbeat(const Heartbeat& hb, HeartbeatReply& reply);
+  bool fetchConfig() override;
+  bool postHeartbeat(const Heartbeat& hb, HeartbeatReply& reply) override;
+  bool postObservations(const char* body, size_t len, int& accepted, bool& duplicate) override;
+  bool claimJobs(ClaimedJob* jobs, int max, int& count) override;
+  bool postJobResult(long long jobId, const char* body, size_t len) override;
+  bool extendLease(long long jobId, int seconds, uint32_t& leaseUntil) override;
+  bool postProgress(long long jobId, const char* body, size_t len) override;
 
-  // POST /agent/v1/observations. `body` is what writeObservationBatch() made.
-  bool postObservations(const char* body, size_t len, int& accepted, bool& duplicate);
+  bool hasConfig() const override { return hasConfig_; }
+  const AgentConfig& config() const override { return config_; }
+  const Outcome& last() const override { return last_; }
+  const Call& lastCall() const override { return lastCall_; }
+  const RateLimiter& limiter() const override { return limiter_; }
 
-  // POST /agent/v1/jobs/claim `{"max":N}`. True when the server answered 200 and the reply
-  // parsed; `count` is how many jobs it handed over, which may be none.
-  bool claimJobs(ClaimedJob* jobs, int max, int& count);
+  // ------------------------------------------------------------------ the board's own
 
-  // POST /agent/v1/jobs/{id}/result. `body` is what writeJobResult() made. A late result is
-  // taken all the same and a duplicate clientId stores nothing twice, so this is safe to retry.
-  bool postJobResult(long long jobId, const char* body, size_t len);
-
-  bool hasConfig() const { return hasConfig_; }
-  const AgentConfig& config() const { return config_; }
-  const Outcome& last() const { return last_; }
-  const Call& lastCall() const { return lastCall_; }
-  const RateLimiter& limiter() const { return limiter_; }
   const char* url() const { return url_; }
   static const char* rootName(Root r);
 
@@ -110,8 +86,15 @@ class AgentClient {
   bool call(const char* method, const char* endpoint, const char* requestBody, size_t requestLen, char* body,
             size_t bodyCap, size_t& bodyLen, Call& out);
 
+  // A POST to /agent/v1/jobs/{id}/<action> whose reply is short: the result, the extend and the
+  // progress. `what` names the call in the log. True when the server answered 200; the reply's
+  // bytes are in `body` (bodyCap), for the caller that reads them.
+  bool postToJob(long long jobId, const char* action, const char* what, const char* requestBody, size_t len,
+                 char* body, size_t bodyCap, size_t& bodyLen);
+
   SettingsStore* settings_ = nullptr;
   AgentClock* clock_ = nullptr;
+  WifiLink* wifi_ = nullptr;
   const char* version_ = "0.0.0-dev";
   char url_[kMaxValueLen + 1] = {0};
   bool tokenSet_ = false;
