@@ -39,6 +39,42 @@ bool elapsed(uint32_t now, uint32_t deadline) { return static_cast<int32_t>(now 
 
 }  // namespace
 
+const char* stepOutcomeName(StepOutcome outcome) {
+  switch (outcome) {
+    case StepOutcome::Done: return "done";
+    case StepOutcome::Failed: return "failed";
+    case StepOutcome::NoTime: return "no time";
+    case StepOutcome::NoBudget: return "no budget";
+    case StepOutcome::Skipped:
+    default: return "skipped";
+  }
+}
+
+int transactionsOf(const ClaimedJob& job) {
+  // `items` is what the type is as long as: a config.read's named key list, a config.apply's
+  // command count, and nothing for the rest - a neighbour list of unknown length is priced at
+  // one page, as transactionsFor() prices it (the server, which has the last snapshot, prices
+  // three; neither of us can know from the claim).
+  int items = -1;
+  if (std::strcmp(job.type, "config.read") == 0) {
+    items = job.hasConfigKeys ? job.configKeyCount : -1;
+  } else if (std::strcmp(job.type, "config.apply") == 0) {
+    items = job.apply.commandCount;
+  }
+  int n = transactionsFor(job.type, job.credentialClass, items);
+  // A status read the claim said needs no version spends nothing on it (meshmaster.dk's p4.3-68).
+  if (std::strcmp(job.type, "status") == 0 && !readsFirmwareVersion(job)) n = 1;
+  // The login every class but `none` needs, and the restore an admin session on a repeater that
+  // holds a grant for this exit node ends with (task p4.1-60). The restore is counted wherever
+  // there is a grant, which over-states a guest-class job by one: an estimate a battery spends
+  // against may be too high and must never be too low.
+  if (job.credentialClass != CredentialClass::None) n += kTransactionsForLogin;
+  if (job.hasAclLevel && std::strcmp(job.type, "acl.set") != 0 && std::strcmp(job.type, "reboot") != 0) {
+    n += kTransactionsForAclRestore;
+  }
+  return n;
+}
+
 void AgentLoop::begin(IUplink& server, IPlatform& platform, IMesh& mesh, JobRunner& jobs,
                       const HeartbeatIdentity& identity) {
   server_ = &server;
@@ -109,10 +145,13 @@ void AgentLoop::loop() {
   // The oldest pending entry carries the moment it was heard, so how long a batch has waited is
   // a fact about the ring and needs no timer of its own.
   const uint32_t waited = ring_.empty() ? 0 : now - ring_.at(0).heardAtMillis;
-  if (observationBatchDue(ring_.size(), waited)) doObservations();
+  if (observationBatchDue(ring_.size(), waited)) {
+    size_t unbounded = kNoByteCap;
+    doObservations(unbounded);
+  }
 }
 
-void AgentLoop::doConfig() {
+bool AgentLoop::doConfig() {
   configDue_ = false;
   if (server_->fetchConfig()) {
     budget_ = server_->config().budget;
@@ -121,12 +160,16 @@ void AgentLoop::doConfig() {
     // The config call is a startup nicety - the heartbeat answers the budget, the poll interval
     // and the clock every time - so a failure here is noted and the loop starts anyway, at
     // whatever pace the answer earned. A 401 is the exception: there is no loop to start.
-    if (noteFailure(server_->lastCall()) == ServerAction::Halt) return;
+    if (noteFailure(server_->lastCall()) == ServerAction::Halt) return false;
     LOG_W("server: the startup config call did not answer; the heartbeat asks the same things every %d s",
           pollIntervalS_);
+    heartbeatScheduled_ = true;
+    nextHeartbeatAt_ = millis();
+    return false;
   }
   heartbeatScheduled_ = true;
   nextHeartbeatAt_ = millis();  // the first heartbeat goes as soon as the hold, if any, is over
+  return true;
 }
 
 void AgentLoop::buildHeartbeat(Heartbeat& hb) {
@@ -157,6 +200,12 @@ void AgentLoop::buildHeartbeat(Heartbeat& hb) {
   hb.companionConnected = publicKey_ != nullptr;
   hb.queueDepth = jobs_->queueDepth();
   hb.board = identity_->board;
+  // The two of an agent that paces itself (EXIT-NODES §6). `loop()` sets no intent, so both are
+  // 0 here and neither field is written: the Heltec's heartbeat is byte for byte what it was.
+  hb.hasNextCheckInS = intent_.nextCheckInS > 0;
+  hb.nextCheckInS = static_cast<int>(intent_.nextCheckInS);
+  hb.hasMaxTransactionsThisWake = intent_.maxTransactionsThisWake > 0;
+  hb.maxTransactionsThisWake = intent_.maxTransactionsThisWake;
 }
 
 // The board's own link, proven: the link up *and* a time that came off the network. An RTC that
@@ -222,7 +271,19 @@ ServerAction AgentLoop::noteFailure(const IUplink::Call& call) {
         std::snprintf(why, sizeof why, "%lu server calls unanswered in %lu min, wifi up",
                       static_cast<unsigned long>(counters_.consecutiveFailures),
                       static_cast<unsigned long>(failingForMs / 60000));
-        platform_->rebootForHealth(why);
+        // In one-wake mode the guard is **told and not taken** (task p1.5-18): a device that
+        // sleeps has a supervisor of its own and its own idea of what a restart costs, and this
+        // loop is one step of its wake and not the thing in charge of the board. The report says
+        // the platform would have been asked.
+        if (inWake_) {
+          if (wakeReport_ != nullptr) {
+            wakeReport_->rebootWanted = true;
+            std::snprintf(wakeReport_->rebootWhy, sizeof wakeReport_->rebootWhy, "%s", why);
+          }
+          LOG_W("server: the platform would have been asked to reboot (%s); in one-wake mode it is not", why);
+        } else {
+          platform_->rebootForHealth(why);
+        }
       }
       break;
     }
@@ -245,7 +306,7 @@ void AgentLoop::heartbeatIfOverdue() {
   doHeartbeat();
 }
 
-void AgentLoop::doHeartbeat() {
+bool AgentLoop::doHeartbeat() {
   inHeartbeat_ = true;
   Heartbeat hb;
   buildHeartbeat(hb);
@@ -270,12 +331,13 @@ void AgentLoop::doHeartbeat() {
   nextHeartbeatAt_ = millis() + static_cast<uint32_t>(pollIntervalS_) * 1000u;
   if (!ok) {
     noteFailure(server_->lastCall());
-    return;
+    return false;
   }
 
   counters_.heartbeats++;
   lastHeartbeatAtMillis_ = millis();
   everHeartbeated_ = true;
+  lastServerTimeUnix_ = reply.serverTimeUnix;
   int32_t difference = 0;
   const bool moved = clock_->takeServerTime(reply.serverTimeUnix, difference);
   lastHeartbeatAtEpoch_ = clock_->now();
@@ -298,6 +360,7 @@ void AgentLoop::doHeartbeat() {
         reply.serverTime, reply.budget.maxTransactionsPerMinute, reply.budget.minGapSeconds, reply.pollIntervalS,
         reply.jobsWaiting ? "yes" : "no");
   succeeded();
+  return true;
 }
 
 void AgentLoop::doPendingResults() {
@@ -322,12 +385,13 @@ uint32_t AgentLoop::epochOf(uint32_t heardAtMillis, uint32_t nowMs) const {
   return agoS < now ? now - agoS : now;
 }
 
-size_t AgentLoop::buildBatch(uint32_t nowMs, char* out, size_t cap) {
+size_t AgentLoop::buildBatch(uint32_t nowMs, char* out, size_t cap, size_t maxItems) {
   // A batch that is being retried is the same batch: the same items and the same client id, or
   // the server's de-duplication would take the id, store nothing, and the extra items would be
   // consumed unsent.
   size_t count = batchCount_ > 0 ? batchCount_ : ring_.size();
   if (count > kObservationBatchSize) count = kObservationBatchSize;
+  if (count > maxItems) count = maxItems;
   if (count > ring_.size()) count = ring_.size();
   for (size_t i = 0; i < count; i++) {
     const HeardAdvert& a = ring_.at(i);
@@ -382,9 +446,36 @@ size_t AgentLoop::buildBatch(uint32_t nowMs, char* out, size_t cap) {
   return writeObservationBatch(batchId_, g_items, static_cast<int>(count), out, cap);
 }
 
-void AgentLoop::doObservations() {
+bool AgentLoop::doObservations(size_t& bytesAllowed, bool* capped) {
   const uint32_t now = millis();
-  const size_t len = buildBatch(now, g_batchJson, sizeof g_batchJson);
+  // A batch already built and not yet accepted is pending: it must go out again exactly as it
+  // was, under the client id it was built with, or the server would de-duplicate on that id and
+  // the items this one does not carry would be consumed unsent.
+  const bool retrying = batchCount_ > 0;
+  size_t len = buildBatch(now, g_batchJson, sizeof g_batchJson);
+  // A wake on a metered uplink says how many bytes it may send, and a batch goes whole: the
+  // length is only known once the JSON is written, so a **fresh** batch's count comes down by
+  // half until the body fits. What is left stays in the ring with the moment each entry was
+  // heard, which is what the next wake posts (the ring's own rule, Observations.h).
+  if (!retrying) {
+    while (len > bytesAllowed && batchCount_ > 1) {
+      const size_t fewer = batchCount_ / 2;
+      batchCount_ = 0;
+      len = buildBatch(now, g_batchJson, sizeof g_batchJson, fewer);
+    }
+  }
+  if (len > bytesAllowed) {
+    LOG_I("observations: the shortest batch is %u bytes and this wake has %u left; the ring keeps them",
+          static_cast<unsigned>(len), static_cast<unsigned>(bytesAllowed));
+    // Nothing went out under this id, so a batch that was built here is forgotten whole: the next
+    // wake builds a full one again rather than inheriting a count a byte cap shortened.
+    if (!retrying) {
+      batchCount_ = 0;
+      batchId_[0] = '\0';
+    }
+    if (capped != nullptr) *capped = true;
+    return false;
+  }
   if (len == 0) {
     if (batchCount_ > 0) {
       LOG_E("observations: %u of them did not fit in %u bytes and were dropped",
@@ -393,7 +484,7 @@ void AgentLoop::doObservations() {
     }
     batchCount_ = 0;
     batchId_[0] = '\0';
-    return;
+    return false;
   }
 
   int accepted = 0;
@@ -407,10 +498,11 @@ void AgentLoop::doObservations() {
     LOG_I("observations: %u posted, %d accepted%s", static_cast<unsigned>(batchCount_), accepted,
           duplicate ? " (the server had this batch already)" : "");
     ring_.consume(batchCount_);
+    bytesAllowed -= len;
     batchCount_ = 0;
     batchId_[0] = '\0';
     succeeded();
-    return;
+    return true;
   }
 
   if (noteFailure(server_->lastCall()) == ServerAction::Discard) {
@@ -420,10 +512,11 @@ void AgentLoop::doObservations() {
     batchCount_ = 0;
     batchId_[0] = '\0';
     succeeded();
-    return;
+    return false;
   }
   // Anything else: the batch is kept with its client id for the next attempt, and the server
   // de-duplicates on that id - so a batch it took whose answer was lost costs nothing twice.
+  return false;
 }
 
 void AgentLoop::doJobs() {
@@ -439,6 +532,314 @@ void AgentLoop::doJobs() {
     return;
   }
   succeeded();
+}
+
+
+// ---- one wake (task p1.5-18) -------------------------------------------------------------------
+//
+// The same steps as `loop()`, in the same order, inside one bounded slice of time and energy.
+// Every bound below is read through these four, so a budget that set none is a wake that does as
+// much as it can - and every one of them is measured on the platform's millisecond clock, which
+// in a test is the clock the test moves (support/FakePlatform.h).
+
+uint32_t AgentLoop::wakeMsLeft() const {
+  if (wakeBudget_.wakeSeconds == 0) return 0xFFFFFFFFu;
+  const uint32_t whole = wakeBudget_.wakeSeconds * 1000u;
+  const uint32_t spent = millis() - wakeStartedAtMs_;
+  return spent >= whole ? 0 : whole - spent;
+}
+
+bool AgentLoop::uplinkTimeLeft() const {
+  if (wakeMsLeft() == 0) return false;
+  if (wakeBudget_.uplinkSeconds == 0) return true;
+  return uplinkSpentMs_ < wakeBudget_.uplinkSeconds * 1000u;
+}
+
+int AgentLoop::transactionsLeft() const {
+  if (intent_.maxTransactionsThisWake <= 0) return 0x7FFFFFFF;
+  const int spent = static_cast<int>(jobs_->gate().transmissions() - transactionsAtWakeStart_);
+  return intent_.maxTransactionsThisWake > spent ? intent_.maxTransactionsThisWake - spent : 0;
+}
+
+int AgentLoop::claimMax() const {
+  const int left = transactionsLeft();
+  if (left >= kClaimMax * kTransactionsPerJobAtLeast) return kClaimMax;
+  return left / kTransactionsPerJobAtLeast;
+}
+
+uint32_t AgentLoop::estimateJobMs(const ClaimedJob& job) const {
+  const int n = transactionsOf(job);
+  const uint32_t gapMs = static_cast<uint32_t>(budget_.minGapSeconds > 0 ? budget_.minGapSeconds : 0) * 1000u;
+  const uint32_t replyMs = static_cast<uint32_t>(job.loginMs > 0 ? job.loginMs : 8000);
+  return static_cast<uint32_t>(n > 0 ? n : 1) * (gapMs + replyMs);
+}
+
+void AgentLoop::wakeConfig(WakeReport& report) {
+  // "If stale" is "if this uplink has none": a device that deep-sleeps loses the object with its
+  // RAM, so the call happens once a boot and not once a wake - and `onLinkUp()` or
+  // `reconfigure()` makes it due again, as they always did.
+  if (!configDue_ && server_->hasConfig()) return;
+  if (!uplinkTimeLeft()) {
+    report.config = StepOutcome::NoTime;
+    return;
+  }
+  const uint32_t at = millis();
+  const bool ok = doConfig();
+  uplinkSpentMs_ += millis() - at;
+  report.config = ok ? StepOutcome::Done : StepOutcome::Failed;
+}
+
+void AgentLoop::wakeHeartbeat(WakeReport& report) {
+  if (!uplinkTimeLeft()) {
+    report.heartbeat = StepOutcome::NoTime;
+    return;
+  }
+  // The schedule exists for the pump: a job that outlasts the accepted interval sends the
+  // heartbeat that fell due from inside its own wait (heartbeatIfOverdue), exactly as on the
+  // board. At an interval of an hour that never happens, which is the point of proposing one.
+  heartbeatScheduled_ = true;
+  const uint32_t at = millis();
+  const bool ok = doHeartbeat();
+  uplinkSpentMs_ += millis() - at;
+  report.heartbeat = ok ? StepOutcome::Done : StepOutcome::Failed;
+  if (ok) report.serverTime = lastServerTimeUnix_;
+}
+
+void AgentLoop::wakeResults(WakeReport& report) {
+  if (jobs_->queueDepth() == 0) return;
+  if (!uplinkTimeLeft()) {
+    report.results = StepOutcome::NoTime;
+    return;
+  }
+  if (wakeBytesLeft_ == 0) {
+    report.results = StepOutcome::NoBudget;
+    return;
+  }
+  const uint32_t failuresBefore = jobs_->postFailures();
+  const size_t bytesBefore = wakeBytesLeft_;
+  int posted = 0;
+  const uint32_t at = millis();
+  jobs_->flushResults(wakeBytesLeft_, posted);
+  uplinkSpentMs_ += millis() - at;
+  report.resultsFlushed = posted;
+  report.bytesPosted += bytesBefore - wakeBytesLeft_;
+  counters_.resultsPosted += static_cast<uint32_t>(posted);
+  if (posted > 0) LOG_I("jobs: %d result(s) that waited went through", posted);
+  if (jobs_->postFailures() > failuresBefore) {
+    // The server, not the budget: the same backoff the heartbeat uses, so the buffer is not
+    // hammered - and in one wake that backoff is a wait the caller is told to sleep through.
+    report.results = StepOutcome::Failed;
+    noteFailure(server_->lastCall());
+  } else if (jobs_->queueDepth() > 0) {
+    report.results = StepOutcome::NoBudget;
+  } else {
+    report.results = StepOutcome::Done;
+    succeeded();
+  }
+}
+
+void AgentLoop::wakeJobs(WakeReport& report) {
+  claimDue_ = false;
+  if (!lastJobsWaiting_) return;
+  if (!uplinkTimeLeft()) {
+    report.claim = StepOutcome::NoTime;
+    return;
+  }
+  const int max = claimMax();
+  if (max < 1) {
+    report.claim = StepOutcome::NoBudget;
+    LOG_I("jobs: this wake has %d transaction(s) left of its %d, which is less than a job: no claim is made",
+          transactionsLeft(), intent_.maxTransactionsThisWake);
+    return;
+  }
+  const uint32_t at = millis();
+  const int count = jobs_->claim(max);
+  uplinkSpentMs_ += millis() - at;
+  if (count < 0) {
+    counters_.claimFailures++;
+    report.claim = StepOutcome::Failed;
+    noteFailure(server_->lastCall());
+    return;
+  }
+  report.claim = StepOutcome::Done;
+  report.jobsClaimed = count;
+  succeeded();
+  if (count == 0) {
+    jobs_->endClaim();
+    return;
+  }
+
+  for (int i = 0; i < count; i++) {
+    const ClaimedJob& job = jobs_->claimed(i);
+    const int price = transactionsOf(job);
+    const int left = transactionsLeft();
+    const uint32_t needMs = estimateJobMs(job);
+    const uint32_t leftMs = wakeMsLeft();
+    char why[128];
+    // A job this wake cannot finish is reported `failed` with *wake budget* and nothing is sent
+    // for it: what must never happen is a job claimed, leased, and silent (EXIT-NODES §6 as
+    // built in meshmaster.dk's task 121 - what is left behind is queued and bound to nothing,
+    // and a job the server did hand over is this agent's to answer). Its own result's bytes are
+    // not counted against the byte cap: answering the lease comes first.
+    if (price > left) {
+      std::snprintf(why, sizeof why, "wake budget: %d transaction(s) left of this wake's %d and %s needs about %d",
+                    left, intent_.maxTransactionsThisWake, job.type, price);
+      jobs_->reportNotRun(i, why);
+      report.jobsNotRun++;
+      report.jobs = StepOutcome::NoBudget;
+      continue;
+    }
+    if (needMs > leftMs) {
+      std::snprintf(why, sizeof why, "wake budget: about %lu s left of this wake and %s needs about %lu s",
+                    static_cast<unsigned long>(leftMs / 1000u), job.type,
+                    static_cast<unsigned long>(needMs / 1000u));
+      jobs_->reportNotRun(i, why);
+      report.jobsNotRun++;
+      report.jobs = StepOutcome::NoTime;
+      continue;
+    }
+    jobs_->runClaimed(i);
+    report.jobsRun++;
+    if (report.jobs == StepOutcome::Skipped) report.jobs = StepOutcome::Done;
+  }
+  jobs_->endClaim();
+}
+
+void AgentLoop::wakeObservations(WakeReport& report) {
+  // The ring, oldest first, in as many batches as the byte cap and the clock allow. What does
+  // not go stays with the moment each advert was heard, which is the next wake's to post
+  // (Observations.h: the ring keeps `heardAtMillis` and the batch turns it into a timestamp).
+  while (!ring_.empty()) {
+    if (!uplinkTimeLeft()) {
+      report.observations = StepOutcome::NoTime;
+      break;
+    }
+    if (wakeBytesLeft_ == 0) {
+      report.observations = StepOutcome::NoBudget;
+      break;
+    }
+    const size_t before = ring_.size();
+    const size_t bytesBefore = wakeBytesLeft_;
+    bool capped = false;
+    const uint32_t at = millis();
+    const bool ok = doObservations(wakeBytesLeft_, &capped);
+    uplinkSpentMs_ += millis() - at;
+    report.bytesPosted += bytesBefore - wakeBytesLeft_;
+    if (!ok) {
+      report.observations = capped ? StepOutcome::NoBudget : StepOutcome::Failed;
+      break;
+    }
+    report.batchesPosted++;
+    report.observationsPosted += static_cast<int>(before - ring_.size());
+    report.observations = StepOutcome::Done;
+  }
+}
+
+WakeReport AgentLoop::wake(const WakeIntent& intent, const Budget& budget) {
+  WakeReport report;
+  if (server_ == nullptr || platform_ == nullptr || jobs_ == nullptr) {
+    report.why = "the loop has not begun";
+    return report;
+  }
+
+  intent_ = intent;
+  wakeBudget_ = budget;
+  inWake_ = true;
+  wakeReport_ = &report;
+  wakeStartedAtMs_ = millis();
+  uplinkSpentMs_ = 0;
+  transactionsAtWakeStart_ = jobs_->gate().transmissions();
+  wakeBytesLeft_ = budget.postBytes == 0 ? kNoByteCap : budget.postBytes;
+
+  if (halted_) {
+    // A 401 is still a 401 after a sleep: nothing is sent until a person fixes the token.
+    report.why = "halted: the server refused the token (http 401)";
+  } else if (!server_->configured()) {
+    report.why = "not configured: the server's url and a token are needed";
+  } else if (!server_->link().up) {
+    report.why = "the uplink is down";
+  } else if (!elapsed(millis(), holdUntil_)) {
+    // A backoff or a Retry-After this agent is still inside, carried across the sleep by the
+    // state: the wake sends nothing and the caller is told how much of it is left.
+    report.why = "a wait the server asked for is still running";
+  } else {
+    wakeConfig(report);
+    if (!halted_) wakeHeartbeat(report);
+    // A heartbeat that did not come back is a server that is away: there is no accepted interval,
+    // no `jobsWaiting` to believe and nothing to be gained by putting the rest of the wake on a
+    // link that just failed. The backoff is in `sleepAtLeastS` and the next wake honours it.
+    if (!halted_ && report.heartbeat == StepOutcome::Done) {
+      wakeResults(report);
+      wakeJobs(report);
+      wakeObservations(report);
+    }
+  }
+
+  report.halted = halted_;
+  report.acceptedIntervalS = pollIntervalS_;
+  report.sleepAtLeastS = retrySeconds();
+  report.transactionsSpent = static_cast<int>(jobs_->gate().transmissions() - transactionsAtWakeStart_);
+  report.observationsLeft = static_cast<int>(ring_.size());
+  report.elapsedMs = millis() - wakeStartedAtMs_;
+  report.counters = counters_;
+  inWake_ = false;
+  wakeReport_ = nullptr;
+
+  LOG_I("wake: config %s, heartbeat %s, results %s, claim %s, jobs %s, observations %s", stepOutcomeName(report.config),
+        stepOutcomeName(report.heartbeat), stepOutcomeName(report.results), stepOutcomeName(report.claim),
+        stepOutcomeName(report.jobs), stepOutcomeName(report.observations));
+  LOG_I("wake: %d job(s) run, %d not run, %d transaction(s), %d batch(es), %u byte(s) in %lu ms; next in %d s%s%s",
+        report.jobsRun, report.jobsNotRun, report.transactionsSpent, report.batchesPosted,
+        static_cast<unsigned>(report.bytesPosted), static_cast<unsigned long>(report.elapsedMs),
+        report.acceptedIntervalS, report.sleepAtLeastS > 0 ? ", holding off first" : "",
+        report.why[0] == '\0' ? "" : " - nothing was sent");
+  if (report.why[0] != '\0') LOG_I("wake: %s", report.why);
+  return report;
+}
+
+WakeState AgentLoop::state() const {
+  WakeState saved;
+  saved.version = WakeState::kVersion;
+  saved.backoffMs = backoffMs_;
+  saved.consecutiveFailures = counters_.consecutiveFailures;
+  const uint32_t now = platform_ == nullptr ? 0 : millis();
+  // Durations, not deadlines: millis() starts again from zero after a deep sleep.
+  const int32_t left = static_cast<int32_t>(holdUntil_ - now);
+  saved.holdForMs = left > 0 ? static_cast<uint32_t>(left) : 0;
+  saved.failingForMs = counters_.consecutiveFailures == 0 ? 0 : now - firstFailureAtMillis_;
+  saved.pollIntervalS = pollIntervalS_;
+  saved.budget = budget_;
+  saved.halted = halted_;
+  saved.everHeartbeated = everHeartbeated_;
+  saved.lastHeartbeatAtEpoch = lastHeartbeatAtEpoch_;
+  saved.counters = counters_;
+  return saved;
+}
+
+bool AgentLoop::restore(const WakeState& saved) {
+  if (platform_ == nullptr) return false;
+  if (saved.version != WakeState::kVersion) {
+    LOG_W("wake: a state of version %lu was handed back and this firmware writes %lu; it is ignored",
+          static_cast<unsigned long>(saved.version), static_cast<unsigned long>(WakeState::kVersion));
+    return false;
+  }
+  const uint32_t now = millis();
+  counters_ = saved.counters;
+  counters_.consecutiveFailures = saved.consecutiveFailures;
+  backoffMs_ = saved.backoffMs;
+  holdUntil_ = now + saved.holdForMs;
+  firstFailureAtMillis_ = now - saved.failingForMs;
+  pollIntervalS_ = saved.pollIntervalS > 0 ? saved.pollIntervalS : 30;
+  budget_ = saved.budget;
+  jobs_->setBudget(budget_);
+  halted_ = saved.halted;
+  everHeartbeated_ = saved.everHeartbeated;
+  lastHeartbeatAtEpoch_ = saved.lastHeartbeatAtEpoch;
+  if (saved.holdForMs > 0) {
+    LOG_I("wake: %lu s of a wait the server asked for is still owed from before the sleep",
+          static_cast<unsigned long>(saved.holdForMs / 1000u));
+  }
+  return true;
 }
 
 void AgentLoop::report(TextOut& out) const {

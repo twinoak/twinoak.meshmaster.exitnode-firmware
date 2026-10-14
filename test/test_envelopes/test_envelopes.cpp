@@ -54,12 +54,12 @@ std::string heartbeatJson(const mm::Heartbeat& hb) {
 
 // ---- the heartbeat, against the .NET bytes ---------------------------------------------------
 
-TEST(Heartbeat, TheSameInputMakesTheDotNetFixtureByteForByte) {
-  const std::string fixture = readFixture("AgentHeartbeat.json");
-  ASSERT_FALSE(fixture.empty()) << "tests/fixtures/contracts/AgentHeartbeat.json is missing - run tools/sync-fixtures.ps1";
-
-  // The sample MeshMaster.Contracts' ContractsTests builds the fixture from, field for field.
-  const mm::ErrorCounter errors[] = {{"uplink", 0}};
+// The sample MeshMaster.Contracts' ContractsTests builds the fixture from, field for field. Since
+// meshmaster.dk's task p4.14-120 that sample is an agent that **proposes** its own check-in
+// interval and a cap for its wake (EXIT-NODES §6), so the two optional fields are set here; the
+// test below holds the other half, which is this firmware's: an agent that proposes neither
+// writes the fixture's bytes without them.
+mm::Heartbeat theFixturesSample(const mm::ErrorCounter* errors, int errorCount) {
   mm::Heartbeat hb;
   hb.agentVersion = "0.3.1";
   hb.transport = "onboard";
@@ -77,10 +77,64 @@ TEST(Heartbeat, TheSameInputMakesTheDotNetFixtureByteForByte) {
   hb.companionConnected = true;
   hb.queueDepth = 0;
   hb.errors = errors;
-  hb.errorCount = 1;
+  hb.errorCount = errorCount;
   hb.board = "heltec_v3";
+  return hb;
+}
+
+TEST(Heartbeat, TheSameInputMakesTheDotNetFixtureByteForByte) {
+  const std::string fixture = readFixture("AgentHeartbeat.json");
+  ASSERT_FALSE(fixture.empty()) << "tests/fixtures/contracts/AgentHeartbeat.json is missing - run tools/sync-fixtures.ps1";
+
+  const mm::ErrorCounter errors[] = {{"uplink", 0}};
+  mm::Heartbeat hb = theFixturesSample(errors, 1);
+  hb.hasNextCheckInS = true;
+  hb.nextCheckInS = 3600;
+  hb.hasMaxTransactionsThisWake = true;
+  hb.maxTransactionsThisWake = 12;
 
   EXPECT_EQ(fixture, heartbeatJson(hb));
+}
+
+// The Heltec proposes nothing: it runs `AgentLoop::loop()` with WiFi up and is back in thirty
+// seconds, so neither field is written and its heartbeat is byte for byte what it was before
+// meshmaster.dk's task 120 - which is that task's own promise ("an agent that sends neither is
+// byte-for-byte as before") held from this end. The expectation is the fixture with its last two
+// members cut off, so it stays anchored to the fixture rather than to a line typed out here: if
+// the record's order ever changes, both tests fail and neither quietly passes.
+TEST(Heartbeat, AnAgentThatProposesNothingWritesTheFixtureWithoutTheTwoWakeFields) {
+  const std::string fixture = readFixture("AgentHeartbeat.json");
+  ASSERT_FALSE(fixture.empty());
+  const size_t at = fixture.find(",\"nextCheckInS\":");
+  ASSERT_NE(at, std::string::npos) << "the fixture no longer carries nextCheckInS: " << fixture;
+  ASSERT_NE(fixture.find("\"maxTransactionsThisWake\":", at), std::string::npos)
+      << "nextCheckInS without maxTransactionsThisWake after it: " << fixture;
+  const std::string withoutThem = fixture.substr(0, at) + "}";
+
+  const mm::ErrorCounter errors[] = {{"uplink", 0}};
+  const mm::Heartbeat hb = theFixturesSample(errors, 1);
+  EXPECT_FALSE(hb.hasNextCheckInS) << "the default is to propose nothing";
+  EXPECT_FALSE(hb.hasMaxTransactionsThisWake);
+  EXPECT_EQ(withoutThem, heartbeatJson(hb));
+}
+
+// One without the other: both are optional members on their own, and a proposal with no cap is
+// what a unit on a full battery sends.
+TEST(Heartbeat, EitherOfTheTwoWakeFieldsGoesOnItsOwn) {
+  const mm::ErrorCounter errors[] = {{"uplink", 0}};
+  mm::Heartbeat hb = theFixturesSample(errors, 1);
+  hb.hasNextCheckInS = true;
+  hb.nextCheckInS = 900;
+  const std::string interval = heartbeatJson(hb);
+  EXPECT_NE(interval.find("\"board\":\"heltec_v3\",\"nextCheckInS\":900}"), std::string::npos) << interval;
+  EXPECT_EQ(interval.find("maxTransactionsThisWake"), std::string::npos) << interval;
+
+  hb.hasNextCheckInS = false;
+  hb.hasMaxTransactionsThisWake = true;
+  hb.maxTransactionsThisWake = 6;
+  const std::string cap = heartbeatJson(hb);
+  EXPECT_NE(cap.find("\"board\":\"heltec_v3\",\"maxTransactionsThisWake\":6}"), std::string::npos) << cap;
+  EXPECT_EQ(cap.find("nextCheckInS"), std::string::npos) << cap;
 }
 
 TEST(Heartbeat, WhatThisFirmwareActuallySendsHasNoJobTypesAndFourCounters) {

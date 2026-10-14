@@ -58,3 +58,20 @@ Only the reviewer ticks an item.
   `test_seams` fails if it comes back). The two remaining §6 gaps of that item -
   `overheard()` and the awaited-reply timeout - are still for the other
   repository.
+
+## Left by 18 (14 October)
+
+- [ ] **A second `AgentHeartbeat` fixture, for an agent that proposes nothing** (Thomas, in
+  `twinoak/meshmaster.dk`). Task 120 changed `tests/fixtures/contracts/AgentHeartbeat.json`'s
+  sample **in place** to a proposing agent — `nextCheckInS: 3600`,
+  `maxTransactionsThisWake: 12` — so the one contract fixture for that envelope no longer
+  carries the shape every agent but a repeater-v2 unit sends, and task 120's own promise
+  ("an agent that sends neither is byte-for-byte as before") has no fixture of its own on
+  either end. 18 held it from this end by cutting the two members off the fixture's bytes
+  (`test_envelopes`'s `AnAgentThatProposesNothingWritesTheFixtureWithoutTheTwoWakeFields`),
+  which is anchored to the file and fails loudly if the record's order moves — but a second
+  sample written by `MeshMaster.Contracts`' own round-trip test, say
+  `AgentHeartbeatNoWake.json`, would hold the same thing on the side that owns the record. It
+  is one case in that repository's tests and a sync here; 18 did not open it, because a task
+  of this repository does not edit the other one's fixtures (`tasks/README.md`: the spec is in
+  the other repository, say so and let the reviewer open it there).

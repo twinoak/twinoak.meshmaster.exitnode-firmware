@@ -136,6 +136,16 @@ size_t writeHeartbeat(const Heartbeat& hb, char* out, size_t cap) {
     w.key("board");
     w.string(hb.board);
   }
+  // The two of an agent that paces itself, last, in the record's own order and only when set:
+  // the Heltec sets neither and these bytes are not written (EXIT-NODES §6).
+  if (hb.hasNextCheckInS) {
+    w.key("nextCheckInS");
+    w.integer(hb.nextCheckInS);
+  }
+  if (hb.hasMaxTransactionsThisWake) {
+    w.key("maxTransactionsThisWake");
+    w.integer(hb.maxTransactionsThisWake);
+  }
   w.endObject();
   return w.overflowed() ? 0 : w.length();
 }

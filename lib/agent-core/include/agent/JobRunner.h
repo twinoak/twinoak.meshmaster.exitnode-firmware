@@ -213,11 +213,37 @@ class JobRunner {
   // Every job's credential is wiped when the job ends, whatever it came to.
   int claimAndRun();
 
+  // The four steps `claimAndRun` is, for a caller that has to decide between them - a wake with
+  // a bounded slice of time and energy (agent/AgentLoop.h's one-wake mode, task p1.5-18), which
+  // prices each claimed job before it puts it on the air. The Heltec calls `claimAndRun` and
+  // never these.
+  //
+  //   claim(max)       one claim of at most `max` jobs (never more than kClaimMax), into this
+  //                    runner's own buffer. The count, or -1 when the call did not come back
+  //   claimed(i)       the job at `i` of that claim, to read its type, class and payload
+  //   runClaimed(i)    run it and post its result, exactly as `claimAndRun` would have
+  //   reportNotRun(i)  report it `failed` with `why` in its log, at no transaction and with
+  //                    nothing sent: a job this wake has no room for is **never left leased and
+  //                    silent**, which is the whole point of the pair
+  //   endClaim()       the claim is over: every credential wiped, whatever happened
+  int claim(int max);
+  int claimedCount() const { return claimed_; }
+  const ClaimedJob& claimed(int i) const { return scratch_.jobs[i < 0 || i >= kClaimMax ? 0 : i]; }
+  void runClaimed(int i);
+  void reportNotRun(int i, const char* why);
+  void endClaim();
+
   // The offline buffer (task 06): results the server did not take are kept and posted later,
   // oldest first, with the timestamps and the client ids they were made with. Called by the
   // agent loop after every heartbeat the server answered - "the offline buffer is posted first,
   // in order" (EXIT-NODES §5, docs/ops/agent.md §4). Safe to call with nothing waiting.
   void flushResults();
+
+  // The same, with a bound on what may go out: a wake on an LTE plan posts the oldest results
+  // while the next one's body still fits in `bytesLeft`, which this decrements, and leaves the
+  // rest for the next wake with the timestamps they were made with (task p1.5-18). `posted` is
+  // how many went through. A body larger than `bytesLeft` stops the flush and is not dropped.
+  void flushResults(size_t& bytesLeft, int& posted);
 
   // How many results are waiting to be posted, which is the heartbeat's `queueDepth`.
   int queueDepth() const { return static_cast<int>(results_.count()); }
@@ -388,6 +414,8 @@ class JobRunner {
   uint32_t claims_ = 0;
   uint32_t ran_ = 0;
   uint32_t postFailures_ = 0;
+  // How many jobs the last claim handed over, which is how far claimed(i) and runClaimed(i) go.
+  int claimed_ = 0;
 
   // The results whose POST has not got through yet, oldest first. Each keeps the client id it
   // was written with, so the server de-duplicates it however many times it arrives (API §3), and

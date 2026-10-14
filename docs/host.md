@@ -84,6 +84,63 @@ a fixed latency on the fake clock. The first disagreement with a real repeater
 on the bench is a fixture to add in meshmaster.dk and to sync here
 (`tools/sync-fixtures.ps1`), not a knob to add to the fake.
 
+## One wake
+
+Since task p1.5-18 the loop has a second way to be driven, and the host is the
+only place it has ever run. `AgentLoop::loop()` is the Heltec: called for ever
+from the Arduino loop with WiFi up. `AgentLoop::wake(intent, budget)` is a
+device that sleeps — the Walter of a repeater-v2 unit, on a battery and a panel,
+attaching to LTE a few times a day: **one pass of the same steps in the same
+order, each bounded, and then it returns and the caller sleeps.**
+
+```
+config (if this uplink has none) → heartbeat (with the intent) → the offline buffer
+    → the claim (sized from the cap) → the jobs (each priced first) → the batches
+```
+
+```cpp
+mm::WakeIntent intent;
+intent.nextCheckInS = 3600;             // what the heartbeat promises the server
+intent.maxTransactionsThisWake = 12;    // and what this wake has the energy for
+
+mm::Budget budget;
+budget.wakeSeconds = 240;               // the whole wake
+budget.uplinkSeconds = 60;              // of that, the calls to meshmaster.dk
+budget.postBytes = 16384;               // what the LTE plan may carry this wake
+
+const mm::WakeReport report = loop.wake(intent, budget);
+// sleep for report.acceptedIntervalS, but never less than report.sleepAtLeastS
+```
+
+Three things a test of a wake is about, and they are what `test/test_loop`'s
+wake cases hold:
+
+| | |
+|---|---|
+| **the bounds** | every one of them is read off `IPlatform::millis()`, so the fake clock *is* the budget: a config read that is twenty-one transactions at two a minute is priced at about ten minutes (`mm::transactionsOf` and the gate's pace), a wake with a minute will not start it, and the test says so in milliseconds that nobody waited for |
+| **the promise** | `nextCheckInS` and `maxTransactionsThisWake` are the two optional heartbeat fields of [`spec/EXIT-NODES.md` §6](https://github.com/twinoak/meshmaster.dk/blob/master/spec/EXIT-NODES.md) (*An agent that paces itself*). An agent that proposes neither — `loop()`, so the Heltec — writes the bytes it always wrote, which `test_envelopes` holds against the fixture both ways round. The reply's `pollIntervalS` is **the accepted interval** and is in the report |
+| **no job left leased** | a job the wake cannot finish is **not put on the air**, and its result is posted all the same: `failed`, with *wake budget* in the log. `NoWakeEverLeavesAJobLeasedAndSilent` is the property over a spread of budgets, caps and claims — every job a claim handed over has a posted result |
+
+What a wake does *not* do: spin, and restart the device. A backoff or a
+`Retry-After` is a wait the report hands back as `sleepAtLeastS`, and the reboot
+guard is **told** rather than taken (`report.rebootWanted`, with the reason),
+because a unit that sleeps has a supervisor of its own.
+
+Across the sleep the object is gone and `millis()` starts again at zero, so the
+loop hands out a POD:
+
+```cpp
+const mm::WakeState saved = loop.state();   // to retained storage, as bytes
+...
+loop.restore(saved);                        // after the next boot, before the wake
+```
+
+Every duration in it is a duration and not a deadline — what was left of a
+hold, how long the present run of failures has lasted — and `restore()` re-bases
+them against the clock it finds. It carries the backoff, the consecutive
+failures, the accepted interval, the budget, a 401, and the error counters the
+heartbeat reports, and it refuses a blob of another `version`.
+
 ## The two older fakes, and why they stay
 
 `test/test_config_apply`'s `FakeRepeater` and `test/test_rotation_probe`'s

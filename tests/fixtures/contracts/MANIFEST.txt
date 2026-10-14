@@ -1,5 +1,5 @@
 # The contract fixtures of the .NET agent, copied - never edited here.
-# source: twinoak/meshmaster.dk/tests/fixtures/contracts at commit 828632e02b4618ddb77eb7e6ef5bffbe89a782ac
+# source: twinoak/meshmaster.dk/tests/fixtures/contracts at commit 0595dc2ed3c5d08a0dfada50b8b9e56503b085da
 # written by tools/sync-fixtures.ps1; see README.md in this directory
 #
 # sha256                                                           bytes  name
@@ -9,7 +9,7 @@
 4716835472f634990290eaca0692a8fe9a49911330ab2dfdb74068f882b16c98      46  AdvertRequestResult.json
 486664f1a504c8df318c3385f693b8944142ce1fc19856d739e41addd5abc10b      50  AgentBudget.json
 26c224b258135d329aecd0df24994acc0a238466b0ede9d5365100e48eb0edc3     186  AgentConfig.json
-2991fa2724df8d42187922d9cd8a56a768cfe1fcd9d999009366c52ad02657c5     495  AgentHeartbeat.json
+7536f7d030b008d05c6b3c253bd0d6581d22f9d2309933842b90edf5c036a68f     544  AgentHeartbeat.json
 790e2e60323f5ddab3ff51ef437bf9293329cfeb9fc5137367206d5642282c6d     428  ClaimedJob.json
 c4014a3c623935dc4451d33152df277780772059953fca9bf5ada01723797db5      10  ClaimRequest.json
 8da5fb70b79c7be2f67364f874bca9d8eebba3a09e51f6ec6e53911e4b726c8a     475  ClaimResponse.json

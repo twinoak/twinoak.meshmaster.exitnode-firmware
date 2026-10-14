@@ -1403,15 +1403,31 @@ void JobRunner::markPosted(long long jobId) {
 }
 
 void JobRunner::flushResults() {
+  size_t unbounded = static_cast<size_t>(-1);
+  int posted = 0;
+  flushResults(unbounded, posted);
+}
+
+void JobRunner::flushResults(size_t& bytesLeft, int& posted) {
+  posted = 0;
   while (!results_.empty()) {
     long long jobId = 0;
     size_t len = 0;
     const char* body = results_.oldest(jobId, len);
     if (body == nullptr) return;
+    // A wake on a metered uplink says how many bytes it may send; what does not fit stays in the
+    // buffer with the timestamps and the client id it was made with (task p1.5-18).
+    if (len > bytesLeft) {
+      LOG_I("jobs: the kept result of job %lld is %u bytes and this wake has %u left; it waits", jobId,
+            static_cast<unsigned>(len), static_cast<unsigned>(bytesLeft));
+      return;
+    }
     if (!server_->postJobResult(jobId, body, len)) {
       postFailures_++;
       return;
     }
+    bytesLeft -= len;
+    posted++;
     LOG_I("jobs: the kept result of job %lld went through", jobId);
     results_.popOldest();
     markPosted(jobId);
@@ -1434,123 +1450,178 @@ void JobRunner::remember(const ClaimedJob& job, Outcome outcome, int transaction
 int JobRunner::claimAndRun() {
   flushResults();
 
+  const int count = claim(kClaimMax);
+  if (count <= 0) return count;
+  for (int i = 0; i < count; i++) runClaimed(i);
+  endClaim();
+  return count;
+}
+
+int JobRunner::claim(int max) {
+  if (max > kClaimMax) max = kClaimMax;
+  if (max < 1) max = 1;
+
   // Whatever a previous claim left: no password outlives its job, and none waits for the next.
   for (int i = 0; i < kClaimMax; i++) g_jobs[i].credential.wipe();
+  claimed_ = 0;
 
   int count = 0;
-  if (!server_->claimJobs(g_jobs, kClaimMax, count)) {
+  if (!server_->claimJobs(g_jobs, max, count)) {
     for (int i = 0; i < kClaimMax; i++) g_jobs[i].credential.wipe();
     return -1;
   }
   claims_++;
+  claimed_ = count;
   if (count == 0) {
     LOG_D("jobs: the claim came back with nothing");
     return 0;
   }
   LOG_I("jobs: %d claimed", count);
-
-  for (int i = 0; i < count; i++) {
-    ClaimedJob& job = g_jobs[i];
-    const uint32_t startedAt = clock_->now();
-    g_log.clear();
-    g_log.add("job %lld %s for repeater %lld \"%s\" (%s)", job.id, job.type, job.repeaterId, job.repeaterLabel,
-              credentialClassName(job.credentialClass));
-    for (int g = 0; g < job.groupCount; g++) {
-      // The other jobs of this claim for the same repeater: they share one login (EXIT-NODES §8),
-      // which on this board is the session cache doing it rather than anything this loop does.
-      if (i + 1 < count && sharesLogin(job, g_jobs[i + 1])) {
-        g_log.add("grouped with job %lld: one login for the pair", job.groupWith[g]);
-        break;
-      }
-    }
-    LOG_I("jobs: job %lld %s for repeater %lld \"%s\" (%s)", job.id, job.type, job.repeaterId, job.repeaterLabel,
-          credentialClassName(job.credentialClass));
-
-    Context ctx;
-    ctx.job = &job;
-    // The display's fourth line, for as long as this job lasts: the pump refreshes the panel
-    // through every wait, so "Job 1234 acl.set" is live (src/ui/DisplayLines.h).
-    open_ = &job;
-    if (job.credentialCandidate[0] != '\0') {
-      // The material is one of the two candidates of an unverified credential (task p4-55), and
-      // the server reads this job's outcome as the verdict on it: a session another job opened
-      // with another password would make that verdict a lie, so this job logs in afresh
-      // whatever the cache holds.
-      sessions_.invalidate(job.repeaterKey);
-      g_log.add("the claim carries the %s candidate of an unverified credential: logging in afresh with it",
-                job.credentialCandidate);
-    }
-    size_t dataLen = 0;
-    Outcome outcome = runJob(job, ctx, dataLen);
-
-    // The session's last command (task p4.1-60): an admin session on a repeater where this exit
-    // node holds a grant puts its own entry back to the granted level before the job is over,
-    // whatever the job came to. A config.read has sent it already, for its result's sake; a
-    // password.set has sent it after its password line and dropped the session; a reboot has
-    // said why it sends none; an acl.set on our own key *is* the level and needs no second one.
-    if (std::strcmp(job.type, "acl.set") != 0) restoreAcl(job, ctx, outcome);
-
-    // The password's job is over. Whatever the outcome, and before anything is posted.
-    job.credential.wipe();
-
-    // A login answered below the class carries the tier it was answered at, for a type that has
-    // no result of its own to say it (task p4.1-60).
-    if (dataLen == 0 && outcome == Outcome::Unauthorized && ctx.grantedBelowClass) {
-      dataLen = writeLoginBelowClassResult(permissionName(ctx.grantedRole),
-                                           permissionName(roleNeededFor(job.credentialClass)), g_data, kDataCap);
-    } else if (dataLen == 0 && outcome == Outcome::Unauthorized && ctx.silentAfterReachable) {
-      // The candidate's silence right after a blank login the repeater answered (task p1.3-13):
-      // the server reads `reason` and treats it exactly as a refusal, notes the candidate
-      // refused, and hands the next attempt the old one (CONFIGURATION §7 step 4).
-      dataLen = writeLoginSilentResult(
-          ctx.probeRefused ? kProbeAnsweredRefused : permissionName(ctx.probeAnsweredRole), g_data, kDataCap);
-    }
-
-    // The path the mesh holds *after* the exchange, which is the claim's own unless a flooded
-    // reply taught a better one on the way (EXIT-NODES §3: every result reports what path was
-    // used). Read before the job is closed, because closing it forgets the peer.
-    const bool hadPath = mesh_->hasPath();
-    const int pathCount = mesh_->describePath(g_pathHops, kMaxClaimPathHops);
-    for (int h = 0; h < pathCount; h++) g_pathPtrs[h] = g_pathHops[h];
-    mesh_->endJob();
-
-    char clientId[48];
-    std::snprintf(clientId, sizeof clientId, "%lld-%08" PRIx32 "%08" PRIx32 "%08" PRIx32, job.id,
-                  platform_->random(), platform_->random(), platform_->random());
-
-    JobReport report;
-    report.clientId = clientId;
-    report.outcome = outcome;
-    report.startedAt = startedAt;
-    report.finishedAt = clock_->now();
-    // No path known is not the same as a direct neighbour: the first leaves both fields out, as
-    // the .NET runner does for a contact the companion has no path for; the second sends an
-    // empty array and a zero.
-    report.hasPathUsed = hadPath;
-    report.pathUsed = g_pathPtrs;
-    report.pathCount = pathCount;
-    report.hasHops = hadPath;
-    report.hops = pathCount;
-    report.hasRttMs = ctx.hasRtt;
-    report.rttMs = ctx.rttMs;
-    report.transactions = ctx.transactions;
-    report.data = dataLen > 0 ? g_data : nullptr;
-    report.log = g_log.text();
-
-    LOG_I("jobs: job %lld: %s after %d transaction(s)", job.id, outcomeName(outcome), ctx.transactions);
-    const size_t len = writeJobResult(report, g_body, kBodyCap);
-    bool posted = false;
-    if (len == 0) {
-      LOG_E("jobs: the result of job %lld did not fit in %u bytes", job.id, static_cast<unsigned>(kBodyCap));
-    } else {
-      posted = post(job.id, g_body, len);
-    }
-    ran_++;
-    remember(job, outcome, ctx.transactions, posted);
-    open_ = nullptr;
-  }
-  for (int i = 0; i < kClaimMax; i++) g_jobs[i].credential.wipe();
   return count;
+}
+
+void JobRunner::endClaim() {
+  for (int i = 0; i < kClaimMax; i++) g_jobs[i].credential.wipe();
+  claimed_ = 0;
+}
+
+void JobRunner::runClaimed(int i) {
+  if (i < 0 || i >= claimed_) return;
+  ClaimedJob& job = g_jobs[i];
+  const uint32_t startedAt = clock_->now();
+  g_log.clear();
+  g_log.add("job %lld %s for repeater %lld \"%s\" (%s)", job.id, job.type, job.repeaterId, job.repeaterLabel,
+            credentialClassName(job.credentialClass));
+  for (int g = 0; g < job.groupCount; g++) {
+    // The other jobs of this claim for the same repeater: they share one login (EXIT-NODES §8),
+    // which on this board is the session cache doing it rather than anything this loop does.
+    if (i + 1 < claimed_ && sharesLogin(job, g_jobs[i + 1])) {
+      g_log.add("grouped with job %lld: one login for the pair", job.groupWith[g]);
+      break;
+    }
+  }
+  LOG_I("jobs: job %lld %s for repeater %lld \"%s\" (%s)", job.id, job.type, job.repeaterId, job.repeaterLabel,
+        credentialClassName(job.credentialClass));
+
+  Context ctx;
+  ctx.job = &job;
+  // The display's fourth line, for as long as this job lasts: the pump refreshes the panel
+  // through every wait, so "Job 1234 acl.set" is live (src/ui/DisplayLines.h).
+  open_ = &job;
+  if (job.credentialCandidate[0] != '\0') {
+    // The material is one of the two candidates of an unverified credential (task p4-55), and
+    // the server reads this job's outcome as the verdict on it: a session another job opened
+    // with another password would make that verdict a lie, so this job logs in afresh
+    // whatever the cache holds.
+    sessions_.invalidate(job.repeaterKey);
+    g_log.add("the claim carries the %s candidate of an unverified credential: logging in afresh with it",
+              job.credentialCandidate);
+  }
+  size_t dataLen = 0;
+  Outcome outcome = runJob(job, ctx, dataLen);
+
+  // The session's last command (task p4.1-60): an admin session on a repeater where this exit
+  // node holds a grant puts its own entry back to the granted level before the job is over,
+  // whatever the job came to. A config.read has sent it already, for its result's sake; a
+  // password.set has sent it after its password line and dropped the session; a reboot has
+  // said why it sends none; an acl.set on our own key *is* the level and needs no second one.
+  if (std::strcmp(job.type, "acl.set") != 0) restoreAcl(job, ctx, outcome);
+
+  // The password's job is over. Whatever the outcome, and before anything is posted.
+  job.credential.wipe();
+
+  // A login answered below the class carries the tier it was answered at, for a type that has
+  // no result of its own to say it (task p4.1-60).
+  if (dataLen == 0 && outcome == Outcome::Unauthorized && ctx.grantedBelowClass) {
+    dataLen = writeLoginBelowClassResult(permissionName(ctx.grantedRole),
+                                         permissionName(roleNeededFor(job.credentialClass)), g_data, kDataCap);
+  } else if (dataLen == 0 && outcome == Outcome::Unauthorized && ctx.silentAfterReachable) {
+    // The candidate's silence right after a blank login the repeater answered (task p1.3-13):
+    // the server reads `reason` and treats it exactly as a refusal, notes the candidate
+    // refused, and hands the next attempt the old one (CONFIGURATION §7 step 4).
+    dataLen = writeLoginSilentResult(
+        ctx.probeRefused ? kProbeAnsweredRefused : permissionName(ctx.probeAnsweredRole), g_data, kDataCap);
+  }
+
+  // The path the mesh holds *after* the exchange, which is the claim's own unless a flooded
+  // reply taught a better one on the way (EXIT-NODES §3: every result reports what path was
+  // used). Read before the job is closed, because closing it forgets the peer.
+  const bool hadPath = mesh_->hasPath();
+  const int pathCount = mesh_->describePath(g_pathHops, kMaxClaimPathHops);
+  for (int h = 0; h < pathCount; h++) g_pathPtrs[h] = g_pathHops[h];
+  mesh_->endJob();
+
+  char clientId[48];
+  std::snprintf(clientId, sizeof clientId, "%lld-%08" PRIx32 "%08" PRIx32 "%08" PRIx32, job.id,
+                platform_->random(), platform_->random(), platform_->random());
+
+  JobReport report;
+  report.clientId = clientId;
+  report.outcome = outcome;
+  report.startedAt = startedAt;
+  report.finishedAt = clock_->now();
+  // No path known is not the same as a direct neighbour: the first leaves both fields out, as
+  // the .NET runner does for a contact the companion has no path for; the second sends an
+  // empty array and a zero.
+  report.hasPathUsed = hadPath;
+  report.pathUsed = g_pathPtrs;
+  report.pathCount = pathCount;
+  report.hasHops = hadPath;
+  report.hops = pathCount;
+  report.hasRttMs = ctx.hasRtt;
+  report.rttMs = ctx.rttMs;
+  report.transactions = ctx.transactions;
+  report.data = dataLen > 0 ? g_data : nullptr;
+  report.log = g_log.text();
+
+  LOG_I("jobs: job %lld: %s after %d transaction(s)", job.id, outcomeName(outcome), ctx.transactions);
+  const size_t len = writeJobResult(report, g_body, kBodyCap);
+  bool posted = false;
+  if (len == 0) {
+    LOG_E("jobs: the result of job %lld did not fit in %u bytes", job.id, static_cast<unsigned>(kBodyCap));
+  } else {
+    posted = post(job.id, g_body, len);
+  }
+  ran_++;
+  remember(job, outcome, ctx.transactions, posted);
+  open_ = nullptr;
+}
+
+// A job this wake has no room for: `failed`, with `why` in its log, at no transaction and with
+// nothing sent. The lease the claim handed over is answered - a job claimed is never left leased
+// and silent (task p1.5-18) - and the result is posted, or buffered like any other the server
+// would not take.
+void JobRunner::reportNotRun(int i, const char* why) {
+  if (i < 0 || i >= claimed_) return;
+  ClaimedJob& job = g_jobs[i];
+  const uint32_t at = clock_->now();
+  g_log.clear();
+  g_log.add("job %lld %s for repeater %lld \"%s\" (%s)", job.id, job.type, job.repeaterId, job.repeaterLabel,
+            credentialClassName(job.credentialClass));
+  g_log.add("%s", why == nullptr ? "not run" : why);
+  // Nothing goes on the air for this job, so the password it carried is done with here.
+  job.credential.wipe();
+
+  char clientId[48];
+  std::snprintf(clientId, sizeof clientId, "%lld-%08" PRIx32 "%08" PRIx32 "%08" PRIx32, job.id, platform_->random(),
+                platform_->random(), platform_->random());
+  JobReport report;
+  report.clientId = clientId;
+  report.outcome = Outcome::Failed;
+  report.startedAt = at;
+  report.finishedAt = at;
+  report.transactions = 0;
+  report.log = g_log.text();
+
+  LOG_W("jobs: job %lld %s was not run: %s", job.id, job.type, why == nullptr ? "not run" : why);
+  const size_t len = writeJobResult(report, g_body, kBodyCap);
+  bool posted = false;
+  if (len == 0) {
+    LOG_E("jobs: the result of job %lld did not fit in %u bytes", job.id, static_cast<unsigned>(kBodyCap));
+  } else {
+    posted = post(job.id, g_body, len);
+  }
+  remember(job, Outcome::Failed, 0, posted);
 }
 
 void JobRunner::report(TextOut& out) const {
