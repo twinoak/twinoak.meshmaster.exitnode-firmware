@@ -7,7 +7,13 @@
 #                       application, and the image ends before NVS begins (task p1.2-11)
 #   native tests        pio test -e native (the host tests: no board, no radio), which since task
 #                       p1.5-16 compiles lib/agent-core whole - the job runner and the agent loop
-#                       among it - and whose test/test_library holds the library's boundary
+#                       among it - and whose test/test_library holds the library's boundary.
+#                       Since task p1.5-17 two of those suites *run* the whole agent against the
+#                       fakes of test/support: test_runner is JobRunner end to end over every one
+#                       of the thirteen job types, test_loop is AgentLoop's pass, its backoff and
+#                       its reboot guard (docs/host.md). Nothing in them sleeps - the clock is the
+#                       test's - so they are milliseconds each; what the minute of this job is
+#                       spent on is PlatformIO relinking once per suite
 #   the library         what moved into lib/agent-core, as a file list a reviewer can read; the
 #                       library compiled on its own with an ESP-IDF consumer's flags
 #                       (tools/check-library-host.py); and its ESP-IDF component file parsed and

@@ -161,11 +161,14 @@ class IMesh {
   virtual bool awaitText(uint32_t timeoutMs, void (*pump)()) = 0;
   virtual const MeshReply& reply() const = 0;
 
-  // The unique second every tag and every sender timestamp this board sends comes from, so the
-  // series a repeater sees from this key is strictly increasing across REQs and CLI lines alike.
-  // Since task p1.5-15 every send draws its own, and nothing in the library calls this; it stays
-  // on the surface because the task lists it (the report says what the link makes of that).
-  virtual uint32_t uniqueTime() = 0;
+  // **`uniqueTime()` is not here, and that is deliberate** (task p1.5-17, the follow-up task 15
+  // left). The unique second every tag and every sender timestamp comes from is the *mesh's* to
+  // draw: since task p1.5-15 every send draws its own and hands it back, nothing in the library
+  // asks for one, and `LINK-PROTOCOL.md` §6.2 says the same of the link - "all timestamps the
+  // client sends come from the RAK's clock, so the Walter never supplies one". Keeping it on the
+  // interface would have made every implementation answer a question nobody asks, and the link
+  // would have needed a request for it. The in-process mesh keeps the method as its own
+  // (src/mesh/AgentMesh.h), because that is where the series is drawn.
 };
 
 }  // namespace mm

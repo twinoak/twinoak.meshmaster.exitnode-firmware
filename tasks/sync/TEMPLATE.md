@@ -38,7 +38,16 @@ branch from `master` and do not move the pin a second time.
    that encodes or decodes a MeshCore frame is only as right as the source it
    was written from: check each one against
    `.pio/libdeps/heltec_v3/MeshCore` at `{{NEW_PIN}}`, not against the old
-   reading of it.
+   reading of it. **The host fakes are on this list too**
+   ([`docs/host.md`](../../docs/host.md)): `test/support/FakeMesh.h` is a
+   reading of `examples/simple_repeater/MyMesh.cpp` and
+   `src/helpers/CommonCLI.cpp`, and the manifest at the top of it cites every
+   answer it gives to a fixture or to a function, a file and a line range.
+   `Citations.EveryAnswerOfTheFakeCitesAFixtureOrAFirmwareFunction` in
+   `test/test_runner` will say when a cited function has moved or gone; whether
+   one that is still there still *does the same thing* is this session's
+   reading, and a reply the firmware now spells differently is a line of the
+   fake to change and not a test to loosen.
 5. **Update the flag blocks.** `platformio.ini` carries a copy of MeshCore's
    `[arduino_base]`, `[esp32_base]`, `[sensor_base]` and
    `variants/heltec_v3` flags, and `[libs]` a copy of its library versions.
