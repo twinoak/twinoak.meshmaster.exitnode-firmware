@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -528,6 +529,524 @@ TEST_F(LoopTest, NothingIsSentWhileTheLinkIsDownOrTheTokenIsMissing) {
   for (int i = 0; i < 50; i++) loop.loop();
   EXPECT_TRUE(server.calls().empty()) << "no token, no call";
   EXPECT_FALSE(loop.online());
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// One wake (task p1.5-18): the same steps, in the same order, inside a budget
+//
+// `loop()` above is the Heltec. Everything below is `wake()`: what a device that sleeps does
+// with one bounded slice of time and energy (proposal 01 parts B and C of the repeater-v2
+// design, `spec/EXIT-NODES.md` §6 *An agent that paces itself*, and the Walter's
+// `docs/ARCHITECTURE.md` §10). No test here calls `loop()` and none of the tests above calls
+// `wake()`, so the two ways of being driven are held apart as well as together.
+
+// The intent of a unit that checks in hourly and has room for a dozen transactions this wake.
+mm::WakeIntent hourly(int cap = 12) {
+  mm::WakeIntent intent;
+  intent.nextCheckInS = 3600;
+  intent.maxTransactionsThisWake = cap;
+  return intent;
+}
+
+TEST_F(LoopTest, AWakeWithNothingWaitingIsAConfigCallAHeartbeatAndNothingElse) {
+  server.answerHeartbeat(60, 1, 3600, false, platform.clock().now());
+
+  const mm::WakeReport first = loop.wake(hourly(), mm::Budget());
+
+  ASSERT_EQ(server.calls().size(), 2u) << "a wake with nothing waiting is two calls";
+  EXPECT_EQ(server.calls()[0], "config") << "the first wake of a boot has no config yet";
+  EXPECT_EQ(server.calls()[1], "heartbeat");
+  EXPECT_EQ(first.config, mm::StepOutcome::Done);
+  EXPECT_EQ(first.heartbeat, mm::StepOutcome::Done);
+  EXPECT_EQ(first.results, mm::StepOutcome::Skipped);
+  EXPECT_EQ(first.claim, mm::StepOutcome::Skipped) << "the heartbeat said no work was waiting";
+  EXPECT_EQ(first.jobs, mm::StepOutcome::Skipped);
+  EXPECT_EQ(first.observations, mm::StepOutcome::Skipped) << "the ring is empty";
+  EXPECT_STREQ(first.why, "");
+  EXPECT_EQ(first.acceptedIntervalS, 3600) << "the reply's pollIntervalS is what the caller sleeps by";
+  EXPECT_EQ(first.serverTime, kNow);
+  EXPECT_EQ(first.sleepAtLeastS, 0u);
+  EXPECT_EQ(first.transactionsSpent, 0) << "nothing went on the air";
+  EXPECT_FALSE(first.halted);
+  EXPECT_FALSE(first.rebootWanted);
+  EXPECT_EQ(loop.counters().heartbeats, 1u);
+
+  // The second wake of the same boot asks for no config: this uplink has one. A device that
+  // deep-sleeps loses the object with its RAM and asks again on the next boot, which is what
+  // "the config if stale" means for something that sleeps.
+  const mm::WakeReport again = loop.wake(hourly(), mm::Budget());
+  EXPECT_EQ(again.config, mm::StepOutcome::Skipped);
+  EXPECT_EQ(again.heartbeat, mm::StepOutcome::Done);
+  EXPECT_EQ(server.configCalls(), 1);
+}
+
+TEST_F(LoopTest, TheWakesHeartbeatCarriesTheIntentAndTheReplysIntervalIsTheAcceptedOne) {
+  // The server accepted a quarter of an hour where the agent asked for one (AgentLimits clamps
+  // rather than refuses, meshmaster.dk's p4.14-120), and says so in `pollIntervalS`.
+  server.answerHeartbeat(60, 1, 900, false, platform.clock().now());
+
+  const mm::WakeReport report = loop.wake(hourly(6), mm::Budget());
+
+  ASSERT_EQ(server.heartbeats().size(), 1u);
+  const std::string hb = server.heartbeats()[0];
+  EXPECT_NE(hb.find("\"nextCheckInS\":3600"), std::string::npos) << hb;
+  EXPECT_NE(hb.find("\"maxTransactionsThisWake\":6"), std::string::npos) << hb;
+  EXPECT_TRUE(fake::followsShapeOf(hb, fake::contract("AgentHeartbeat"))) << hb;
+  EXPECT_EQ(report.acceptedIntervalS, 900) << "the accepted proposal, and never 30 or 120";
+}
+
+TEST_F(LoopTest, TheHeltecsHeartbeatCarriesNeitherOfTheTwoWakeFields) {
+  // The other half of the same rule: `loop()` sets no intent, so an agent that proposes nothing
+  // writes the bytes it wrote before meshmaster.dk's task 120 (test_envelopes holds them against
+  // the fixture).
+  linkUp();
+  ASSERT_TRUE(untilACall());  // config
+  ASSERT_TRUE(untilACall());  // heartbeat
+  ASSERT_EQ(server.heartbeats().size(), 1u);
+  EXPECT_EQ(server.heartbeats()[0].find("nextCheckInS"), std::string::npos) << server.heartbeats()[0];
+  EXPECT_EQ(server.heartbeats()[0].find("maxTransactionsThisWake"), std::string::npos) << server.heartbeats()[0];
+}
+
+TEST_F(LoopTest, AWakeAsksForNoMoreJobsThanItsCapCanRunAndLeavesTheRestOnTheServer) {
+  // Three traces waiting and a cap of two transactions: a trace is one transaction and no login
+  // (EXIT-NODES §7), but the claim is sized before any type is known, so the cap buys one job at
+  // the cheapest shape there is - a login and a request. One is claimed and run; the other two
+  // stay queued and bound to nothing, for the next wake or another exit node (task p4.14-121).
+  server.answerHeartbeat(60, 1, 3600, true, platform.clock().now());
+  server.queue(std::vector<std::string>{
+      fake::Job(14001, "trace").leasedUntil(kLease).json(),
+      fake::Job(14002, "trace").leasedUntil(kLease).json(),
+      fake::Job(14003, "trace").leasedUntil(kLease).json(),
+  });
+
+  const mm::WakeReport report = loop.wake(hourly(2), mm::Budget());
+
+  ASSERT_EQ(server.claimMaxes().size(), 1u) << "one claim per wake";
+  EXPECT_EQ(server.claimMaxes()[0], 1) << "two transactions buy one job at the cheapest price there is";
+  EXPECT_EQ(report.jobsClaimed, 1);
+  EXPECT_EQ(report.jobsRun, 1);
+  EXPECT_EQ(report.jobsNotRun, 0);
+  EXPECT_EQ(report.jobs, mm::StepOutcome::Done);
+  EXPECT_EQ(report.transactionsSpent, 1) << "a trace is one transaction and asks nobody for a session";
+  ASSERT_EQ(server.results().size(), 1u);
+  EXPECT_EQ(server.results()[0].jobId, 14001);
+  EXPECT_EQ(server.queuedJobs(), 2u) << "the other two were never claimed";
+  EXPECT_EQ(server.claimCalls(), 1);
+}
+
+TEST_F(LoopTest, AWakeWithNoRoomLeftMakesNoClaimAtAll) {
+  // A cap below the cheapest job is a wake that reads the server and does not ask for work:
+  // nothing is claimed, so nothing is leased and nothing is left silent.
+  server.answerHeartbeat(60, 1, 3600, true, platform.clock().now());
+  server.queue(fake::Job(14010, "trace").leasedUntil(kLease).json());
+
+  const mm::WakeReport report = loop.wake(hourly(1), mm::Budget());
+
+  EXPECT_EQ(report.claim, mm::StepOutcome::NoBudget);
+  EXPECT_EQ(report.jobsClaimed, 0);
+  EXPECT_EQ(server.claimCalls(), 0);
+  EXPECT_EQ(server.queuedJobs(), 1u);
+  EXPECT_TRUE(fake::LogCapture::the().holds("which is less than a job: no claim is made"));
+}
+
+TEST_F(LoopTest, AJobTheWakeHasNoTimeForIsFailedWithWakeBudgetAndItsResultIsPosted) {
+  // A config read of the default list is thirty-three transactions, which at the conservative
+  // budget of §8 is the better part of half an hour: a wake with a minute cannot finish it. It
+  // is **not** put on the air and it is **not** left leased and silent - the result goes back
+  // with *wake budget* in its log, which is what the server reads.
+  server.answerHeartbeat(mm::kDefaultMaxTransactionsPerMinute, mm::kDefaultMinGapSeconds, 3600, true,
+                         platform.clock().now());
+  server.queue(fake::Job(14020, "config.read")
+                   .atClass("admin")
+                   .leasedUntil(kNow + 1800)
+                   .withAdminPassword("adm1n-pass")
+                   .withAclLevel(mm::kPermReadOnly)
+                   .json());
+  mm::Budget budget;
+  budget.wakeSeconds = 60;
+
+  const mm::WakeReport report = loop.wake(hourly(60), budget);
+
+  EXPECT_EQ(report.jobsClaimed, 1);
+  EXPECT_EQ(report.jobsRun, 0);
+  EXPECT_EQ(report.jobsNotRun, 1);
+  EXPECT_EQ(report.jobs, mm::StepOutcome::NoTime);
+  EXPECT_EQ(report.transactionsSpent, 0) << "nothing went on the air for it";
+  EXPECT_EQ(mesh.sends().size(), 0u) << "and the radio was never asked";
+  ASSERT_EQ(server.results().size(), 1u) << "a job claimed is always answered";
+  const std::string body = server.results()[0].body;
+  EXPECT_EQ(server.results()[0].jobId, 14020);
+  EXPECT_EQ(memberOf(body, "outcome"), "failed") << body;
+  EXPECT_EQ(memberOf(body, "transactions"), "0") << body;
+  EXPECT_NE(body.find("wake budget"), std::string::npos) << body;
+  EXPECT_TRUE(fake::followsShapeOf(body, fake::contract("JobResultReport"))) << body;
+  EXPECT_EQ(loop.counters().consecutiveFailures, 0u) << "the budget is not a failure of the server's";
+}
+
+TEST_F(LoopTest, AJobTheWakesTransactionCapHasNoRoomForIsFailedTheSameWay) {
+  // The same rule, counted in transactions rather than seconds: the first job spends what the
+  // wake had, and the second - claimed in the same breath - is answered without being sent.
+  server.answerHeartbeat(60, 1, 3600, true, platform.clock().now());
+  server.queue(std::vector<std::string>{
+      fake::Job(14030, "status")
+          .atClass("acl")
+          .leasedUntil(kLease)
+          .withAclLevel(mm::kPermReadOnly)
+          .withPayload("{\"version\":false}")
+          .groupedWith(14031)
+          .json(),
+      fake::Job(14031, "telemetry")
+          .atClass("acl")
+          .leasedUntil(kLease)
+          .withAclLevel(mm::kPermReadOnly)
+          .json(),
+  });
+  // Four transactions buy two jobs at the cheapest price, and the first spends three of them -
+  // a login, the status request and the ACL restore - so the second will not fit.
+  const mm::WakeReport report = loop.wake(hourly(4), mm::Budget());
+
+  ASSERT_EQ(server.claimMaxes().size(), 1u);
+  EXPECT_EQ(report.jobsClaimed, 2);
+  EXPECT_EQ(report.jobsRun, 1);
+  EXPECT_EQ(report.jobsNotRun, 1);
+  EXPECT_EQ(report.jobs, mm::StepOutcome::NoBudget);
+  ASSERT_EQ(server.results().size(), 2u) << "both jobs are answered, whatever happened to them";
+  EXPECT_EQ(memberOf(server.results()[1].body, "outcome"), "failed");
+  EXPECT_NE(server.results()[1].body.find("wake budget"), std::string::npos) << server.results()[1].body;
+  EXPECT_LE(report.transactionsSpent, 4) << "the cap was not exceeded";
+}
+
+TEST_F(LoopTest, NoWakeEverLeavesAJobLeasedAndSilent) {
+  // The property, over a spread of budgets, caps and claims: **every job a claim handed over has
+  // a posted result**, whether it ran, overran or was never sent. The randomness is seeded, so a
+  // failure is the same failure twice.
+  uint32_t seed = 0x1f35c6d1u;
+  const auto next = [&seed]() {
+    seed ^= seed << 13;
+    seed ^= seed >> 17;
+    seed ^= seed << 5;
+    return seed;
+  };
+  const char* const shapes[] = {"trace", "status", "telemetry", "config.read", "cli"};
+
+  for (int round = 0; round < 24; round++) {
+    server.forgetCalls();
+    server.forgetQueued();
+    const uint32_t lease = platform.clock().now() + 1800;
+    std::vector<std::string> batch;
+    std::vector<long long> queuedIds;
+    const int howMany = 1 + static_cast<int>(next() % 3u);
+    for (int i = 0; i < howMany; i++) {
+      const char* type = shapes[next() % (sizeof shapes / sizeof shapes[0])];
+      fake::Job job(20000 + round * 10 + i, type);
+      job.leasedUntil(lease);
+      if (std::strcmp(type, "trace") != 0) {
+        job.atClass(std::strcmp(type, "config.read") == 0 || std::strcmp(type, "cli") == 0 ? "admin" : "acl")
+            .withAclLevel(mm::kPermReadOnly)
+            .withAdminPassword("adm1n-pass");
+      }
+      if (std::strcmp(type, "cli") == 0) job.withPayload("{\"command\":\"get name\"}");
+      queuedIds.push_back(20000 + round * 10 + i);
+      batch.push_back(job.json());
+    }
+    server.queue(batch);
+    server.answerHeartbeat(mm::kDefaultMaxTransactionsPerMinute, mm::kDefaultMinGapSeconds, 3600, true,
+                           platform.clock().now());
+
+    mm::Budget budget;
+    budget.wakeSeconds = 1 + next() % 400u;
+    const mm::WakeReport report = loop.wake(hourly(1 + static_cast<int>(next() % 8u)), budget);
+
+    ASSERT_EQ(report.jobsRun + report.jobsNotRun, report.jobsClaimed)
+        << "round " << round << ": a claimed job was neither run nor answered";
+    // A claim takes the oldest of what is queued, in order, so the first `jobsClaimed` ids of
+    // this round are the ones this wake is answerable for - and every one of them has a result.
+    ASSERT_LE(static_cast<size_t>(report.jobsClaimed), queuedIds.size());
+    for (int i = 0; i < report.jobsClaimed; i++) {
+      const long long id = queuedIds[static_cast<size_t>(i)];
+      bool answered = false;
+      for (const fake::PostedResult& posted : server.results()) {
+        if (posted.jobId == id) answered = true;
+      }
+      // Or it is in the offline buffer, which is a result the server will be given later; this
+      // fake server answers every post, so nothing should be waiting.
+      EXPECT_TRUE(answered) << "round " << round << ": job " << id << " was claimed and never answered";
+    }
+    // And whatever was left behind is still queued and bound to nothing, for the next wake.
+    EXPECT_EQ(server.queuedJobs(), queuedIds.size() - static_cast<size_t>(report.jobsClaimed)) << "round " << round;
+    ASSERT_EQ(jobs.queueDepth(), 0) << "round " << round;
+    // And the cap was honoured, which is the other half of the promise to the server.
+    EXPECT_LE(report.transactionsSpent, 8 + 33) << "round " << round;
+  }
+}
+
+TEST_F(LoopTest, AWakeTakesTheServersTimeBeforeAnyResultIsStamped) {
+  // The Walter sets the radio's clock before anything else and has the server's time from the
+  // heartbeat: so a board with no clock of its own still stamps its results with a real time,
+  // because the heartbeat comes before the first job in a wake as it does in a pass.
+  platform.fakeClock().unset();
+  ASSERT_FALSE(platform.clock().hasTime());
+  server.answerHeartbeat(60, 1, 3600, true, kNow);
+  server.setServerTime(kNow);
+  server.queue(fake::Job(14040, "trace").leasedUntil(kNow + 1800).json());
+
+  const mm::WakeReport report = loop.wake(hourly(), mm::Budget());
+
+  EXPECT_EQ(report.serverTime, kNow);
+  EXPECT_TRUE(platform.clock().hasTime()) << "the heartbeat's reply is where the clock came from";
+  EXPECT_EQ(platform.fakeClock().serverTimesTaken(), 1);
+  ASSERT_EQ(server.results().size(), 1u);
+  uint32_t startedAt = 0;
+  ASSERT_TRUE(mm::parseUtc(memberOf(server.results()[0].body, "startedAt").c_str(), startedAt))
+      << server.results()[0].body;
+  EXPECT_GE(startedAt, kNow) << "the result's timestamps are the server's and not 1970";
+  EXPECT_LE(startedAt, kNow + 600);
+}
+
+TEST_F(LoopTest, AByteCapPostsAsManyBatchesAsItFitsAndTheRestWaitForTheNextWake) {
+  server.answerHeartbeat(60, 1, 3600, false, platform.clock().now());
+
+  // What one batch of twenty costs is learned rather than guessed.
+  for (uint8_t i = 0; i < mm::kObservationBatchSize; i++) loop.ring().push(advert(i, platform.millis()));
+  const mm::WakeReport measuring = loop.wake(hourly(), mm::Budget());
+  ASSERT_EQ(measuring.batchesPosted, 1);
+  ASSERT_EQ(server.observations().size(), 1u);
+  const size_t oneBatch = server.observations()[0].size();
+  EXPECT_EQ(measuring.bytesPosted, oneBatch);
+
+  // Forty adverts and a cap that fits one batch and not a byte more: twenty go, twenty stay.
+  server.forgetCalls();
+  const uint32_t heardAt = platform.millis();
+  const uint32_t heardAtEpoch = platform.clock().now();
+  // The same names as the batch that was measured, so that the first twenty of these are that
+  // batch to the byte: "Repeater 100" is a longer line than "Repeater 0" and would not be.
+  for (uint8_t i = 0; i < 40; i++) loop.ring().push(advert(i, heardAt));
+  mm::Budget budget;
+  budget.postBytes = oneBatch + 1;
+
+  const mm::WakeReport capped = loop.wake(hourly(), budget);
+
+  EXPECT_EQ(capped.batchesPosted, 1) << "as many batches as the byte cap allows, and no more";
+  EXPECT_EQ(capped.observationsPosted, static_cast<int>(mm::kObservationBatchSize));
+  EXPECT_EQ(capped.observationsLeft, 20);
+  EXPECT_EQ(capped.observations, mm::StepOutcome::NoBudget);
+  EXPECT_LE(capped.bytesPosted, budget.postBytes);
+  EXPECT_EQ(loop.ring().size(), 20u) << "the rest stay in the ring; nothing is dropped";
+  EXPECT_EQ(loop.ring().dropped(), 0u);
+
+  // An hour later, a wake with room posts them **with the moment they were heard** - the ring's
+  // own rule, and what makes a late batch worth keeping at all.
+  server.forgetCalls();
+  platform.advanceSeconds(3600);
+  const mm::WakeReport later = loop.wake(hourly(), mm::Budget());
+  EXPECT_EQ(later.observationsPosted, 20);
+  EXPECT_EQ(loop.ring().size(), 0u);
+  ASSERT_EQ(server.observations().size(), 1u);
+  const std::string items = memberOf(server.observations()[0], "items");
+  uint32_t at = 0;
+  ASSERT_TRUE(mm::parseUtc(memberOf(items, "at").c_str(), at)) << items;
+  EXPECT_LE(at, heardAtEpoch + 2) << "an hour late, and still stamped with when it was heard";
+  EXPECT_GE(at + 2, heardAtEpoch);
+  EXPECT_GE(platform.clock().now() - at, 3500u);
+}
+
+TEST_F(LoopTest, AServerThatIsAwayIsABackoffTheCallerSleepsThroughAndTheNextWakeHonoursIt) {
+  server.failAlways(fake::FakeUplink::Fault::Unreachable);
+  server.setRetryAfter(0);
+
+  const mm::WakeReport away = loop.wake(hourly(), mm::Budget());
+
+  EXPECT_EQ(away.config, mm::StepOutcome::Failed);
+  EXPECT_EQ(away.heartbeat, mm::StepOutcome::Failed);
+  EXPECT_EQ(away.claim, mm::StepOutcome::Skipped) << "nothing else goes on a link that just failed";
+  EXPECT_EQ(away.jobs, mm::StepOutcome::Skipped);
+  EXPECT_EQ(away.observations, mm::StepOutcome::Skipped);
+  EXPECT_GE(away.sleepAtLeastS, 22u) << "half a minute with a quarter of jitter (agent/Backoff.h)";
+  EXPECT_LE(away.sleepAtLeastS, 90u);
+  EXPECT_GE(away.counters.consecutiveFailures, 1u);
+  EXPECT_FALSE(away.rebootWanted);
+
+  // The state goes to retained storage as bytes, and comes back into a loop that has just booted.
+  const mm::WakeState saved = loop.state();
+  EXPECT_GT(saved.holdForMs, 0u);
+  unsigned char bytes[sizeof(mm::WakeState)];
+  std::memcpy(bytes, &saved, sizeof bytes);
+  mm::WakeState back;
+  std::memcpy(&back, bytes, sizeof bytes);
+
+  std::unique_ptr<mm::JobRunner> runner(new mm::JobRunner());
+  std::unique_ptr<mm::AgentLoop> woken(new mm::AgentLoop());
+  runner->begin(mesh, server, platform, nullptr);
+  woken->begin(server, platform, mesh, *runner, identity);
+  woken->setIdentity(self().c_str());
+  ASSERT_TRUE(woken->restore(back));
+  EXPECT_EQ(woken->counters().consecutiveFailures, saved.consecutiveFailures);
+  EXPECT_EQ(woken->counters().httpFailures, saved.counters.httpFailures);
+  EXPECT_GE(woken->retrySeconds() + 1, saved.holdForMs / 1000);
+
+  // A sleep shorter than the wait: the wake that follows sends nothing and says so.
+  server.forgetCalls();
+  platform.advance(saved.holdForMs / 2);
+  const mm::WakeReport tooSoon = woken->wake(hourly(), mm::Budget());
+  EXPECT_TRUE(server.calls().empty()) << "the wait the server asked for was not honoured";
+  EXPECT_STREQ(tooSoon.why, "a wait the server asked for is still running");
+  EXPECT_GT(tooSoon.sleepAtLeastS, 0u);
+
+  // And once it is over, the backoff is where it was: the second failure is the second step and
+  // not the first, because the state carried it across the sleep.
+  platform.advance(saved.holdForMs);
+  const mm::WakeReport again = woken->wake(hourly(), mm::Budget());
+  EXPECT_FALSE(server.calls().empty());
+  EXPECT_GE(again.counters.consecutiveFailures, saved.consecutiveFailures + 1);
+  EXPECT_GE(again.sleepAtLeastS, 45u) << "a minute at the second step, jittered - not thirty again";
+}
+
+TEST_F(LoopTest, TheWakeStateRoundTripsThroughBytesAndARestoreOfAnotherVersionIsRefused) {
+  server.answerHeartbeat(4, 10, 1800, false, platform.clock().now());
+  ASSERT_EQ(loop.wake(hourly(), mm::Budget()).heartbeat, mm::StepOutcome::Done);
+
+  const mm::WakeState saved = loop.state();
+  EXPECT_EQ(saved.version, mm::WakeState::kVersion);
+  EXPECT_EQ(saved.pollIntervalS, 1800) << "the interval the server accepted";
+  EXPECT_EQ(saved.budget.maxTransactionsPerMinute, 4) << "and the budget it named";
+  EXPECT_EQ(saved.budget.minGapSeconds, 10);
+  EXPECT_TRUE(saved.everHeartbeated);
+  EXPECT_EQ(saved.lastHeartbeatAtEpoch, kNow);
+  EXPECT_EQ(saved.counters.heartbeats, 1u);
+  EXPECT_FALSE(saved.halted);
+
+  std::unique_ptr<mm::JobRunner> runner(new mm::JobRunner());
+  std::unique_ptr<mm::AgentLoop> woken(new mm::AgentLoop());
+  runner->begin(mesh, server, platform, nullptr);
+  woken->begin(server, platform, mesh, *runner, identity);
+  ASSERT_TRUE(woken->restore(saved));
+
+  const mm::WakeState again = woken->state();
+  EXPECT_EQ(again.version, saved.version);
+  EXPECT_EQ(again.backoffMs, saved.backoffMs);
+  EXPECT_EQ(again.consecutiveFailures, saved.consecutiveFailures);
+  EXPECT_EQ(again.holdForMs, saved.holdForMs);
+  EXPECT_EQ(again.failingForMs, saved.failingForMs);
+  EXPECT_EQ(again.pollIntervalS, saved.pollIntervalS);
+  EXPECT_EQ(again.budget.maxTransactionsPerMinute, saved.budget.maxTransactionsPerMinute);
+  EXPECT_EQ(again.budget.minGapSeconds, saved.budget.minGapSeconds);
+  EXPECT_EQ(again.halted, saved.halted);
+  EXPECT_EQ(again.everHeartbeated, saved.everHeartbeated);
+  EXPECT_EQ(again.lastHeartbeatAtEpoch, saved.lastHeartbeatAtEpoch);
+  EXPECT_EQ(again.counters.heartbeats, saved.counters.heartbeats);
+  EXPECT_EQ(again.counters.httpFailures, saved.counters.httpFailures);
+
+  // A blob written by another build is not read into this one.
+  mm::WakeState older = saved;
+  older.version = mm::WakeState::kVersion + 1;
+  EXPECT_FALSE(woken->restore(older));
+  EXPECT_EQ(woken->state().pollIntervalS, saved.pollIntervalS) << "and nothing of it was taken";
+}
+
+TEST_F(LoopTest, AHaltedLoopWakesAndSendsNothing) {
+  server.failAlways(fake::FakeUplink::Fault::Unauthorized);
+  const mm::WakeReport refused = loop.wake(hourly(), mm::Budget());
+  EXPECT_TRUE(refused.halted);
+  EXPECT_TRUE(loop.halted());
+
+  // And a 401 survives the sleep: nothing is sent until a person sets the token again.
+  const mm::WakeState saved = loop.state();
+  EXPECT_TRUE(saved.halted);
+  server.answerAgain();
+  server.forgetCalls();
+  const mm::WakeReport next = loop.wake(hourly(), mm::Budget());
+  EXPECT_TRUE(server.calls().empty());
+  EXPECT_STREQ(next.why, "halted: the server refused the token (http 401)");
+  EXPECT_TRUE(next.halted);
+}
+
+TEST_F(LoopTest, TheRebootGuardIsToldAndNotTakenInOneWakeMode) {
+  // Twelve unanswered calls over ninety minutes is what makes the board restart itself in
+  // `loop()`. A device that sleeps has a supervisor of its own, so the wake **says** the
+  // platform would have been asked and nothing restarts.
+  server.failAlways(fake::FakeUplink::Fault::Unreachable);
+  server.setRetryAfter(0);
+  bool wanted = false;
+  std::string why;
+  for (int wake = 0; wake < 12 && !wanted; wake++) {
+    platform.advanceSeconds(600);
+    const mm::WakeReport report = loop.wake(hourly(), mm::Budget());
+    wanted = report.rebootWanted;
+    why = report.rebootWhy;
+  }
+  EXPECT_TRUE(wanted) << loop.counters().consecutiveFailures << " failure(s) and the guard said nothing";
+  EXPECT_NE(why.find("server calls unanswered"), std::string::npos) << why;
+  EXPECT_TRUE(platform.reboots().empty()) << "a wake does not restart the device";
+  EXPECT_EQ(platform.selfReboots(), 0u);
+  EXPECT_TRUE(fake::LogCapture::the().holds("in one-wake mode it is not"));
+}
+
+TEST_F(LoopTest, AWakeFlushesWhatTheLastWakeCouldNotPostBeforeItClaimsAnything) {
+  // "Offline is normal", in a wake: the result of a job whose POST the server would not take
+  // waits in RAM, and the next wake posts it **before** it asks for more work - which is the
+  // order of EXIT-NODES §5 and the order of `loop()`.
+  server.answerHeartbeat(60, 1, 3600, true, platform.clock().now());
+  server.failResults(fake::FakeUplink::Fault::Unreachable, 1);
+  server.queue(fake::Job(14050, "trace").leasedUntil(kLease).json());
+
+  ASSERT_EQ(loop.wake(hourly(), mm::Budget()).jobsRun, 1);
+  ASSERT_EQ(jobs.queueDepth(), 1) << "the result the server would not take";
+
+  server.forgetCalls();
+  platform.advanceSeconds(3600);
+  server.queue(fake::Job(14051, "trace").leasedUntil(platform.clock().now() + 1800).json());
+  const mm::WakeReport second = loop.wake(hourly(), mm::Budget());
+
+  EXPECT_EQ(second.results, mm::StepOutcome::Done);
+  EXPECT_EQ(second.resultsFlushed, 1);
+  ASSERT_GE(server.calls().size(), 3u);
+  EXPECT_EQ(server.calls()[0], "heartbeat");
+  EXPECT_EQ(server.calls()[1], "result") << "the buffer, before the claim";
+  EXPECT_EQ(server.calls()[2], "claim");
+  EXPECT_EQ(jobs.queueDepth(), 0);
+  // And the late result still carries the timestamps it was made with.
+  ASSERT_GE(server.results().size(), 1u);
+  uint32_t finishedAt = 0;
+  ASSERT_TRUE(mm::parseUtc(memberOf(server.results()[0].body, "finishedAt").c_str(), finishedAt));
+  EXPECT_GE(platform.clock().now() - finishedAt, 3500u);
+}
+
+TEST_F(LoopTest, AWakeWithNoUplinkOrNoTokenSendsNothingAndSaysWhich) {
+  server.setLinkUp(false);
+  const mm::WakeReport down = loop.wake(hourly(), mm::Budget());
+  EXPECT_TRUE(server.calls().empty());
+  EXPECT_STREQ(down.why, "the uplink is down");
+
+  server.setLinkUp(true);
+  server.setConfigured(false);
+  const mm::WakeReport noToken = loop.wake(hourly(), mm::Budget());
+  EXPECT_TRUE(server.calls().empty());
+  EXPECT_STREQ(noToken.why, "not configured: the server's url and a token are needed");
+}
+
+TEST_F(LoopTest, TheAirtimeGateStillPacesAWakeWithRoomForSixTransactions) {
+  // Pacing is untouched: a cap of six transactions is still spaced by the budget the server
+  // named, because the gate is where every send goes through (agent/Airtime.h).
+  server.answerHeartbeat(2, 20, 3600, true, platform.clock().now());
+  server.queue(fake::Job(14060, "status")
+                   .atClass("acl")
+                   .leasedUntil(kNow + 1800)
+                   .withAclLevel(mm::kPermReadOnly)
+                   .json());
+
+  const uint32_t began = platform.millis();
+  const mm::WakeReport report = loop.wake(hourly(6), mm::Budget());
+
+  ASSERT_EQ(report.jobsRun, 1) << "the job did not run at all";
+  EXPECT_GE(report.transactionsSpent, 2);
+  // Every gap between two sends is the budget's twenty seconds, on the fake clock.
+  const std::vector<fake::Send>& sends = mesh.sends();
+  ASSERT_GE(sends.size(), 2u);
+  for (size_t i = 1; i < sends.size(); i++) {
+    EXPECT_GE(sends[i].atMs - sends[i - 1].atMs, 20000u) << "send " << i << " came too soon after " << (i - 1);
+  }
+  EXPECT_GE(platform.millis() - began, 20000u) << "a paced wake takes the time the pacing costs";
 }
 
 }  // namespace

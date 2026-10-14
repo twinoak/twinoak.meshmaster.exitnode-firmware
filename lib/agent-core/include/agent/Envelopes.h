@@ -3,7 +3,8 @@
 //   AgentHeartbeat(string AgentVersion, string Transport, DateTime At, string? CompanionPublicKey,
 //                  string? CompanionFirmware, RadioParameters? Radio, IReadOnlyList<string>? JobTypes,
 //                  AgentBudget? Budget, bool CompanionConnected, int QueueDepth,
-//                  IReadOnlyDictionary<string, long>? Errors, string? Board)
+//                  IReadOnlyDictionary<string, long>? Errors, string? Board, int? NextCheckInS,
+//                  int? MaxTransactionsThisWake)
 //   RadioParameters(double? FreqMHz, double? BwKHz, int? Sf, int? Cr)
 //   Observation(DateTime At, string Kind, string PublicKey, IReadOnlyList<string>? Path, int? Hops,
 //               double? Snr, double? Rssi, ObservationFields? Fields)
@@ -71,6 +72,23 @@ struct Heartbeat {
   int errorCount = 0;
 
   const char* board = nullptr;  // nullptr: the field is left out
+
+  // The agent's own promise, for an agent that paces itself (EXIT-NODES §6, *An agent that paces
+  // itself*; meshmaster.dk's task p4.14-120). Both are optional and are written only when set:
+  // **an agent that sends neither is an agent as before, byte for byte**, which is what the
+  // Heltec is and what test/test_envelopes holds.
+  //
+  //   nextCheckInS             how long until this agent will be back. The server accepts it
+  //                            between AgentLimits.MinCheckInS (60) and MaxCheckInS (86 400),
+  //                            clamping rather than refusing, and the reply's `pollIntervalS`
+  //                            is then what was accepted
+  //   maxTransactionsThisWake  what this wake has the airtime and the energy for. The server
+  //                            hands out jobs until the next one's price would take the wake
+  //                            past it, and always at least one (task p4.14-121)
+  bool hasNextCheckInS = false;
+  int nextCheckInS = 0;
+  bool hasMaxTransactionsThisWake = false;
+  int maxTransactionsThisWake = 0;
 };
 
 struct ObservationFields {

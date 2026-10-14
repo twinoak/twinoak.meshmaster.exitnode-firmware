@@ -76,13 +76,24 @@ class FakeUplink : public mm::IUplink {
     heartbeatReplyJson_ = json;
   }
 
-  // One claim's worth of jobs, each a ClaimedJob object as the server writes one. They are handed
-  // over by the next `claimJobs` and then forgotten, as a claim is.
+  // One claim's worth of jobs, each a ClaimedJob object as the server writes one. The next
+  // `claimJobs` hands over as many of them as its `max` allows, **oldest first, and leaves the
+  // rest queued** - which is the server's own rule for what a claim does not hand out: it stays
+  // queued and bound to nothing, for the next claim or another exit node (EXIT-NODES §6 as built
+  // in meshmaster.dk's task p4.14-121).
   void queue(std::vector<std::string> jobs) { queued_.push_back(std::move(jobs)); }
   void queue(const std::string& job) { queue(std::vector<std::string>{job}); }
   bool anythingQueued() const { return !queued_.empty(); }
+  // Everything a claim has not taken yet, forgotten: a test that runs round after round against
+  // one fake server starts each of them with an empty queue.
+  void forgetQueued() { queued_.clear(); }
+  // How many jobs are still waiting across every batch: what a wake's cap left behind.
+  size_t queuedJobs() const {
+    size_t n = 0;
+    for (const std::vector<std::string>& batch : queued_) n += batch.size();
+    return n;
+  }
 
-  // How many jobs the claim hands over at most, whatever the queue holds: `max` is the agent's.
   void setServerTime(uint32_t epoch) { serverEpoch_ = epoch; }
 
   // ------------------------------------------------------------------ the faults, on cue
@@ -124,6 +135,8 @@ class FakeUplink : public mm::IUplink {
   const std::vector<std::string>& calls() const { return calls_; }
   int configCalls() const { return configCalls_; }
   int claimCalls() const { return claimCalls_; }
+  // The `max` of every claim, in order: what a wake's transaction cap asked the server for.
+  const std::vector<int>& claimMaxes() const { return claimMaxes_; }
   // The claim's own buffer, as the runner handed it in: how a test reads a credential back after
   // the job that used it has ended.
   const mm::ClaimedJob* claimed() const { return claimed_; }
@@ -184,14 +197,18 @@ class FakeUplink : public mm::IUplink {
 
   bool claimJobs(mm::ClaimedJob* jobs, int max, int& count) override {
     claimCalls_++;
+    claimMaxes_.push_back(max);
     claimed_ = jobs;
     claimedCount_ = 0;
     count = 0;
     if (!begin("claim")) return false;
     std::vector<std::string> batch;
     if (!queued_.empty()) {
-      batch = queued_.front();
-      queued_.erase(queued_.begin());
+      std::vector<std::string>& front = queued_.front();
+      const size_t take = static_cast<size_t>(max) < front.size() ? static_cast<size_t>(max) : front.size();
+      batch.assign(front.begin(), front.begin() + static_cast<long>(take));
+      front.erase(front.begin(), front.begin() + static_cast<long>(take));
+      if (front.empty()) queued_.erase(queued_.begin());
     }
     std::string response = "{\"serverTime\":\"";
     char iso[32];
@@ -345,6 +362,7 @@ class FakeUplink : public mm::IUplink {
   std::vector<std::pair<long long, std::string>> progress_;
   int configCalls_ = 0;
   int claimCalls_ = 0;
+  std::vector<int> claimMaxes_;
   const mm::ClaimedJob* claimed_ = nullptr;
   int claimedCount_ = 0;
 
