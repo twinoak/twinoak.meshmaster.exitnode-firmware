@@ -75,3 +75,89 @@ Only the reviewer ticks an item.
   is one case in that repository's tests and a sync here; 18 did not open it, because a task
   of this repository does not edit the other one's fixtures (`tasks/README.md`: the spec is in
   the other repository, say so and let the reviewer open it there).
+
+## Left by 19 (14 October)
+
+All seven are for Thomas and the next piles rather than for a task of this
+pile; the pile is finished when `v0.2.0` is tagged, and none of them blocks that.
+
+- [ ] **Tag `v0.2.0`, then walk `docs/console.md` on it** (Thomas). The release
+  workflow is unchanged: a tag `vX.Y.Z` on a commit CI has passed is what makes
+  the images. The walk is short because nothing the board prints changed in this
+  pile — the four reports (`jobs`, `sessions`, `server`, `errors`) now go through
+  `TextOut`, the log's `[+123s]` stamp is the library's, and `uniqueTime()` is
+  called through no vtable — and the one thing three reports have now asked for
+  and no report has produced is **one `frame tx` line pasted into a report**
+  (15, 16 and 17 each asked; a session cannot produce one). Note also that
+  **AarhusC and Grindsted are still on `v0.1.3`** and Risskov on `v0.1.4`
+  (1.4's follow-ups): flashing them is also the four guest-door checks 1.4 left,
+  and `v0.2.0` is the obvious image to do it with.
+- [ ] **The ESP-IDF component is still unbuilt** (the Walter's phase 4, task
+  01). `lib/agent-core/CMakeLists.txt` and `idf_component.yml` have been parsed
+  and held against the files on disk and never compiled. Two things to expect
+  there, neither of them a change to the library's code if it is wrong: whether
+  `bblanchon/arduinojson` 7.4.3 is on `components.espressif.com` under that
+  exact name, and whether an empty `REQUIRES` survives the component manager
+  adding the managed dependency. Until it has happened once, *the component is
+  unverified* — `docs/library.md` §2 says so in as many words, and so does the
+  last section of `docs/upstream.md`.
+- [ ] **`MeshReply::viaPath` and `MeshReply::snr` are written by every
+  implementation and read by nobody.** Found by writing `docs/library.md` §3.1
+  method by method: the runner reads `kind`, `data`, `len`, `text` and the five
+  `trace*` fields, and nothing anywhere reads the other two (`AgentMesh` fills
+  them, `FakeMesh` mirrors them, no caller looks). They are not free — `viaPath`
+  is an extra flag every link client has to carry out of §6.3's record, and
+  `snr` is a float a RAK has to be asked for. Either give them a reader (a
+  result's `snr` is the repeater's own figure today, and `pathUsed`'s provenance
+  could carry `viaPath`) or drop them from the struct, which is a `MeshReply`
+  change and therefore a `CHANGELOG.md` line and a minor version. Not this
+  task's: 19 may not change an interface it is documenting.
+- [ ] **Two shapes a reviewer of this pile may want moved, and both are cheap**
+  (noted by their own tasks, repeated here so they are not lost): `Budget` has
+  no transaction cap because the cap is the intent's one number, stated to the
+  server and enforced locally — "three lines and a `static_assert` away" if it
+  should be there too (18); and `test/test_seams`' thirteen named files are a
+  subset of what `test/test_library` walks, kept because deleting an overlap is
+  a test file's worth of risk for nothing (16).
+- [ ] **What the host suite cannot prove about the agent, and nothing here
+  will.** Two of them are for a bench and one is for a job type nobody has
+  written: the CLI replies' exact spellings (`OK - loaded N regions`, the region
+  listing, `password now: …`), which no `.hex` fixture carries because they are
+  text and not a frame layout; the repeater's own replay rule for a CLI line,
+  which only a real repeater's clock can prove; and `IUplink::extendLease` /
+  `postProgress`, which are held to their contract fixtures and called by
+  nothing in the library — the first job type that outlives a lease is what
+  will drive them for real.
+- [ ] **The Walter's phase 4, task 02 expects a word the library cannot say**
+  (Thomas, in `twinoak.meshcore.walter-firmware`). Read while checking
+  `docs/library.md` against the reader it is for: that task's *local door*
+  deliverable says that for a core job type the unit's own repeater cannot serve
+  over the UART, `LinkMesh` should "return `Failed` so the runner answers
+  `unsupported`". It will not. `SendResult::Failed` is reported **`failed`**
+  (*the packet could not be built*), and `unsupported` is the runner's own word
+  for a type nobody handles — there is no path from inside `IMesh` to it. Two
+  smaller things in the same breath, both now in `docs/library.md` §7.1: the
+  heartbeat always advertises **all thirteen** types plus the extension's, with
+  no way to advertise fewer, so the server may route a `trace` to a unit whose
+  mesh cannot trace; and a consumer cannot change what one of the thirteen does.
+  Either that task's wording changes (`failed` with a log line is the honest
+  outcome, or silence and `unreachable`), or the library grows a way for a
+  consumer to advertise fewer types — which is a `CHANGELOG.md` line, a minor
+  version and not this pile's.
+- [ ] **The heartbeat's `transport` is a constant, and the next consumer needs
+  another value.** `AgentLoop::buildHeartbeat` sets `hb.transport = "onboard"`
+  unconditionally and `HeartbeatIdentity` has no field for it, so a consumer
+  cannot say what it is. The Walter's phase 4, task 04 needs **`native`**
+  (meshmaster.dk's `AgentTransports`, and SYSTEM S-1: that unit *is* its
+  repeater), which means its exit node would register as onboard and the page
+  would say so. The fix is one defaulted member of `HeartbeatIdentity` —
+  `const char* transport = "onboard";` — read by `buildHeartbeat`, which changes
+  no byte of the Heltec's heartbeat and no test of this repository, plus a
+  `CHANGELOG.md` line. **19 did not make it**: the pile's whole claim is that
+  the board's bytes did not move, and the task that writes the hand-over
+  document is the wrong one to change the interface it is documenting on the
+  commit being tagged. `docs/library.md` §7.1 says the limitation plainly so
+  that nobody writes a consumer against a transport it cannot send. Beside it,
+  smaller: the heartbeat's `observationsDropped` can only be the
+  `ObservationRing`'s own drops, so a consumer whose radio or link lost adverts
+  *before* the ring has nowhere to report them.

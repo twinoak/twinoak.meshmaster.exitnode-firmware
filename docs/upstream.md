@@ -201,7 +201,11 @@ dependencies:
 ```
 
 **What a consumer must be told about.** Three things, and a release that
-changes one of them says so in its notes:
+changes one of them says so in [`CHANGELOG.md`](../CHANGELOG.md) — which is
+this repository's changelog *for the library*, written in a consumer's terms
+(the interfaces, the `MeshReply` constants, the fixtures' manifest commit, the
+version) rather than in a person-with-a-board's. A consumer's upstream watch is
+that file and the three below; nothing else here needs watching.
 
 | What | Where | Why a consumer cares |
 |---|---|---|
@@ -211,9 +215,9 @@ changes one of them says so in its notes:
 
 **What a consumer does not get.** This repository's board: `src/` is the
 Heltec, and none of it is the library's. A consumer writes its own `IMesh`,
-`IUplink` and `IPlatform` — `docs/library.md` (pile 1.5, task 19) is the page
-that says how — and sets `logSetSink` to put a log line wherever its platform
-puts one.
+`IUplink` and `IPlatform` — [`docs/library.md`](library.md) is the page that
+says how, method by method — and sets `logSetSink` to put a log line wherever
+its platform puts one.
 
 **What is not built here.** `lib/agent-core/CMakeLists.txt` and
 `lib/agent-core/idf_component.yml` are the library's ESP-IDF face, and there is
