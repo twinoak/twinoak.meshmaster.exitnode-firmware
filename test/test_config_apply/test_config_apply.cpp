@@ -4,7 +4,8 @@
 // terminator after a failure; and the result is the .NET agent's bytes for the same replies
 // (tests/fixtures/contracts/ConfigApplyResult.json, and what ConfigApplyHandlerTests asserts).
 //
-// The engine (src/agent/ConfigApply.cpp) takes an ApplyExchange, and the one below is a fake
+// The engine (lib/agent-core/src/ConfigApply.cpp) takes an ApplyExchange, and the one below is
+// a fake
 // repeater: it records every line it is handed with its timestamp, answers from a script, and
 // can eat a reply or refuse to build a packet. The board's own exchange is JobRunner's, which a
 // host cannot run; the last tests hold that file's text to the two orders that matter - the
@@ -21,10 +22,10 @@
 #include <string>
 #include <vector>
 
-#include "agent/CliReplies.h"
-#include "agent/ConfigApply.h"
-#include "agent/ConfigRead.h"
-#include "agent/JobEnvelopes.h"
+#include <agent/CliReplies.h>
+#include <agent/ConfigApply.h>
+#include <agent/ConfigRead.h>
+#include <agent/JobEnvelopes.h>
 
 #ifndef FIXTURES_DIR
 #error "FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
@@ -563,7 +564,7 @@ TEST(CliReplies, AConfirmationStartsWithWhatTheLineExpectsOrdinal) {
 // session is dropped; and a reboot marks the restore done before its command and never sends
 // one.
 TEST(TheWritesOnTheBoard, PasswordSetRestoresAfterThePasswordLineAndThenDropsTheSession) {
-  const std::string runner = readFile(fs::path(PROJECT_DIR) / "src/agent/JobRunner.cpp");
+  const std::string runner = readFile(fs::path(PROJECT_DIR) / "lib/agent-core/src/JobRunner.cpp");
   const size_t handler = runner.find("Outcome JobRunner::runPasswordSet(");
   const size_t next = runner.find("Outcome JobRunner::runReboot(", handler);
   ASSERT_NE(handler, std::string::npos);
@@ -604,7 +605,7 @@ TEST(TheWritesOnTheBoard, PasswordSetRestoresAfterThePasswordLineAndThenDropsThe
 }
 
 TEST(TheWritesOnTheBoard, RebootSendsNoRestoreAndDropsTheSession) {
-  const std::string runner = readFile(fs::path(PROJECT_DIR) / "src/agent/JobRunner.cpp");
+  const std::string runner = readFile(fs::path(PROJECT_DIR) / "lib/agent-core/src/JobRunner.cpp");
   const size_t handler = runner.find("Outcome JobRunner::runReboot(");
   const size_t next = runner.find("// ------------------------------------------------------------------ the runner", handler);
   ASSERT_NE(handler, std::string::npos);
@@ -625,7 +626,7 @@ TEST(TheWritesOnTheBoard, RebootSendsNoRestoreAndDropsTheSession) {
 // Every write goes through the single send: `cliLine(..., false)` or the engine's `retry`
 // false, never the bounded retry a read gets.
 TEST(TheWritesOnTheBoard, EveryWriteIsSentOnce) {
-  const std::string runner = readFile(fs::path(PROJECT_DIR) / "src/agent/JobRunner.cpp");
+  const std::string runner = readFile(fs::path(PROJECT_DIR) / "lib/agent-core/src/JobRunner.cpp");
   const size_t from = runner.find("class JobRunner::ApplyOnTheAir");
   const size_t to = runner.find("// ------------------------------------------------------------------ the runner", from);
   ASSERT_NE(from, std::string::npos);

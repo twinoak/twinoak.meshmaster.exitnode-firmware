@@ -22,11 +22,11 @@
 #include <fstream>
 #include <string>
 
-#include "Backoff.h"
-#include "LogRing.h"
-#include "agent/JobEnvelopes.h"
-#include "agent/ResultBuffer.h"
-#include "agent/ServerPolicy.h"
+#include <agent/Backoff.h>
+#include <agent/LogRing.h>
+#include <agent/JobEnvelopes.h>
+#include <agent/ResultBuffer.h>
+#include <agent/ServerPolicy.h>
 
 #ifndef PROJECT_DIR
 #error "PROJECT_DIR must be defined; platformio.ini's [env:native] does it"
@@ -183,7 +183,7 @@ TEST(Lease, NoClockAndNoLeaseAreBothNotLapsed) {
 // holds the one path every job takes: the lease is read before anything else runJob does, and
 // what it returns is a timeout at no transaction.
 TEST(Lease, TheRunnerReadsTheLeaseBeforeItRunsAJob) {
-  const std::string runner = readFile(fs::path(PROJECT_DIR) / "src/agent/JobRunner.cpp");
+  const std::string runner = readFile(fs::path(PROJECT_DIR) / "lib/agent-core/src/JobRunner.cpp");
   ASSERT_FALSE(runner.empty());
 
   const size_t entry = runner.find("Outcome JobRunner::runJob(const ClaimedJob& job, Context& ctx, size_t& dataLen) {");
@@ -223,7 +223,7 @@ TEST(StayingUp, TheHeartbeatGoesFromInsideALongJob) {
   EXPECT_NE(body.find("mm::healthTick();"), std::string::npos) << "the job pump does not feed the watchdog";
   EXPECT_EQ(body.find("agent.loop()"), std::string::npos) << "the whole loop must not run inside a job";
 
-  const std::string loop = readFile(fs::path(PROJECT_DIR) / "src/agent/AgentLoop.cpp");
+  const std::string loop = readFile(fs::path(PROJECT_DIR) / "lib/agent-core/src/AgentLoop.cpp");
   const size_t overdue = loop.find("void AgentLoop::heartbeatIfOverdue() {");
   ASSERT_NE(overdue, std::string::npos);
   const size_t overdueEnd = loop.find("\n}", overdue);
@@ -352,7 +352,7 @@ TEST(LogRing, ACallersBufferThatIsTooSmallIsFilledAndTerminated) {
 }
 
 // There is one ring and the log writes to it: `dump` prints what the port printed, which is the
-// whole of its redaction (README.md's rails, and src/Log.h says so in as many words).
+// whole of its redaction (README.md's rails, and agent/Log.h says so in as many words).
 TEST(LogRing, TheLogWritesEveryLineIntoTheRingAndNothingElseDoes) {
   const std::string log = readFile(fs::path(PROJECT_DIR) / "src/Log.cpp");
   ASSERT_FALSE(log.empty());

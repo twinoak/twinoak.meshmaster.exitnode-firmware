@@ -7,8 +7,8 @@
 #include <cstdio>
 #include <cstring>
 
-#include "Backoff.h"
-#include "Log.h"
+#include <agent/Backoff.h>
+#include <agent/Log.h>
 
 namespace mm {
 
@@ -80,7 +80,7 @@ void WifiLink::startAttempt() {
 }
 
 void WifiLink::scheduleRetry() {
-  // The sequence is the one the server loop backs off with (src/Backoff.h) at this link's own
+  // The sequence is the one the server loop backs off with (agent/Backoff.h) at this link's own
   // numbers, and the wait carries jitter: after a power cut every board in the house wakes at
   // the same second, and a router that is still booting refuses them all together.
   backoffMs_ = nextBackoffMs(backoffMs_, kFirstBackoffMs, kMaxBackoffMs);

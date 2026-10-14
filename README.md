@@ -42,22 +42,28 @@ On Windows `pio test -e native` needs a C++ compiler the machine usually has
 only inside a container;
 [`tasks/RUNBOOK.md §2`](tasks/RUNBOOK.md) has the one-line `docker run` for it.
 
-The application is `src/`: the serial console and its settings, WiFi and the
-clock, the TLS client and the agent loop, the OLED, and the mesh in companion
-role — MeshCore's core, the Heltec V3 variant and its display driver are
-compiled from the pinned package beside it, and no example of upstream's is
-built. The files of `src/` that are host-portable (the key table, the console
-parser, the ISO-8601 helper, the config-reply parser, the envelopes this
-firmware sends, the job envelopes and results, the credential buffer, the
-config read, the apply engine and the CLI reply rules, the airtime budget, the
-session cache, the observation ring, the offline result buffer, the log ring,
-the rate limiter, the backoff, the reply codec, the policy that reads the
-server's status codes, the OLED's four lines and the version string) are what
-the native tests
-exercise; the rest needs a board. Since pile 1.5 the job runner and the agent
-loop stand on three seams (`src/agent/IMesh.h`, `IUplink.h`, `IPlatform.h`)
-with the board's mesh, WiFi client and ESP32 behind them, so that another
-firmware can run the same job logic over its own.
+The tree is in two halves. `src/` is **this board**: the serial console and its
+settings, WiFi and the clock, the TLS client and the root it verifies against,
+the OLED, the mesh in companion role, the watchdog, and where a log line goes —
+MeshCore's core, the Heltec variant and its display driver are compiled from the
+pinned package beside it, and no example of upstream's is built.
+
+[`lib/agent-core/`](lib/agent-core/library.json) is **the agent**, a library
+with a name and a version of its own since pile 1.5: the job runner and the
+agent loop, the envelopes and results of the agent API, the reply codec, the
+ISO-8601 helper, the credential buffer, the config read, the apply engine and
+the CLI reply rules, the airtime budget, the session cache, the observation
+ring, the rate limiter, the offline result buffer, the log ring and the log's
+formatting, the backoff, and the policy that reads the server's status codes.
+It stands on three seams — `lib/agent-core/include/agent/IMesh.h`, `IUplink.h`,
+`IPlatform.h` — with this board's mesh, WiFi client and ESP32 behind them, it
+includes nothing of Arduino, the ESP-IDF, WiFi, NVS or MeshCore
+(`test/test_library` is that boundary, checked), and `pio test -e native`
+compiles the whole of it on the host. A second firmware takes it at a tag the
+way this one takes MeshCore — [`docs/upstream.md`](docs/upstream.md) says what
+pinning it means — and the files of `src/` the native tests still reach are the
+key table, the console parser, the OLED's four lines and the version string;
+the rest of `src/` needs a board.
 
 ## Flashing it
 
@@ -284,14 +290,14 @@ else:
   transaction. Every admin job carries the repeater's admin password in the
   claim, and a `password.set` the new one beside it; each lives in one fixed
   buffer for the length of the job and is zeroed when the job ends, whatever it
-  came to (`src/agent/Credentials.h`). Every admin session on a repeater this
+  came to (`lib/agent-core/include/agent/Credentials.h`). Every admin session on a repeater this
   exit node holds a grant on ends with `setperm <own key> <granted level>`, so
   the entry the association made is read-only again when the job is over — a
   `password.set` sends it after its password line and then drops the session,
   and a `reboot` sends none, because nothing answers after it. A write is sent
   **once**: an apply's commands in order with strictly increasing sender
   timestamps, stopped at the first refusal or silence, and the region loader's
-  terminator sent even when the sequence dies (`src/agent/ConfigApply.h`).
+  terminator sent even when the sequence dies (`lib/agent-core/include/agent/ConfigApply.h`).
 - **Error counters** `overheard` (frames of the mesh's own chat this board
   discarded unread — a large number is a busy public channel, not a fault),
   `wifiReconnects`, `httpFailures`, `observationsDropped` (adverts the RAM
@@ -371,7 +377,7 @@ reading.
   another greps the modules it passes through for the NVS and file APIs); the
   serial log redacts as the .NET agent does, and `log.frames on` prints a login
   that carries a password, and a `password` line and its echo, with their
-  bodies as `*` (`src/agent/Credentials.h`). `dump` prints the log ring, which
+  bodies as `*` (`lib/agent-core/include/agent/Credentials.h`). `dump` prints the log ring, which
   holds the bytes the port already printed and no others. Flash encryption is
   documented as the owner's choice, not assumed.
 - **Nothing the mesh says is logged as text.** Overheard channel and contact

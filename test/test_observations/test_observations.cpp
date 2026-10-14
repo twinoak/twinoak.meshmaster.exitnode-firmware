@@ -14,8 +14,8 @@
 #include <cstring>
 #include <string>
 
-#include "agent/Observations.h"
-#include "agent/RateLimit.h"
+#include <agent/Observations.h>
+#include <agent/RateLimit.h>
 
 namespace {
 

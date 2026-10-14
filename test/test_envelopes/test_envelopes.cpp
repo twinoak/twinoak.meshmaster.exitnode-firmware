@@ -17,8 +17,8 @@
 #include <sstream>
 #include <string>
 
-#include "agent/Envelopes.h"
-#include "agent/JobEnvelopes.h"
+#include <agent/Envelopes.h>
+#include <agent/JobEnvelopes.h>
 #include "version.h"
 
 #ifndef FIXTURES_DIR

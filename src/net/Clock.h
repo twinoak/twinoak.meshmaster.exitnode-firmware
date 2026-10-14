@@ -14,7 +14,8 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "agent/IPlatform.h"
+#include <agent/IPlatform.h>
+
 #include "mesh/MeshCoreHeaders.h"
 
 namespace mm {

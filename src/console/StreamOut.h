@@ -1,4 +1,4 @@
-// An Arduino Stream behind the library's TextOut (src/agent/TextOut.h): what main.cpp hands the
+// An Arduino Stream behind the library's TextOut (agent/TextOut.h): what main.cpp hands the
 // runner's and the loop's console reports, so that those files need no Stream of their own.
 // Board-only.
 
@@ -9,7 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "agent/TextOut.h"
+#include <agent/TextOut.h>
 
 namespace mm {
 

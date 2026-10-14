@@ -33,7 +33,8 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "IUplink.h"
+#include <agent/IUplink.h>
+
 #include "net/Clock.h"
 #include "net/WifiLink.h"
 #include "settings/Store.h"

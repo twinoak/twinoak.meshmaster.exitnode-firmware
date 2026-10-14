@@ -58,7 +58,7 @@ class WifiLink {
   uint32_t attemptStartedAt_ = 0;
   uint32_t nextAttemptAt_ = 0;
   uint32_t backoffMs_ = 0;   // the sequence's step
-  uint32_t waitMs_ = 0;      // what is actually waited: that step, jittered (src/Backoff.h)
+  uint32_t waitMs_ = 0;      // what is actually waited: that step, jittered (agent/Backoff.h)
   uint32_t lastPoll_ = 0;
   uint16_t attempts_ = 0;
   uint16_t connects_ = 0;

@@ -5,7 +5,7 @@
 // same bytes one layer out, wrapped in the push code, the reserved byte and a prefix or a tag
 // that `MyMesh::onContactResponse` puts round them on their way to an app over a cable. Each
 // test here strips exactly that documented wrapper - the table is in the fixtures' own README -
-// and feeds the rest to src/mesh/ReplyCodec.h, then checks the values
+// and feeds the rest to agent/ReplyCodec.h, then checks the values
 // MeshMaster.Agent.Tests asserts for the same file (FrameFixtureTests.cs, HandlerTests.cs).
 //
 // The one fixture whose bytes are not the board's is the login reply: the companion does not
@@ -23,7 +23,7 @@
 #include <string>
 #include <vector>
 
-#include "mesh/ReplyCodec.h"
+#include <agent/ReplyCodec.h>
 
 #ifndef COMPANION_DIR
 #error "COMPANION_DIR must be defined; platformio.ini's [env:native] does it"

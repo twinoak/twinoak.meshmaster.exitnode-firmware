@@ -3,7 +3,8 @@
 #include <cstdio>
 #include <cstring>
 
-#include "Log.h"
+#include <agent/Log.h>
+
 #include "version.h"
 
 namespace mm {

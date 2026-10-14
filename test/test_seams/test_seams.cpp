@@ -1,12 +1,15 @@
-// The seams (task p1.5-15): the files that become lib/agent-core in task 16 - JobRunner, AgentLoop,
-// LoginSequence, ConfigApply and the four interfaces - include nothing of the board, and the
-// board's adapters stand behind the interfaces the way the task says.
+// The seams (task p1.5-15): the files task p1.5-16 moved into lib/agent-core - JobRunner,
+// AgentLoop, LoginSequence, ConfigApply and the four interfaces - include nothing of the board,
+// and the board's adapters stand behind the interfaces the way the task says.
 //
-// The shape is test_tls_policy's: a walk over named files for named strings, because JobRunner.cpp
-// and AgentLoop.cpp are not in [env:native]'s build yet (task 17 gives them fakes to run against)
-// and a file that *compiles* against Arduino is exactly what this must catch before 16 moves it.
-// The four interface headers are included below, so that this test is also the first host build
-// of them.
+// The shape is test_tls_policy's: a walk over named files for named strings. It was written
+// before the library existed, when JobRunner.cpp and AgentLoop.cpp were in no host build at all
+// and a file that *compiles* against Arduino was exactly what had to be caught before 16 moved
+// it; since 16 the whole library is compiled here as well (test/test_library), and this suite is
+// still what holds the *shape* - which object stands behind which interface, and who draws the
+// CLI timestamp. Only the paths moved.
+//
+// The four interface headers are included below, so that this test is also a host build of them.
 
 #include <gtest/gtest.h>
 
@@ -16,11 +19,11 @@
 #include <string>
 #include <vector>
 
-#include "agent/IJobExtension.h"
-#include "agent/IMesh.h"
-#include "agent/IPlatform.h"
-#include "agent/IUplink.h"
-#include "agent/TextOut.h"
+#include <agent/IJobExtension.h>
+#include <agent/IMesh.h>
+#include <agent/IPlatform.h>
+#include <agent/IUplink.h>
+#include <agent/TextOut.h>
 
 #ifndef PROJECT_DIR
 #error "PROJECT_DIR must be defined; platformio.ini's [env:native] does it"
@@ -38,10 +41,19 @@ std::string readFile(const fs::path& p) {
 // The files 16 moves: nothing of Arduino, the ESP-IDF, WiFi, NVS, MeshCore or this repository's
 // board-only headers may be included by any of them.
 const char* const kPortable[] = {
-    "src/agent/JobRunner.h",     "src/agent/JobRunner.cpp",     "src/agent/AgentLoop.h",   "src/agent/AgentLoop.cpp",
-    "src/agent/LoginSequence.h", "src/agent/LoginSequence.cpp", "src/agent/ConfigApply.h", "src/agent/ConfigApply.cpp",
-    "src/agent/IMesh.h",         "src/agent/IUplink.h",         "src/agent/IPlatform.h",   "src/agent/IJobExtension.h",
-    "src/agent/TextOut.h",
+    "lib/agent-core/include/agent/JobRunner.h",
+    "lib/agent-core/src/JobRunner.cpp",
+    "lib/agent-core/include/agent/AgentLoop.h",
+    "lib/agent-core/src/AgentLoop.cpp",
+    "lib/agent-core/include/agent/LoginSequence.h",
+    "lib/agent-core/src/LoginSequence.cpp",
+    "lib/agent-core/include/agent/ConfigApply.h",
+    "lib/agent-core/src/ConfigApply.cpp",
+    "lib/agent-core/include/agent/IMesh.h",
+    "lib/agent-core/include/agent/IUplink.h",
+    "lib/agent-core/include/agent/IPlatform.h",
+    "lib/agent-core/include/agent/IJobExtension.h",
+    "lib/agent-core/include/agent/TextOut.h",
 };
 
 bool startsWith(const std::string& s, const char* prefix) { return s.rfind(prefix, 0) == 0; }
@@ -157,16 +169,16 @@ TEST(Seams, ThePortableFilesIncludeNothingOfTheBoard) {
 
 TEST(Seams, TheRunnerAndTheLoopReadNoSettingAndHoldNoStaticScratch) {
   const fs::path root(PROJECT_DIR);
-  const std::string loop = readFile(root / "src/agent/AgentLoop.cpp");
+  const std::string loop = readFile(root / "lib/agent-core/src/AgentLoop.cpp");
   EXPECT_EQ(loop.find("findKey("), std::string::npos) << "the heartbeat's radio block comes in as HeartbeatIdentity";
   EXPECT_EQ(loop.find("settings_"), std::string::npos);
   EXPECT_NE(loop.find("identity_->radio"), std::string::npos);
 
-  const std::string header = readFile(root / "src/agent/JobRunner.h");
+  const std::string header = readFile(root / "lib/agent-core/include/agent/JobRunner.h");
   EXPECT_NE(header.find("struct Scratch {"), std::string::npos);
   EXPECT_NE(header.find("Scratch scratch_;"), std::string::npos) << "the runner owns its scratch";
 
-  const std::string runner = readFile(root / "src/agent/JobRunner.cpp");
+  const std::string runner = readFile(root / "lib/agent-core/src/JobRunner.cpp");
   const size_t anon = runner.find("namespace {");
   const size_t anonEnd = runner.find("}  // namespace", anon);
   ASSERT_NE(anon, std::string::npos);
@@ -192,7 +204,7 @@ TEST(Seams, TheBoardsObjectsStandBehindTheInterfaces) {
   EXPECT_NE(client.find("class AgentClient : public IUplink"), std::string::npos);
   EXPECT_EQ(client.find("struct Call"), std::string::npos) << "the Call record is the seam's (IUplink.h)";
   EXPECT_EQ(client.find("struct Outcome"), std::string::npos);
-  const std::string uplink = readFile(root / "src/agent/IUplink.h");
+  const std::string uplink = readFile(root / "lib/agent-core/include/agent/IUplink.h");
   EXPECT_NE(uplink.find("const char* via = \"\";"), std::string::npos) << "a Call says how it went in one word, not a Root";
   EXPECT_EQ(uplink.find("Root root"), std::string::npos) << "the root is the WiFi client's business";
 
@@ -210,7 +222,7 @@ TEST(Seams, TheBoardsObjectsStandBehindTheInterfaces) {
 // sendCli returns the timestamp it used, drawn by the mesh at the send, and nothing hands one in.
 TEST(Seams, TheMeshDrawsTheCliTimestampAndHandsItBack) {
   const fs::path root(PROJECT_DIR);
-  const std::string iface = readFile(root / "src/agent/IMesh.h");
+  const std::string iface = readFile(root / "lib/agent-core/include/agent/IMesh.h");
   EXPECT_NE(iface.find("virtual SendResult sendCli(const char* text, bool sensitive, uint32_t& timestamp) = 0;"),
             std::string::npos);
 
@@ -223,7 +235,7 @@ TEST(Seams, TheMeshDrawsTheCliTimestampAndHandsItBack) {
   ASSERT_NE(copied, std::string::npos);
   EXPECT_LT(drawn, copied) << "the timestamp in the packet is the one drawn here";
 
-  const std::string runner = readFile(root / "src/agent/JobRunner.cpp");
+  const std::string runner = readFile(root / "lib/agent-core/src/JobRunner.cpp");
   EXPECT_EQ(runner.find("mesh_->uniqueTime()"), std::string::npos) << "the runner draws no timestamp of its own any more";
   EXPECT_NE(runner.find("mesh_->sendCli(command, sensitive, tag)"), std::string::npos);
   EXPECT_NE(runner.find("uint32_t nextTimestamp() override { return 0; }"), std::string::npos)
@@ -234,7 +246,7 @@ TEST(Seams, TheMeshDrawsTheCliTimestampAndHandsItBack) {
 
 TEST(Seams, AnUnknownTypeIsOfferedToTheExtensionBeforeItIsUnsupported) {
   const fs::path root(PROJECT_DIR);
-  const std::string runner = readFile(root / "src/agent/JobRunner.cpp");
+  const std::string runner = readFile(root / "lib/agent-core/src/JobRunner.cpp");
   const size_t from = runner.find("Outcome JobRunner::runJob(const ClaimedJob& job, Context& ctx, size_t& dataLen) {");
   const size_t to = runner.find("class JobRunner::ExtensionJob", from);
   ASSERT_NE(from, std::string::npos);
@@ -251,7 +263,7 @@ TEST(Seams, AnUnknownTypeIsOfferedToTheExtensionBeforeItIsUnsupported) {
   EXPECT_LT(offered, canRun) << "the thirteen's class rules do not refuse a type the extension may run";
   EXPECT_LT(handed, unsupported) << "offered before unsupported";
 
-  const std::string loop = readFile(root / "src/agent/AgentLoop.cpp");
+  const std::string loop = readFile(root / "lib/agent-core/src/AgentLoop.cpp");
   const size_t hb = loop.find("void AgentLoop::buildHeartbeat(Heartbeat& hb) {");
   const size_t hbEnd = loop.find("\n}", hb);
   ASSERT_NE(hb, std::string::npos);

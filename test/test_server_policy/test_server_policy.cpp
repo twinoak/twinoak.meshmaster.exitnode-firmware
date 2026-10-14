@@ -1,4 +1,4 @@
-// What one answer from meshmaster.dk means for the loop (src/agent/ServerPolicy.h).
+// What one answer from meshmaster.dk means for the loop (agent/ServerPolicy.h).
 //
 // The policy is a pure function of the status code and the Retry-After beside it, so every
 // answer the server can give is held here against the action it earns and the wait that action
@@ -11,8 +11,8 @@
 
 #include <vector>
 
-#include "Backoff.h"
-#include "agent/ServerPolicy.h"
+#include <agent/Backoff.h>
+#include <agent/ServerPolicy.h>
 
 namespace {
 
@@ -129,7 +129,7 @@ TEST(ServerPolicy, TheCeilingFollowsTheLinkMidSequence) {
 }
 
 TEST(ServerPolicy, TheBackoffIsTheSharedSequenceAtTheServersNumbers) {
-  // The two-argument form the agent loop calls is src/Backoff.h's three-argument one at the
+  // The two-argument form the agent loop calls is agent/Backoff.h's three-argument one at the
   // server's own numbers, so the two can never drift apart.
   uint32_t a = 0;
   uint32_t b = 0;

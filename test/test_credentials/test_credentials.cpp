@@ -1,4 +1,4 @@
-// A repeater's password on this board (task 04; src/agent/Credentials.h): held in a fixed buffer
+// A repeater's password on this board (task 04; agent/Credentials.h): held in a fixed buffer
 // for the job, zeroed after, never in NVS or on the file system, never printed. Each of those is
 // a test here and not a promise - the buffer is read back after the wipe, the claim is parsed
 // in place and its bytes shown gone, the modules the password passes through are grepped for
@@ -13,8 +13,8 @@
 #include <string>
 #include <vector>
 
-#include "agent/Credentials.h"
-#include "agent/JobEnvelopes.h"
+#include <agent/Credentials.h>
+#include <agent/JobEnvelopes.h>
 
 #ifndef PROJECT_DIR
 #error "PROJECT_DIR must be defined; platformio.ini's [env:native] does it"
@@ -192,10 +192,16 @@ TEST(Credential, TheGuestPasswordIsRefusedOnAPairThatHoldsAGrant) {
 // uses it and the mesh that sends it. None of them may name the NVS API, the file systems or the
 // settings store; a grep says so, the way the TLS policy's does.
 TEST(Credential, NoModuleThePasswordPassesThroughNamesTheStoreOrAFileSystem) {
-  const char* const files[] = {"src/agent/Credentials.h",  "src/agent/Credentials.cpp", "src/agent/JobEnvelopes.h",
-                               "src/agent/JobEnvelopes.cpp", "src/agent/LoginSequence.h", "src/agent/LoginSequence.cpp",
-                               "src/agent/JobRunner.h",     "src/agent/JobRunner.cpp",
-                               "src/mesh/AgentMesh.h",     "src/mesh/AgentMesh.cpp"};
+  const char* const files[] = {"lib/agent-core/include/agent/Credentials.h",
+                               "lib/agent-core/src/Credentials.cpp",
+                               "lib/agent-core/include/agent/JobEnvelopes.h",
+                               "lib/agent-core/src/JobEnvelopes.cpp",
+                               "lib/agent-core/include/agent/LoginSequence.h",
+                               "lib/agent-core/src/LoginSequence.cpp",
+                               "lib/agent-core/include/agent/JobRunner.h",
+                               "lib/agent-core/src/JobRunner.cpp",
+                               "src/mesh/AgentMesh.h",
+                               "src/mesh/AgentMesh.cpp"};
   // Split, so this file does not contain what it forbids.
   const std::vector<std::string> forbidden = {
       std::string("Prefer") + "ences",      // the Arduino NVS wrapper
@@ -234,7 +240,7 @@ TEST(Credential, NoModuleThePasswordPassesThroughNamesTheStoreOrAFileSystem) {
 // The wipe is on the one path every job takes, whatever it came to: after the handler, before
 // the result is posted, and once more for every slot when the claim is over.
 TEST(Credential, TheRunnerWipesTheCredentialAfterEveryJob) {
-  const std::string runner = readFile(fs::path(PROJECT_DIR) / "src/agent/JobRunner.cpp");
+  const std::string runner = readFile(fs::path(PROJECT_DIR) / "lib/agent-core/src/JobRunner.cpp");
   const size_t run = runner.find("Outcome outcome = runJob(job, ctx, dataLen);");
   const size_t wipe = runner.find("job.credential.wipe();", run);
   const size_t post = runner.find("posted = post(job.id, g_body, len);", run);

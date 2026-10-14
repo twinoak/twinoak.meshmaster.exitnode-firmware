@@ -53,7 +53,7 @@ One file touches it, `src/mesh/AgentMesh.cpp`, and a bump re-reads these:
 | path discovery | the flooded base-telemetry request the companion's `CMD_SEND_PATH_DISCOVERY_REQ` makes (`examples/companion_radio/MyMesh.cpp:1602-1630`), answered as a returned path | the request's bytes, or a firmware that answers it (none has yet) |
 | a trace | `Mesh::createTrace` + `sendDirect`, answered in `Mesh::onRecvPacket`'s `PAYLOAD_TYPE_TRACE` arm | the flags byte's meaning (`1 << (flags & 3)`, which task p3.5-42 got wrong once) |
 | the replies | `onPeerDataRecv`, `onPeerPathRecv`, `onTraceRecv` | the arguments, or when they are called |
-| the parsers | `src/mesh/ReplyCodec.cpp`, against `RepeaterStats` (`examples/simple_repeater/MyMesh.h:44-60`) and the request handlers above | a field added in the middle of `RepeaterStats` rather than at its end |
+| the parsers | `lib/agent-core/src/ReplyCodec.cpp`, against `RepeaterStats` (`examples/simple_repeater/MyMesh.h:44-60`) and the request handlers above | a field added in the middle of `RepeaterStats` rather than at its end |
 
 `BaseChatMesh` is deliberately **not** used: its contact table, its channels,
 its message ACKs and its reciprocal path returns are all paths that put a packet
@@ -141,7 +141,7 @@ it changes too, and the server is the reference:
 2. **Here second.** `tools/sync-fixtures.ps1 -Commit <that commit>` brings both
    fixture sets across — the envelopes of `tests/fixtures/contracts` and the
    transcribed frames of `tests/fixtures/companion`, which is what
-   `src/mesh/ReplyCodec.cpp` is held to — and the firmware is brought to them.
+   `lib/agent-core/src/ReplyCodec.cpp` is held to — and the firmware is brought to them.
 
 The order is not negotiable: there is one dialect, it is the .NET agent's, and a
 firmware that invents a second one is a bug however well it works. See
@@ -158,3 +158,58 @@ After a build, the pinned MeshCore is on disk:
 That checkout — not a memory of it, not a transcription in a task file — is what
 a claim about the companion firmware is checked against. `git log`, `git show`
 and `grep` all work in it; it is a real clone at the pinned commit.
+
+## This repository is an upstream too
+
+Since pile 1.5 the portable half of the agent is a library of its own —
+[`lib/agent-core/`](../lib/agent-core/library.json) — and a second firmware
+takes it exactly the way this one takes MeshCore: at a commit, as a dependency,
+with nothing of its tree edited. The first consumer is the Walter of a
+repeater-v2 unit (`twinoak.meshcore.walter-firmware`), whose platform is the
+ESP-IDF and whose mesh is a RAK on a serial link, which is why the library
+stands on three interfaces and knows nothing of Arduino, WiFi, NVS or MeshCore.
+
+So this page has a mirror image, and it is short.
+
+**What a consumer pins.** A tag `vX.Y.Z` of this repository. **The tag is the
+library's version too**: `lib/agent-core/library.json`,
+`lib/agent-core/idf_component.yml` and `agent/Version.h`'s
+`AGENT_CORE_VERSION` all carry the same number, a release moves them together,
+and `test/test_library` fails if one of them moves alone. There is nothing
+published anywhere — not the PlatformIO registry, not
+`components.espressif.com` — because a tag of a git repository is a pin and a
+registry entry is a second thing to keep in step. In PlatformIO that is a
+`lib_deps` line; under the ESP-IDF component manager it is a `git` source with
+a `path`:
+
+```yaml
+dependencies:
+  twinoak/agent-core:
+    git: https://github.com/twinoak/twinoak.meshmaster.exitnode-firmware.git
+    path: lib/agent-core
+    version: v0.2.0
+```
+
+**What a consumer must be told about.** Three things, and a release that
+changes one of them says so in its notes:
+
+| What | Where | Why a consumer cares |
+|---|---|---|
+| the three interfaces | `agent/IMesh.h`, `agent/IUplink.h`, `agent/IPlatform.h` (and `agent/IJobExtension.h`, `agent/TextOut.h`) | they are the consumer's own code: a method added, removed or re-signatured is a compile error in *their* tree, which is the whole point of them being a contract and not a convenience |
+| the `MeshReply` constants | `kMeshReplyDataCap` and `kMeshPathCap` in `agent/IMesh.h` | they are MeshCore's `MAX_PACKET_PAYLOAD` and `MAX_PATH_SIZE` at this repository's pin, written as the library's own. A consumer whose mesh is a *different* MeshCore build must hold its own against them the way `src/mesh/AgentMesh.h` does, with a `static_assert` — a reply that does not fit is an overrun and not a truncation |
+| the fixtures' manifest commit | `tests/fixtures/contracts/MANIFEST.txt` | the envelopes the library writes are meshmaster.dk's at that commit. A consumer that posts to the same server is bound by the same contract, and a fixture sync here (`tools/sync-fixtures.ps1`) is the moment the dialect moved |
+
+**What a consumer does not get.** This repository's board: `src/` is the
+Heltec, and none of it is the library's. A consumer writes its own `IMesh`,
+`IUplink` and `IPlatform` — `docs/library.md` (pile 1.5, task 19) is the page
+that says how — and sets `logSetSink` to put a log line wherever its platform
+puts one.
+
+**What is not built here.** `lib/agent-core/CMakeLists.txt` and
+`lib/agent-core/idf_component.yml` are the library's ESP-IDF face, and there is
+no ESP-IDF in this repository's toolchain. CI parses the CMake file and holds
+the sources it registers against the ones on disk
+(`tools/check-idf-component.cmake`) and compiles the library with an ESP-IDF
+consumer's strictness on the host (`tools/check-library-host.py`); the first
+real ESP-IDF build of it is the Walter's, and until that has happened once,
+*the component is unverified*.
