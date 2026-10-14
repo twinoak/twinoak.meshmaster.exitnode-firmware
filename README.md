@@ -42,6 +42,14 @@ On Windows `pio test -e native` needs a C++ compiler the machine usually has
 only inside a container;
 [`tasks/RUNBOOK.md §2`](tasks/RUNBOOK.md) has the one-line `docker run` for it.
 
+Those tests are not units alone. Since pile 1.5 they run **the whole agent** —
+the loop, the runner, every one of the thirteen job types, the login sequence,
+the ACL restore, the airtime gate, the offline buffer, the backoff — against a
+scripted repeater, a scripted server and a clock that only moves when a test
+says so, with nothing sleeping and no board in the room:
+[`docs/host.md`](docs/host.md) says what those fakes are, what they are not, and
+how a consumer of the library reuses them.
+
 The tree is in two halves. `src/` is **this board**: the serial console and its
 settings, WiFi and the clock, the TLS client and the root it verifies against,
 the OLED, the mesh in companion role, the watchdog, and where a log line goes —

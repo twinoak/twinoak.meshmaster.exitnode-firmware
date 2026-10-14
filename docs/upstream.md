@@ -123,6 +123,16 @@ source**, refresh the three copied things in the table above, and say in the
 report what upstream changed that mattered. The session works on the branch the
 workflow already pushed.
 
+**The host fakes are one of the things that re-reading covers.** `test/support/`
+holds a stock repeater behind the mesh seam (`FakeMesh.h`), and it is a
+*reading* of `examples/simple_repeater/MyMesh.cpp` and
+`src/helpers/CommonCLI.cpp` at the pin: the manifest at the top of that file
+cites every answer it gives — to a transcribed fixture, or to a function with
+its file and its line range — and a test walks the manifest against the pinned
+checkout. A bump that moves or renames one of those functions fails that test; a
+bump that changes what one of them *answers* does not, and that is the reading
+the session has to do. [`docs/host.md`](host.md) is the page.
+
 The template also lists the rails that must survive a bump, because a bump is
 exactly when one gets quietly lost: verified TLS, secrets where they are,
 nothing overheard logged as text, one send per command, and the contract

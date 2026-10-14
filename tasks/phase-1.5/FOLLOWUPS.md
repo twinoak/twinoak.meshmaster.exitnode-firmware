@@ -28,3 +28,33 @@ Only the reviewer ticks an item.
   with a ceiling at the send, but worth a sentence in §6.2. `setRing()` is
   §7's `OBS_PULL`, not §6's, and the task's "§6 alone" should read "§6 and
   §7".
+
+## Left by 17 (14 October)
+
+- [ ] **A stored repeater password of sixteen characters or more is a lock-out
+  nobody is told about** (Thomas, in `twinoak/meshmaster.dk`). Found by the host
+  fakes: `tests/fixtures/contracts/JobCredential.json`'s own sample is
+  `"admin-password-sample"`, twenty-one characters, and a login carrying it is
+  **silence** — `BaseChatMesh::sendLogin` sends the first fifteen bytes and
+  `NodePrefs` holds `char password[16]`, so neither end can carry more. Both
+  agents behave correctly and identically: the material is cut, one line says so
+  (`loginMaterialFor`'s `noteCut` here, `Handlers.cs:196`'s warning there), and
+  the job is reported `unreachable` — which is also what a repeater that is off
+  the air reports. What is missing is the refusal at the **form**:
+  `CredentialRotation.MaxLength` is 15 with exactly the right reason ("the
+  firmware keeps fifteen … which is a lock-out"), and
+  `CredentialService.MaxPasswordLength` — the *store* behind the credentials
+  page — is still **128**, with a comment saying it is "a bound on the column,
+  not a rule of the device (phase 2 learns that one)". Phase 2 learned it. So an
+  owner can store a sixteen-character admin password today and every admin job
+  on that repeater is `unreachable` for ever, with nothing on the page to say
+  why. The fix is one bound and one sentence in `Credentials.Check`, in that
+  repository; nothing in this firmware changes, and
+  `test/test_runner`'s `APasswordSetLongerThanTheFirmwareKeepsIsNeverSent`
+  already holds this end of it.
+- [ ] **`IMesh::uniqueTime()` is gone** — this task did what the item above
+  asked 16 or 17 to do (`lib/agent-core/include/agent/IMesh.h` says in its place
+  why, `src/mesh/AgentMesh.h` keeps the method as the board's own, and
+  `test_seams` fails if it comes back). The two remaining §6 gaps of that item -
+  `overheard()` and the awaited-reply timeout - are still for the other
+  repository.

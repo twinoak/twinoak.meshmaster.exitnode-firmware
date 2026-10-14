@@ -225,6 +225,11 @@ TEST(Seams, TheMeshDrawsTheCliTimestampAndHandsItBack) {
   const std::string iface = readFile(root / "lib/agent-core/include/agent/IMesh.h");
   EXPECT_NE(iface.find("virtual SendResult sendCli(const char* text, bool sensitive, uint32_t& timestamp) = 0;"),
             std::string::npos);
+  // And so the interface asks for no timestamp of its own: task p1.5-17 dropped `uniqueTime()`
+  // from it (the follow-up 15 left), because the mesh draws every send's own and the link has no
+  // request for one. The in-process mesh keeps the method; the interface does not.
+  EXPECT_EQ(iface.find("virtual uint32_t uniqueTime()"), std::string::npos)
+      << "IMesh asks for a timestamp again; nothing in the library needs one";
 
   const std::string mesh = readFile(root / "src/mesh/AgentMesh.cpp");
   const size_t fn = mesh.find("SendResult AgentMesh::sendCli(const char* text, bool sensitive, uint32_t& timestamp) {");

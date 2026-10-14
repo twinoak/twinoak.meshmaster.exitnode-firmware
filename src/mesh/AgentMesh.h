@@ -96,12 +96,14 @@ class AgentMesh : public mesh::Mesh, public IMesh {
   bool awaitText(uint32_t timeoutMs, void (*pump)()) override;
   const MeshReply& reply() const override { return reply_; }
 
+  // ------------------------------------------------------------------ the board's own
+
   // The RTC's unique second: every tag and every sender timestamp this board sends comes from
   // it, so the series a repeater sees from this key is strictly increasing across REQs and CLI
-  // lines alike, which is what its replay check needs.
-  uint32_t uniqueTime() override { return getRTCClock()->getCurrentTimeUnique(); }
-
-  // ------------------------------------------------------------------ the board's own
+  // lines alike, which is what its replay check needs. **Not on `IMesh` since task p1.5-17**: the
+  // mesh draws it at every send and hands it back, so nothing of the library asks for one, and
+  // the link has no request for it either (agent/IMesh.h says so where the method used to be).
+  uint32_t uniqueTime() { return getRTCClock()->getCurrentTimeUnique(); }
 
   bool jobInFlight() const { return peerSet_; }
 
