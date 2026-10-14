@@ -12,7 +12,7 @@
 #include <sstream>
 #include <string>
 
-#include "agent/JobEnvelopes.h"
+#include <agent/JobEnvelopes.h>
 
 #ifndef FIXTURES_DIR
 #error "FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
@@ -111,7 +111,7 @@ TEST(Progress, AReplyThatIsNotTheShapeIsRefusedWithAReason) {
 // The two calls are on the seam, and the WiFi client makes them as it makes the result: the same
 // per-job POST, the reply parsed, the failure logged with the job's id and never the body as text.
 TEST(Uplink, TheWifiClientMakesTheTwoCallsInTheShapeOfTheFive) {
-  const std::string iface = readAll(fs::path(PROJECT_DIR) / "src/agent/IUplink.h");
+  const std::string iface = readAll(fs::path(PROJECT_DIR) / "lib/agent-core/include/agent/IUplink.h");
   EXPECT_NE(iface.find("virtual bool extendLease(long long jobId, int seconds, uint32_t& leaseUntil) = 0;"),
             std::string::npos);
   EXPECT_NE(iface.find("virtual bool postProgress(long long jobId, const char* body, size_t len) = 0;"),
@@ -130,8 +130,8 @@ TEST(Uplink, TheWifiClientMakesTheTwoCallsInTheShapeOfTheFive) {
   EXPECT_NE(client.find("parseProgressReply(g_jobReply, bodyLen, r, err, sizeof err)"), std::string::npos);
 
   // Nothing on the Heltec calls them: the runner and the loop name neither.
-  const std::string runner = readAll(fs::path(PROJECT_DIR) / "src/agent/JobRunner.cpp");
-  const std::string loop = readAll(fs::path(PROJECT_DIR) / "src/agent/AgentLoop.cpp");
+  const std::string runner = readAll(fs::path(PROJECT_DIR) / "lib/agent-core/src/JobRunner.cpp");
+  const std::string loop = readAll(fs::path(PROJECT_DIR) / "lib/agent-core/src/AgentLoop.cpp");
   EXPECT_EQ(runner.find("extendLease("), std::string::npos);
   EXPECT_EQ(runner.find("postProgress("), std::string::npos);
   EXPECT_EQ(loop.find("extendLease("), std::string::npos);

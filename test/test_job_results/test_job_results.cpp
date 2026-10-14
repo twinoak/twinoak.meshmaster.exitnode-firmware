@@ -18,9 +18,9 @@
 #include <string>
 #include <vector>
 
-#include "agent/Iso8601.h"
-#include "agent/JobEnvelopes.h"
-#include "agent/JobResults.h"
+#include <agent/Iso8601.h>
+#include <agent/JobEnvelopes.h>
+#include <agent/JobResults.h>
 
 #ifndef FIXTURES_DIR
 #error "FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"

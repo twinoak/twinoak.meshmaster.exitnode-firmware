@@ -13,8 +13,8 @@
 
 #include <gtest/gtest.h>
 
-#include "agent/Airtime.h"
-#include "agent/Sessions.h"
+#include <agent/Airtime.h>
+#include <agent/Sessions.h>
 
 namespace {
 

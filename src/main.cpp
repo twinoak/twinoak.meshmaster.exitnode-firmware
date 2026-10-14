@@ -3,28 +3,32 @@
 // verified TLS, posts the adverts its radio hears, and claims and answers the jobs of EXIT-NODES
 // §7: the reads that log in as this board - status, telemetry, neighbours and trace (task 03) -
 // discover, acl.set and config.read, which carry a repeater's password for the length of the
-// job and nothing longer (task 04, src/agent/Credentials.h), and the six that change a repeater
+// job and nothing longer (task 04, agent/Credentials.h), and the six that change a repeater
 // - config.apply, cli, advert.request, clock.sync, password.set, reboot - each one send per
-// command (task 05, src/agent/ConfigApply.h). What leaves the radio is one packet per
+// command (task 05, agent/ConfigApply.h). What leaves the radio is one packet per
 // transaction and nothing else (src/mesh/AgentMesh.h).
 //
-// The pieces, each in its own file:
+// The pieces, each in its own file. Since task p1.5-16 the portable half of the agent is a
+// library of its own - `lib/agent-core/`, reached as `<agent/...>` - and what is left under
+// `src/` is this board:
+//   agent/      the TLS client and the root it verifies against (AgentClient.h, TlsRoots.h):
+//               the WiFi end of the uplink seam, and all that is left here of agent/
 //   settings/   the key table (host-portable) and the NVS store
 //   console/    the line parser (host-portable) and the console that acts on it
 //   net/        WiFi with backoff, and the clock (SNTP, the server as fallback)
-//   agent/      the TLS client, the root it verifies against, the envelopes and the reply
-//               structs (host-portable), the observation ring, the airtime budget, the session
-//               cache, the job runner, and the loop that drives them - the runner and the loop
-//               on three seams since task p1.5-15 (IMesh, IUplink, IPlatform), which this file
-//               wires to the real things below
 //   platform/   the Arduino-on-ESP32 end of the platform seam: millis, delay, random, the heap,
 //               the reboot for health
 //   mesh/       the mesh in companion role: hears adverts, forwards nothing, and speaks a job
 //   ui/         the OLED's four lines, as a pure function over a struct this file fills
-//   Log.h       what the serial port prints besides the console's replies, and the 4 kB ring
-//               `dump` prints it back out of (LogRing.h)
+//   SerialLog.h where a log line goes on this board: the serial port and the 4 kB ring `dump`
+//               prints it back out of (the formatting is the library's, agent/Log.h)
 //   Health.h    the task watchdog, the deliberate reboot on a wedged stack, and why this board
 //               last restarted - kept in RTC memory, printed by `reboots` (task 06)
+//
+// and the library is the job logic itself: the envelopes and the reply structs, the observation
+// ring, the airtime budget, the session cache, the job runner and the loop that drives them, on
+// the three seams of task p1.5-15 (IMesh, IUplink, IPlatform) which this file wires to the real
+// things below.
 
 #include <Arduino.h>
 #include <SPIFFS.h>
@@ -33,14 +37,17 @@
 #include <cstdio>
 #include <cstring>
 
-#include "Health.h"
-#include "Log.h"
-#include "LogRing.h"
+#include <agent/AgentLoop.h>
+#include <agent/Iso8601.h>
+#include <agent/JobRunner.h>
+#include <agent/Log.h>
+#include <agent/LogRing.h>
+
 #include "mesh/MeshCoreHeaders.h"
+
+#include "Health.h"
+#include "SerialLog.h"
 #include "agent/AgentClient.h"
-#include "agent/AgentLoop.h"
-#include "agent/Iso8601.h"
-#include "agent/JobRunner.h"
 #include "console/Console.h"
 #include "console/StreamOut.h"
 #include "mesh/AgentMesh.h"
@@ -99,7 +106,7 @@ void applyRadioSettings() {
   LOG_I("radio: %.3f MHz, bw %.1f kHz, sf %d, cr %d, tx %d dBm", static_cast<double>(freq), static_cast<double>(bw), sf, cr, tx);
 }
 
-// What the heartbeat says about this board (src/agent/AgentLoop.h): the version, the board, the
+// What the heartbeat says about this board (agent/AgentLoop.h): the version, the board, the
 // companion firmware this image is built from, and the radio block as the settings have it -
 // read here, once at boot and again on every `set radio.*` and `erase confirm`, so that the loop
 // reads no setting of its own.
@@ -216,7 +223,7 @@ void printWifi(Stream& out) { wifi.scan(out); }
 
 // `mesh`: what the radio has heard. The names are printed here and in no log line - this is the
 // one place a person reads them, and they come from strangers, so they are the bounded, valid
-// UTF-8 the ring kept (src/agent/Observations.h).
+// UTF-8 the ring kept (agent/Observations.h).
 void printMesh(Stream& out) {
   if (!radio_ok) {
     out.println("radio     init failed: nothing is being heard");
@@ -255,7 +262,7 @@ void printMesh(Stream& out) {
 }
 
 // `server`: the heartbeat and the observation batches - the last, the next, and the counters
-// the heartbeat itself carries. The library's reports write to a TextOut (src/agent/TextOut.h);
+// the heartbeat itself carries. The library's reports write to a TextOut (agent/TextOut.h);
 // StreamOut is the serial port behind one.
 void printServer(Stream& out) {
   mm::StreamOut text(out);
@@ -316,7 +323,7 @@ void printReboots(Stream& out) {
 
 // `dump`: the last 4 kB of the log, oldest first, whole lines only. The same bytes the port
 // carried, which is the whole of the redaction - a line that could carry a secret here would
-// already have carried it to a terminal (src/LogRing.h).
+// already have carried it to a terminal (agent/LogRing.h).
 void dumpSink(void* ctx, const char* text, size_t len) {
   Stream* out = static_cast<Stream*>(ctx);
   out->write(reinterpret_cast<const uint8_t*>(text), len);
@@ -431,7 +438,7 @@ void setup() {
   Serial.begin(115200);
   board.begin();
 
-  mm::logBegin(&clockForLog);
+  mm::logBeginSerial(&clockForLog);
   if (!settings.begin()) {
     Serial.println("error: NVS could not be opened; settings will not persist");
   }
@@ -471,7 +478,7 @@ void setup() {
   wifi.begin(settings);
   server.begin(settings, agentClock, wifi, meshmaster_agent_version());
   fillIdentity();
-  // The runner and the loop on their three seams (src/agent/IMesh.h, IUplink.h, IPlatform.h):
+  // The runner and the loop on their three seams (agent/IMesh.h, IUplink.h, IPlatform.h):
   // the mesh in this process, the WiFi client, and Arduino on this ESP32. The Heltec sets no job
   // extension (IJobExtension.h).
   jobs.begin(the_mesh, server, platform, &pumpDuringAJob);
@@ -503,7 +510,7 @@ void loop() {
   }
 
   // The config call, the heartbeat every pollIntervalS and the observation batches between them:
-  // one blocking call at a time, and nothing at all after a 401 (src/agent/AgentLoop.h).
+  // one blocking call at a time, and nothing at all after a 401 (agent/AgentLoop.h).
   agent.loop();
 
   console.loop();

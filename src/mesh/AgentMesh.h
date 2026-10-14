@@ -36,11 +36,12 @@
 
 #include <cstdint>
 
-#include "agent/Credentials.h"
-#include "agent/IMesh.h"
-#include "agent/Observations.h"
+#include <agent/Credentials.h>
+#include <agent/IMesh.h>
+#include <agent/Observations.h>
+#include <agent/ReplyCodec.h>
+
 #include "mesh/MeshCoreHeaders.h"
-#include "mesh/ReplyCodec.h"
 
 namespace mm {
 

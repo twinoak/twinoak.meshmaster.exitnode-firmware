@@ -10,7 +10,7 @@ the .NET agent's.
 **On a board the frames are one layer thinner.** The `.hex` files are what a
 *companion* sends an app over a cable: a push code, a reserved byte, and then a
 prefix or a tag, followed by the reply the repeater actually sent. This board **is**
-the companion, so what `src/mesh/ReplyCodec.h` parses is the part after that
+the companion, so what `agent/ReplyCodec.h` parses is the part after that
 wrapper — the same bytes, with the serial protocol's envelope taken off:
 
 | fixture | what this firmware parses |

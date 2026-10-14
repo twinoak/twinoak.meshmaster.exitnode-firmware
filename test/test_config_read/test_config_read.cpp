@@ -1,4 +1,4 @@
-// The config read (task 04; src/agent/ConfigRead.h): the list and its price, the access-list
+// The config read (task 04; agent/ConfigRead.h): the list and its price, the access-list
 // reply read from the transcribed fixture bytes, the region helpers, and the ConfigReadResult
 // held to the .NET fixture byte for byte - `aclRestored` included. Plus the JSON writer's
 // escaping, which that fixture is the first to exercise (`\u003E`).
@@ -15,10 +15,10 @@
 #include <string>
 #include <vector>
 
-#include "agent/Airtime.h"
-#include "agent/ConfigRead.h"
-#include "agent/JsonWriter.h"
-#include "mesh/ReplyCodec.h"
+#include <agent/Airtime.h>
+#include <agent/ConfigRead.h>
+#include <agent/JsonWriter.h>
+#include <agent/ReplyCodec.h>
 
 #ifndef FIXTURES_DIR
 #error "FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"

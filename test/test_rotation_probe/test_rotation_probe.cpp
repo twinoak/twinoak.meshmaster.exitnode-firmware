@@ -12,7 +12,8 @@
 // guest password in the claim, `guest` - against the one case that is, an admin job with no admin
 // password.
 //
-// The policy is src/agent/LoginSequence.cpp; the board's exchange is JobRunner's LoginOnTheAir and
+// The policy is lib/agent-core/src/LoginSequence.cpp; the board's exchange is JobRunner's
+// LoginOnTheAir and
 // probeReachable, which a host cannot run, so the last tests hold that file's text to what the
 // probe must and must not do - one spend, a blank login, no session - and to where the door's
 // material comes from, as test_config_apply holds the writes.
@@ -28,10 +29,10 @@
 #include <utility>
 #include <vector>
 
-#include "agent/JobEnvelopes.h"
-#include "agent/JobResults.h"
-#include "agent/LoginSequence.h"
-#include "mesh/ReplyCodec.h"
+#include <agent/JobEnvelopes.h>
+#include <agent/JobResults.h>
+#include <agent/LoginSequence.h>
+#include <agent/ReplyCodec.h>
 
 #ifndef PROJECT_DIR
 #error "PROJECT_DIR must be defined; platformio.ini's [env:native] does it"
@@ -390,7 +391,7 @@ TEST(GuestDoor, TheDiscoverAtGuestReportsThePathAndLoggedInAsGuest) {
 // file's text: one transaction through the gate, the blank login, a reply read as a login or as
 // the refusal, and no session stored or dropped by it.
 TEST(RotationProbeOnTheBoard, TheProbeSpendsOneTransactionSendsABlankLoginAndStoresNoSession) {
-  const std::string runner = readFile(fs::path(PROJECT_DIR) / "src/agent/JobRunner.cpp");
+  const std::string runner = readFile(fs::path(PROJECT_DIR) / "lib/agent-core/src/JobRunner.cpp");
   const size_t from = runner.find("bool JobRunner::probeReachable(");
   const size_t to = runner.find("// ------------------------------------------------------------------ one exchange", from);
   ASSERT_NE(from, std::string::npos);
@@ -422,7 +423,7 @@ TEST(RotationProbeOnTheBoard, TheProbeSpendsOneTransactionSendsABlankLoginAndSto
 }
 
 TEST(RotationProbeOnTheBoard, TheSequenceIsTheRunnersAndItsVerdictIsTheResultsData) {
-  const std::string runner = readFile(fs::path(PROJECT_DIR) / "src/agent/JobRunner.cpp");
+  const std::string runner = readFile(fs::path(PROJECT_DIR) / "lib/agent-core/src/JobRunner.cpp");
   const size_t from = runner.find("Outcome JobRunner::ensureSession(");
   const size_t to = runner.find("bool JobRunner::probeReachable(", from);
   ASSERT_NE(from, std::string::npos);
@@ -458,7 +459,7 @@ TEST(RotationProbeOnTheBoard, TheSequenceIsTheRunnersAndItsVerdictIsTheResultsDa
 // not a branch of its own, nothing goes on the air for a class that has none, and the discover's
 // session line names the tier the reply granted rather than the word "admin".
 TEST(GuestDoorOnTheBoard, TheRunnerTakesItsMaterialFromThePolicyAndSendsNothingWhenThereIsNone) {
-  const std::string runner = readFile(fs::path(PROJECT_DIR) / "src/agent/JobRunner.cpp");
+  const std::string runner = readFile(fs::path(PROJECT_DIR) / "lib/agent-core/src/JobRunner.cpp");
   const size_t from = runner.find("const char* JobRunner::loginMaterial(");
   const size_t to = runner.find("JobRunner::LoginResult JobRunner::loginOnce(", from);
   ASSERT_NE(from, std::string::npos);
@@ -482,7 +483,7 @@ TEST(GuestDoorOnTheBoard, TheRunnerTakesItsMaterialFromThePolicyAndSendsNothingW
 }
 
 TEST(GuestDoorOnTheBoard, TheDiscoversSessionLineNamesTheTierTheReplyGranted) {
-  const std::string runner = readFile(fs::path(PROJECT_DIR) / "src/agent/JobRunner.cpp");
+  const std::string runner = readFile(fs::path(PROJECT_DIR) / "lib/agent-core/src/JobRunner.cpp");
   const size_t from = runner.find("Outcome JobRunner::learned(");
   const size_t to = runner.find("Outcome JobRunner::runDiscover(", from);
   ASSERT_NE(from, std::string::npos);

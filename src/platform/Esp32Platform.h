@@ -1,4 +1,4 @@
-// The Arduino-on-ESP32 implementation of the platform seam (src/agent/IPlatform.h): the calls
+// The Arduino-on-ESP32 implementation of the platform seam (agent/IPlatform.h): the calls
 // JobRunner and AgentLoop made directly before task p1.5-15, behind the interface the library
 // takes. Board-only; the clock half is AgentClock (src/net/Clock.h), which implements IClock.
 
@@ -6,7 +6,8 @@
 
 #include <cstdint>
 
-#include "agent/IPlatform.h"
+#include <agent/IPlatform.h>
+
 #include "net/Clock.h"
 
 namespace mm {

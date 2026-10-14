@@ -8,8 +8,9 @@
 #include <cstdlib>
 #include <cstring>
 
-#include "Iso8601.h"
-#include "Log.h"
+#include <agent/Iso8601.h>
+#include <agent/Log.h>
+
 #include "TlsRoots.h"
 
 // The ESP32 core's certificate bundle: the Mozilla roots as libmbedtls.a of the arduino-esp32

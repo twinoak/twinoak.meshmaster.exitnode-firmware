@@ -5,7 +5,16 @@
 #                       tools/check-partitions.py against the merged image: the partition table
 #                       the environment names is the framework default's with NVS above the
 #                       application, and the image ends before NVS begins (task p1.2-11)
-#   native tests        pio test -e native (the host tests: no board, no radio)
+#   native tests        pio test -e native (the host tests: no board, no radio), which since task
+#                       p1.5-16 compiles lib/agent-core whole - the job runner and the agent loop
+#                       among it - and whose test/test_library holds the library's boundary
+#   the library         what moved into lib/agent-core, as a file list a reviewer can read; the
+#                       library compiled on its own with an ESP-IDF consumer's flags
+#                       (tools/check-library-host.py); and its ESP-IDF component file parsed and
+#                       held against the sources on disk (tools/check-idf-component.cmake). The
+#                       component is not *built* anywhere in this repository - there is no
+#                       ESP-IDF in its toolchain - and the Walter firmware's phase 4 is where it
+#                       first compiles
 #   fixtures            tools/sync-fixtures.ps1 -Verify - the contract fixtures and the
 #                       transcribed companion frames are still meshmaster.dk's bytes and nobody
 #                       edited one here
@@ -136,6 +145,33 @@ jobs:
       # runs this step in a container (tasks/RUNBOOK.md section 2).
       - name: Test
         run: pio test -e native
+
+      # What moved into lib/agent-core, for a reviewer to read without checking out the branch:
+      # the library's whole file list, with the manifests at the top of it.
+      - name: What the library is
+        run: |
+          set -euo pipefail
+          {
+            echo '### lib/agent-core'
+            echo '```'
+            find lib/agent-core -type f | sort
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          find lib/agent-core -type f | sort
+
+      # The library on its own, with the flags an ESP-IDF consumer compiles it with: -fno-exceptions
+      # and -fno-rtti on top of the -std=c++17 -Wall -Wextra -Werror the step above already used,
+      # and nothing but lib/agent-core/include and ArduinoJson on the include path. It needs the
+      # ArduinoJson the step above installed, so it runs after it (task p1.5-16).
+      - name: The library compiles for a consumer
+        run: python tools/check-library-host.py
+
+      # And its ESP-IDF face: a syntax check of lib/agent-core/CMakeLists.txt with a stub
+      # idf_component_register, and then the SRCS it registers against lib/agent-core/src on disk,
+      # in both directions. cmake is the runner's own; there is no ESP-IDF here and the component
+      # is not compiled (twinoak.meshcore.walter-firmware, phase 4, task 01, does that first).
+      - name: The ESP-IDF component file
+        run: cmake -P tools/check-idf-component.cmake
 
       # The other half of the fixture rail, for both sets: the native tests check that every
       # fixture is present and well formed, this checks that its bytes are still the ones
