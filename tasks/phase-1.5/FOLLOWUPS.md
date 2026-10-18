@@ -52,6 +52,7 @@ Only the reviewer ticks an item.
   repository; nothing in this firmware changes, and
   `test/test_runner`'s `APasswordSetLongerThanTheFirmwareKeepsIsNeverSent`
   already holds this end of it.
+  *Picked up by meshmaster.dk pile 4.15, task 131 (18 October); this end's tests follow in 1.6, task 24.*
 - [ ] **`IMesh::uniqueTime()` is gone** — this task did what the item above
   asked 16 or 17 to do (`lib/agent-core/include/agent/IMesh.h` says in its place
   why, `src/mesh/AgentMesh.h` keeps the method as the board's own, and
@@ -75,6 +76,7 @@ Only the reviewer ticks an item.
   is one case in that repository's tests and a sync here; 18 did not open it, because a task
   of this repository does not edit the other one's fixtures (`tasks/README.md`: the spec is in
   the other repository, say so and let the reviewer open it there).
+  *Picked up by meshmaster.dk pile 4.15, task 131 (`AgentHeartbeatNoWake.json`), and 1.6, task 24.*
 
 ## Left by 19 (14 October)
 
@@ -161,3 +163,82 @@ pile; the pile is finished when `v0.2.0` is tagged, and none of them blocks that
   smaller: the heartbeat's `observationsDropped` can only be the
   `ObservationRing`'s own drops, so a consumer whose radio or link lost adverts
   *before* the ring has nowhere to report them.
+
+## Review of 15–19 (15 October) — the pile, after it landed
+
+Read against the five reports, the items above and the code at `v0.2.0` (`bbe7ae0`). 14 October,
+13:17 → 18:56, 5 h 39 min, no stop (15 91 min, 16 58, 17 93, 18 60, 19 36); 356 native cases in
+22 suites. The Heltec held: of the pre-existing suites only `test_envelopes` changed in substance.
+The one wake behaves as reported within one boot; across a deep sleep it does not, and its byte cap
+leaks — those two matter. The Walter's p4-01 then built the library as an ESP-IDF component with
+no edit and found two upstream issues, listed here. The items *left by* 15 and 17 above stand.
+
+- [ ] **[1.6] A wake's byte cap and uplink seconds do not bound the job step.** `JobRunner::post()`
+  starts with the unbounded `flushResults()` (`JobRunner.cpp:1374–1377`, `1405–1409`), and
+  `runClaimed` and `reportNotRun` post through it: a result `wakeResults` kept back as `NoBudget` is
+  flushed with the whole offline buffer by the claim's first job, counted in neither
+  `report.bytesPosted` nor `uplinkSpentMs_`. `AByteCapPostsAsManyBatchesAsItFits…` exercises only
+  observations. Pass the wake's `bytesLeft` into `post()`, time the job-step posts into the uplink
+  seconds, and test a kept result plus a claimed job under a cap.
+- [ ] **[1.6] [walter] The offline result buffer and the observation ring do not survive a deep
+  sleep.** `WakeState` (`AgentLoop.h:213–227`) carries backoff, hold, interval, budget, `halted` and
+  counters, not `results_` or `ring_`. A result whose post failed is lost on a unit that sleeps, and
+  its job stays leased until the server's lease lapses — "no job left leased and silent" holds only
+  within one boot. `AWakeFlushesWhatTheLastWakeCouldNotPost…` and the hour-later half of `AByteCap…`
+  reuse one `AgentLoop` without `restore()`. Expose both buffers for retained storage or a journal,
+  or say in `docs/library.md` §6 that they are RAM and the consumer keeps them (or loses them) on
+  purpose. The Walter's RTC memory is nearly full (its phase-3 review): decide with that in view.
+- [ ] **[1.6] A parameter named `unix` in `ConfigReply.cpp:41,48`.** GCC predefines `unix` as 1 in
+  every `gnu++` dialect on a Linux host: fifteen errors (Walter p4-01 report, *Reported upstream* §1,
+  with the diff). The host check compiles only `-std=c++17` and xtensa has no such predefine, so
+  nothing here sees it. Rename to `epoch`; add a `gnu++17` pass to `tools/check-library-host.py`.
+- [ ] **[1.6] ArduinoJson 7.4.3 raises `-Wmaybe-uninitialized` under GCC 13 at `-O2`**
+  (`ObjectImpl.hpp:36`, via `ConfigReply.cpp` and `JobEnvelopes.cpp`; Walter report §2). The host
+  check never builds at `-O2`, and `library.json`'s `-Werror` reaches every PlatformIO consumer. Add
+  an `-O2` pass; exempt the warning per file or move ArduinoJson.
+- [ ] **[1.6] The heartbeat's `transport` is hard-coded** (`hb.transport = "onboard"`,
+  `AgentLoop.cpp:177`; `HeartbeatIdentity` has no field); the Walter needs `native`. One interface
+  task with 19's other limitations — no path from `IMesh` to `unsupported`, all thirteen types
+  always advertised, `MeshReply::viaPath`/`snr` never read — one CHANGELOG entry, `v0.3.0`.
+- [ ] **[walter] p4-02's local-door wording:** `SendResult::Failed` from `LinkMesh` is reported as
+  `failed`, not `unsupported`, until the task above lands.
+- [ ] **[Thomas] `docs/library.md` §2 says to pull by `git:` URL at `v0.2.0`**, which cannot work for
+  a private repository: describe the checked copy the Walter used, or the read token it needs.
+- [ ] **[Thomas] Accept the size on the record.** Against `v0.1.4`: V3 +208 B RAM, −8 588 B flash;
+  V4 +208 B, −8 496 B — but only because 17 kB moved from `.dram0.data` to `.bss`; code and rodata
+  grew about 8.3 kB (`.flash.text` +5 472, `.flash.rodata` +2 836), every byte named in 15–18.
+  "Within ~1 kB" was not literally met.
+- [ ] **[reviewer]** "No assertion changed" is slightly too strong:
+  `TheSameInputMakesTheDotNetFixtureByteForByte` now sets the two new fields because the fixture
+  changed in place; the Heltec's bytes are held by `AnAgentThatProposesNothing…`, which cuts the
+  fixture at `,"nextCheckInS":` — sound, and the only anchor until meshmaster.dk adds a second
+  heartbeat fixture (17's and 18's items for meshmaster.dk: `MaxPasswordLength` 128 → 15, that
+  fixture).
+- [ ] **[Thomas] Bench walk of `docs/console.md` on `v0.2.0`**, with one `frame tx` line pasted into a
+  report (15–17 each asked; none has one). AarhusC and Grindsted are on `v0.1.3`, Risskov on
+  `v0.1.4`; 1.4's guest-door checks go on the same flash.
+- [ ] **[Thomas] Housekeeping:** commit the working tree's `tasks/run-all.ps1` (the limit pattern now
+  knows *session limit* and *resets …*); confirm `origin/task/p1.5-15-the-seams` is gone on GitHub.
+- [ ] **[reviewer] 19's "the ESP-IDF component is still unbuilt" is answered:** the Walter's p4-01
+  registered `lib/agent-core/CMakeLists.txt` unedited, ArduinoJson from the registry, empty
+  `REQUIRES`, 45 runner and 31 loop cases green there under ASan/UBSan.
+
+### Fine as it is
+
+- **Credentials** wiped before and after a failed claim, before posting, on not-run, and
+  `endClaim()` on every wake path.
+- **Reboot guard** in a wake sets `rebootWanted` and does not reboot.
+- **Backoff across a sleep** re-based by `restore()`; a 401 survives.
+- **Claim sizing:** never more than the cap holds; not-run answered `failed` with nothing sent.
+- **TLS scan** walks `lib/`; `TlsRoots.h` stayed; rails paths green; `AgentMesh`'s only diff is `sendCli`.
+- **Library boundary:** an include allow list, `-Werror` carried by `library.json`, proved by a probe.
+- **Heltec image:** `wake()` is garbage-collected out.
+- **Fixtures:** contracts at meshmaster.dk `0595dc2`, companion at `f518ebd`.
+
+### Picked up (18 October)
+
+The five `[1.6]` items are tasks 20–23 of pile 1.6
+([`../phase-1.6/README.md`](../phase-1.6/README.md)): the `unix` name and the
+`-O2` warning in 20, the job step's budget in 21, what a sleep keeps in 22, the
+transport and 19's other interface limits in 23. The `[Thomas]` item about
+`docs/library.md` §2 is in 24. `v0.2.0` is tagged.

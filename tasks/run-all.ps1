@@ -218,7 +218,12 @@ foreach ($t in $tasks) {
         $tail = ''
         if (Test-Path $sessionLog) { $tail = (Get-Content $sessionLog -Raw -ErrorAction SilentlyContinue) -replace '\s+', ' ' }
         if ($tail.Length -gt 4000) { $tail = $tail.Substring($tail.Length - 4000) }
-        $limited = $tail -match 'usage limit|rate limit|limit will reset|limit reached|overloaded|out of (usage )?(tokens|credits)|529'
+        # Claude Code itself not logged in (an expired OAuth session, a revoked key): the session
+        # dies in seconds before a turn, and neither a nudge nor a wait will change that.
+        if ($sw.Elapsed.TotalMinutes -lt 2 -and $tail -match 'Failed to authenticate|OAuth session expired|Invalid API key|Please run /login') {
+            Stop-Run "Claude Code is not logged in on this machine (see $sessionLog). Run claude, then /login (or claude setup-token for a long-lived token), and resume with -Phase $Phase -From $n."
+        }
+        $limited = $tail -match '(usage|session|rate) limit|limit will reset|limit reached|resets \d|overloaded|out of (usage )?(tokens|credits)|529'
         if (-not $limited) {
             Stop-Run "task $n did not land on origin/master (no report). See $sessionLog. Resume with -Phase $Phase -From $n once fixed."
         }
