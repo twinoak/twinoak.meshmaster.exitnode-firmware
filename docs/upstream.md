@@ -224,6 +224,8 @@ its platform puts one.
 no ESP-IDF in this repository's toolchain. CI parses the CMake file and holds
 the sources it registers against the ones on disk
 (`tools/check-idf-component.cmake`) and compiles the library with an ESP-IDF
-consumer's strictness on the host (`tools/check-library-host.py`); the first
-real ESP-IDF build of it is the Walter's, and until that has happened once,
-*the component is unverified*.
+consumer's strictness on the host, in both dialects and at both optimisation
+levels (`tools/check-library-host.py`, and
+[`docs/library.md`](library.md)'s §2 for which five configurations those are);
+the first real ESP-IDF build of it is the Walter's, and until that has happened
+once, *the component is unverified*.
