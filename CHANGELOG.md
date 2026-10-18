@@ -22,10 +22,45 @@ pull request, as `docs/` moves with code.
 
 ## v0.3.0 (unreleased)
 
-Opened by task p1.6-22; tasks 23 and 24 fill and close it. `agent-core` is
-still `0.2.0` in the three manifests until 23 moves it, and the fixtures'
-manifest commit is still `0595dc2` until 24 moves it.
+Opened by task p1.6-22, filled by 23, closed by 24. **`agent-core` 0.3.0** in
+the three manifests (p1.6-23); the fixtures' manifest commit is still `0595dc2`
+until 24 moves it; MeshCore `companion-v1.17.1`, `d9296435`, unmoved;
+`kMeshReplyDataCap` 184 and `kMeshPathCap` 64, unmoved. The four questions,
+answered for the whole section:
 
+- **Did a method move?** `IMesh` gained `supports(jobType)` with a default of
+  `true` — **additive**, a mesh that does not override it compiles and behaves
+  as before. `MeshReply` lost `viaPath` and `snr` — a **compile error** in a mesh
+  that assigned them, and the fix is to delete the two lines. `JobRunner::
+  flushResults(size_t&, int&)` is gone (p1.6-21, below). Nothing of `IUplink`,
+  `IPlatform`, `IClock`, `IJobExtension`, `JobContext`, `ResultWriter` or
+  `TextOut` moved.
+- **Did a `MeshReply` constant move?** No.
+- **Did the fixtures' manifest commit move?** Not in 20–23; 24 is the task that
+  moves it (the relaxed JSON dialect), and its line will stand here.
+- **The version and the pin:** `agent-core` 0.3.0; MeshCore `d9296435`.
+
+What a consumer changes, in one paragraph: fill `HeartbeatIdentity::transport`
+(`"native"` for a unit that is its repeater; leave it for `onboard`); override
+`IMesh::supports()` if your mesh cannot carry one of the thirteen (return `false`
+for `"trace"` on a UART link and the unit neither advertises it nor is sent one —
+a job of it anyway is `unsupported` at no transaction, nothing sent); delete the
+two assignments to `reply.viaPath` and `reply.snr`; and, if you sleep, take the
+store of p1.6-22 and the budget rule of p1.6-21 below.
+
+- **The interface says what it is** (p1.6-23). `HeartbeatIdentity` gained
+  `transport`, defaulted to `"onboard"` and read at every heartbeat: the unit of
+  D-45 sends `native`, the Heltec's bytes are unchanged. `IMesh::supports(type)`
+  is new, defaulted `true`: asked for each of the thirteen when the heartbeat is
+  built — a type answered `false` is **not advertised**, the extension's types
+  follow as before — and once more before a job of one of them is run, so a job
+  the mesh declines is reported `unsupported` with nothing sent and `beginJob`
+  never called. The Heltec's `AgentMesh` overrides nothing and advertises the
+  thirteen as before. `MeshReply::viaPath` and `MeshReply::snr` are **gone**:
+  every mesh filled them and nothing read them (`hasPath()` is how the discover
+  job reads a returned path; the SNR a trace result carries is `traceFinalSnr`).
+  `docs/library.md` §3 and §7.1 say what is now possible, and §7.1 keeps the two
+  limits that remain.
 - **`agent/IRetained.h` is a new, optional interface** (p1.6-22): a store for
   the one image a sleep keeps — `capacity()`, `write(image, len)`,
   `read(out, cap)`. `AgentLoop::setRetained(store, scratch, len)` hands it in

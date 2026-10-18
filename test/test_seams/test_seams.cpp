@@ -278,6 +278,54 @@ TEST(Seams, AnUnknownTypeIsOfferedToTheExtensionBeforeItIsUnsupported) {
   EXPECT_LT(build.find("kJobTypes[i]"), build.find("extension->type(i)")) << "the thirteen first";
 }
 
+// The interface says what it is (task p1.6-23). The mesh is asked what it cannot carry in the two
+// places that matter - where the advertised list is built, and before a job is begun on it - and
+// the Heltec's own mesh answers nothing of its own, so the board advertises the thirteen as it
+// always did. And the two fields of MeshReply every mesh filled and nothing read are gone from
+// the interface, the board's mesh and the fake alike.
+TEST(Seams, TheMeshIsAskedWhatItCannotCarryAtTheHeartbeatAndBeforeAJobAndTheHeltecsMeshAnswersNothing) {
+  const fs::path root(PROJECT_DIR);
+  const std::string iface = readFile(root / "lib/agent-core/include/agent/IMesh.h");
+  EXPECT_NE(iface.find("virtual bool supports(const char* jobType) const {"), std::string::npos)
+      << "the question, with a default: a mesh that does not answer carries everything, as every mesh did until now";
+  EXPECT_EQ(iface.find("bool viaPath"), std::string::npos) << "MeshReply::viaPath is gone";
+  EXPECT_EQ(iface.find("float snr"), std::string::npos) << "MeshReply::snr is gone";
+
+  const std::string loop = readFile(root / "lib/agent-core/src/AgentLoop.cpp");
+  const size_t hb = loop.find("void AgentLoop::buildHeartbeat(Heartbeat& hb) {");
+  const size_t hbEnd = loop.find("\n}", hb);
+  ASSERT_NE(hb, std::string::npos);
+  const std::string build = loop.substr(hb, hbEnd - hb);
+  EXPECT_NE(build.find("if (mesh_->supports(kJobTypes[i])) jobTypes_[count++] = kJobTypes[i];"), std::string::npos)
+      << "each of the thirteen is advertised only if the mesh carries it";
+  EXPECT_NE(build.find("hb.transport = identity_->transport;"), std::string::npos) << "the transport is the identity's";
+  EXPECT_EQ(build.find("\"onboard\""), std::string::npos) << "and no longer a constant of the loop's";
+
+  const std::string runner = readFile(root / "lib/agent-core/src/JobRunner.cpp");
+  const size_t from = runner.find("Outcome JobRunner::runJob(const ClaimedJob& job, Context& ctx, size_t& dataLen) {");
+  const size_t to = runner.find("class JobRunner::ExtensionJob", from);
+  ASSERT_NE(from, std::string::npos);
+  const std::string body = runner.substr(from, to - from);
+  const size_t asked = body.find("if (!offered && !mesh_->supports(job.type)) {");
+  const size_t begun = body.find("mesh_->beginJob(");
+  ASSERT_NE(asked, std::string::npos) << "the runner asks the mesh for one of the thirteen";
+  ASSERT_NE(begun, std::string::npos);
+  EXPECT_LT(asked, begun) << "asked before the job is begun on the mesh, so nothing is sent for a type it declined";
+  EXPECT_NE(body.find("return Outcome::Unsupported;", asked), std::string::npos);
+  EXPECT_LT(body.find("return Outcome::Unsupported;", asked), begun) << "and the answer is unsupported";
+
+  const std::string board = readFile(root / "src/mesh/AgentMesh.h");
+  EXPECT_EQ(board.find("supports("), std::string::npos)
+      << "the Heltec's mesh takes the default and advertises exactly what it did before";
+  EXPECT_EQ(board.find("viaPath"), std::string::npos);
+  const std::string boardCpp = readFile(root / "src/mesh/AgentMesh.cpp");
+  EXPECT_EQ(boardCpp.find("reply_.snr"), std::string::npos);
+  EXPECT_EQ(boardCpp.find("viaPath"), std::string::npos);
+  const std::string fake = readFile(root / "test/support/FakeMesh.h");
+  EXPECT_EQ(fake.find("viaPath"), std::string::npos);
+  EXPECT_EQ(fake.find("reply.snr"), std::string::npos);
+}
+
 // ---- the interfaces on a host -------------------------------------------------------------------
 
 TEST(Seams, TheInterfacesAreImplementableWithNothingOfTheBoard) {

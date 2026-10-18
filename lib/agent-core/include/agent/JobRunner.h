@@ -56,6 +56,10 @@
 // board set, if any (IJobExtension.h), before it is answered `unsupported`. The runner still owns
 // the pacing, the lease, the envelope and the log; the extension writes the data and the outcome.
 //
+// And one of the thirteen the mesh cannot carry (IMesh::supports, task p1.6-23) - a trace over a
+// link that has no request for one - is `unsupported` at no transaction too, with nothing sent
+// and the job never begun on the mesh; the heartbeat did not advertise it either.
+//
 // **Every admin session on a repeater where this exit node holds a grant ends with the restore**
 // (task p4.1-60): `setperm <own key> <granted level>` as the session's last command, because on
 // stock firmware the login table *is* the ACL and the admin login has just rewritten our entry

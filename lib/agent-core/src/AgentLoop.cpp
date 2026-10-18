@@ -179,18 +179,22 @@ bool AgentLoop::doConfig() {
 
 void AgentLoop::buildHeartbeat(Heartbeat& hb) {
   hb.agentVersion = identity_->agentVersion;
-  hb.transport = "onboard";
+  hb.transport = identity_->transport;  // the identity's word: onboard by default (task p1.6-23)
   hb.at = clock_->now();
   hb.companionPublicKey = publicKey_;              // nullptr while the radio has made no identity
   hb.companionFirmware = publicKey_ == nullptr ? nullptr : identity_->companionFirmware;
   hb.hasRadio = publicKey_ != nullptr;
   if (hb.hasRadio) hb.radio = identity_->radio;
-  // The thirteen this firmware has a handler for - every type of API §3 since task 05 - and
-  // after them the types of the extension the board compiled in, if any (IJobExtension.h):
-  // routing requires the type advertised, so this list is what the server may send and nothing
-  // else (task p3-53). The Heltec sets no extension, and sends the thirteen.
+  // The thirteen this firmware has a handler for - every type of API §3 since task 05 - less
+  // any the mesh says it cannot carry (IMesh::supports, task p1.6-23: a link that cannot carry a
+  // trace), and after them the types of the extension the board compiled in, if any
+  // (IJobExtension.h): routing requires the type advertised, so this list is what the server may
+  // send and nothing else (task p3-53). The Heltec's mesh carries all thirteen and it sets no
+  // extension, so it sends the thirteen.
   int count = 0;
-  for (int i = 0; i < kJobTypeCount; i++) jobTypes_[count++] = kJobTypes[i];
+  for (int i = 0; i < kJobTypeCount; i++) {
+    if (mesh_->supports(kJobTypes[i])) jobTypes_[count++] = kJobTypes[i];
+  }
   if (const IJobExtension* extension = jobs_->extension()) {
     const int extra = extension->typeCount() < kMaxExtensionTypes ? extension->typeCount() : kMaxExtensionTypes;
     for (int i = 0; i < extra; i++) jobTypes_[count++] = extension->type(i);
