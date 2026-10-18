@@ -196,8 +196,18 @@ TEST(Library, EveryIncludeOfTheLibraryIsItsOwnOrArduinoJsonOrTheStandardLibrary)
                       << ", and the library is built for a platform that has none of it";
         continue;
       }
-      const bool allowed = startsWith(inc.name, "agent/") || inc.name == "ArduinoJson.h" ||
-                           isStandardHeader(inc.name);
+      // ArduinoJson is reached through one header and not from a source directly: `agent/Json.h`
+      // wraps the include in a diagnostic pragma for the one warning the dependency raises in our
+      // translation units, and a second way in would get that warning back under a consumer's
+      // -Werror (task p1.6-20; the header says what the warning is).
+      if (inc.name == "ArduinoJson.h") {
+        EXPECT_EQ(rel, "lib/agent-core/include/agent/Json.h")
+            << rel << ":" << inc.line
+            << " includes <ArduinoJson.h> directly; inside the library the dependency is reached "
+               "as <agent/Json.h>, which is where its one warning is turned off";
+        continue;
+      }
+      const bool allowed = startsWith(inc.name, "agent/") || isStandardHeader(inc.name);
       EXPECT_TRUE(allowed) << rel << ":" << inc.line << " includes " << inc.name
                            << ", which is neither one of the library's own <agent/...> headers, nor "
                               "ArduinoJson, nor the C++ standard library";

@@ -15,7 +15,10 @@
 #                       test's - so they are milliseconds each; what the minute of this job is
 #                       spent on is PlatformIO relinking once per suite
 #   the library         what moved into lib/agent-core, as a file list a reviewer can read; the
-#                       library compiled on its own with an ESP-IDF consumer's flags
+#                       library compiled on its own with an ESP-IDF consumer's flags, in five
+#                       configurations since task p1.6-20 - c++17 and gnu++17, each at -O0 and
+#                       -O2, and the first consumer's own -O2 under the sanitizers - on this
+#                       runner's GCC, which is the consumer's and is named in the log
 #                       (tools/check-library-host.py); and its ESP-IDF component file parsed and
 #                       held against the sources on disk (tools/check-idf-component.cmake). The
 #                       component is not *built* anywhere in this repository - there is no
@@ -165,12 +168,22 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           find lib/agent-core -type f | sort
 
-      # The library on its own, with the flags an ESP-IDF consumer compiles it with: -fno-exceptions
-      # and -fno-rtti on top of the -std=c++17 -Wall -Wextra -Werror the step above already used,
-      # and nothing but lib/agent-core/include and ArduinoJson on the include path. It needs the
-      # ArduinoJson the step above installed, so it runs after it (task p1.5-16).
+      # The library on its own, the ways a consumer builds it: -fno-exceptions and -fno-rtti on
+      # top of -Wall -Wextra -Werror, and nothing but lib/agent-core/include and ArduinoJson on
+      # the include path. Five configurations since task p1.6-20 - c++17 and gnu++17, each at -O0
+      # and -O2, plus the first consumer's own -O2 under AddressSanitizer and
+      # UndefinedBehaviorSanitizer - because the two things the first consumer of the library hit
+      # were a GNU dialect's predefined `unix` and a warning the optimiser raises after inlining,
+      # neither of which a single -std=c++17 -O0 compile can see. **This runner's GCC is the
+      # consumer's**, so the script prints the compiler and its version first and the log names
+      # it. Before compiling, it holds every identifier of the library against the compiler's own
+      # list of predefined macro names; the self-test first, on the planted sources it must catch.
+      # It needs the ArduinoJson the step above installed, so it runs after it (task p1.5-16).
       - name: The library compiles for a consumer
-        run: python tools/check-library-host.py
+        run: |
+          set -euo pipefail
+          python tools/check-library-host.py --self-test
+          python tools/check-library-host.py
 
       # And its ESP-IDF face: a syntax check of lib/agent-core/CMakeLists.txt with a stub
       # idf_component_register, and then the SRCS it registers against lib/agent-core/src on disk,

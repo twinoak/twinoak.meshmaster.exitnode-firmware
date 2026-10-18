@@ -90,16 +90,43 @@ Every include is `<agent/X.h>`:
 ESP-IDF in this repository's toolchain. What has run is the CMake file parsed and
 held against the sources on disk (`tools/check-idf-component.cmake`), and every
 source compiled on a host with an IDF consumer's strictness,
-`-std=c++17 -Wall -Wextra -Werror -fno-exceptions -fno-rtti`
-(`tools/check-library-host.py`). The first real IDF build is the first consumer's,
-and the two things to expect there are in [`docs/upstream.md`](upstream.md)'s last
-section.
+`-Wall -Wextra -Werror -fno-exceptions -fno-rtti`, in the five configurations
+below (`tools/check-library-host.py`). The first real IDF build is the first
+consumer's, and the two things to expect there are in
+[`docs/upstream.md`](upstream.md)'s last section.
 
 The library is built with `-Wall -Wextra -Werror` wherever it is built: those
 flags are in `library.json`'s `build.flags`, so a warning in it is your build's
 error too. It is written to C++11 and is compiled here as `gnu++11` on the board
 and `c++17` on the host; it carries no `-std=` of its own, so the standard is
 yours to choose.
+
+**Which dialects and levels are proven.** The whole library, source by source,
+on CI's Linux runner — whose GCC is the version the job's log names, 13.3 today —
+in five configurations, every one of them with
+`-Wall -Wextra -Werror -fno-exceptions -fno-rtti` and nothing but
+`lib/agent-core/include` and ArduinoJson on the include path:
+
+| | `-O0` | `-O2` |
+|---|---|---|
+| `-std=c++17` | proven | proven |
+| `-std=gnu++17` | proven | proven |
+| `-std=c++17`, AddressSanitizer + UndefinedBehaviorSanitizer | — | proven |
+
+and `gnu++11`, by the board build itself (that is the dialect the
+Arduino-on-ESP32 framework compiles the whole image in). Both dialects are in
+the list because a GNU one **predefines names a strict one does not** — `unix`
+and `linux` on a Linux host — and an identifier of the library that collides
+with one is not a warning but a file that stops being code; the first consumer
+found a parameter named `unix` that way, and the check now holds every
+identifier of the library against the compiler's own list of predefined macro
+names. Both levels are in the list because about half of GCC's warnings are
+raised by the middle end *after* inlining and are unreachable at `-O0`. The
+sanitizer line is the configuration a consumer's host tests are built in, and it
+is the only one of the five that raises ArduinoJson 7.4.3's own
+`-Wmaybe-uninitialized`; `agent/Json.h` is where that one warning is turned off,
+for the dependency's code and nothing else. Nothing in the library carries
+`-Wno-error`: your build keeps every warning of ours.
 
 ## 3. `IMesh` — one repeater at a time
 
