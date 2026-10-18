@@ -268,6 +268,10 @@ class JobRunner {
 
   const AirtimeGate& gate() const { return gate_; }
   const ResultBuffer& results() const { return results_; }
+  // The buffer itself, for the one thing outside this runner that writes it: the kept image the
+  // loop writes at the end of a wake and reads back after a deep sleep (agent/IRetained.h, task
+  // p1.6-22). Nothing else may push into it - a result reaches it through `post()` or not at all.
+  ResultBuffer& results() { return results_; }
   uint32_t claims() const { return claims_; }
   uint32_t ran() const { return ran_; }
   uint32_t postFailures() const { return postFailures_; }

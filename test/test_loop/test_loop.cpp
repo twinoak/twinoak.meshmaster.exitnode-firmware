@@ -18,6 +18,11 @@
 // not an estimate - and the last two cases of the file read the library's own text for the rule
 // that cannot be reached from outside: that no call to the server is made anywhere but through
 // the wake's ledger.
+//
+// Since task p1.6-22 a sleep is part of it too: the cases under *What a sleep keeps* hand the
+// loop a store (support/FakeRetained.h), and a deep sleep is **the loop and the runner destroyed**
+// and built again from `state()` and the image the store holds - which is what a sleep is to the
+// library, whose RAM goes with it.
 
 #include <gtest/gtest.h>
 
@@ -27,20 +32,24 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <set>
 #include <string>
 #include <vector>
 
 #include <agent/AgentLoop.h>
+#include <agent/Credentials.h>
 #include <agent/Envelopes.h>
 #include <agent/Iso8601.h>
 #include <agent/JobRunner.h>
+#include <agent/KeptImage.h>
 #include <agent/Observations.h>
 #include <agent/ServerPolicy.h>
 
 #include <support/FakeMesh.h>
 #include <support/FakePlatform.h>
+#include <support/FakeRetained.h>
 #include <support/FakeUplink.h>
 #include <support/Fixtures.h>
 #include <support/Jobs.h>
@@ -139,6 +148,14 @@ std::string memberOf(const std::string& json, const std::string& key) {
   return json.substr(at, end - at);
 }
 
+// One boot of a unit that sleeps (task p1.6-22): a loop and a runner that are built at the boot
+// and destroyed at the sleep, which is what a deep sleep does to the RAM they live in.
+struct Boot {
+  std::unique_ptr<mm::JobRunner> jobs;
+  std::unique_ptr<mm::AgentLoop> loop;
+  bool restored = false;  // what `restoreKept()` said at this boot
+};
+
 class LoopTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -189,12 +206,42 @@ class LoopTest : public ::testing::Test {
   // The budget most of these tests want: wide, so the pacing is not what is being measured.
   void wideBudget() { server.answerHeartbeat(60, 1, 30, true, platform.clock().now()); }
 
+  // A boot of a unit that sleeps (task p1.6-22): a fresh loop and runner over the same world,
+  // wired as `main.cpp` wires them, with `store` behind the seam and the image read back. With
+  // `asleep` given it is the boot **after a deep sleep**: the state is taken from that unit, its
+  // loop and runner are destroyed - as the RAM is - and the new pair restores the state and
+  // then the image, in the order a consumer does it.
+  Boot boot(fake::FakeRetained& store, Boot* asleep = nullptr) {
+    mm::WakeState saved;
+    const bool afterASleep = asleep != nullptr;
+    if (afterASleep) {
+      saved = asleep->loop->state();
+      asleep->loop.reset();
+      asleep->jobs.reset();
+    }
+    Boot b;
+    b.jobs.reset(new mm::JobRunner());
+    b.loop.reset(new mm::AgentLoop());
+    b.jobs->begin(mesh, server, platform, &pumpDuringAJob);
+    b.loop->begin(server, platform, mesh, *b.jobs, identity);
+    b.loop->setIdentity(self().c_str());
+    b.loop->setRetained(&store, keptScratch, sizeof keptScratch);
+    if (afterASleep) {
+      EXPECT_TRUE(b.loop->restore(saved));
+    }
+    b.restored = b.loop->restoreKept();
+    g_loop = b.loop.get();
+    return b;
+  }
+
   fake::FakePlatform platform;
   fake::FakeMesh mesh{platform};
   fake::FakeUplink server{platform};
   mm::JobRunner jobs;
   mm::HeartbeatIdentity identity;
   mm::AgentLoop loop;
+  // The scratch a kept image is built in: the consumer's RAM, lent to the loop (task p1.6-22).
+  uint8_t keptScratch[24576];
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -751,6 +798,11 @@ TEST_F(LoopTest, NoWakeEverLeavesAJobLeasedAndSilent) {
   // every other round starts with results in the buffer from the one before. `owed` is what has
   // been claimed and not yet posted, and the invariant that ties the two halves together is
   // `owed.size() == jobs.queueDepth()` - what is owed is exactly what the buffer holds.
+  //
+  // Since task p1.6-22 the sleep is part of it: every fifth round the unit **deep-sleeps** - the
+  // loop and the runner are destroyed and built again from `state()` and the image the store
+  // holds - so what is owed has to survive the sleep as well, and does, because the store keeps
+  // it: the invariant holds on the boot after the sleep exactly as it held before.
   uint32_t seed = 0x1f35c6d1u;
   const auto next = [&seed]() {
     seed ^= seed << 13;
@@ -763,7 +815,19 @@ TEST_F(LoopTest, NoWakeEverLeavesAJobLeasedAndSilent) {
   std::set<long long> owed;             // claimed, not yet posted: the buffer's contents
   std::vector<long long> postedInOrder; // every result the server was handed, in the order it came
 
+  fake::FakeRetained store;
+  Boot unit = boot(store);
+  int sleeps = 0;
+
   for (int round = 0; round < 24; round++) {
+    if (round > 0 && round % 5 == 0) {
+      // The deep sleep: the RAM is gone, the state and the image come back, and nothing owed is
+      // lost with it.
+      unit = boot(store, &unit);
+      EXPECT_TRUE(unit.restored) << "round " << round << ": the image was not read back";
+      EXPECT_EQ(owed.size(), static_cast<size_t>(unit.jobs->queueDepth())) << "round " << round << ": the sleep lost a result";
+      sleeps++;
+    }
     server.forgetCalls();
     server.forgetQueued();
     const uint32_t lease = platform.clock().now() + 1800;
@@ -794,7 +858,7 @@ TEST_F(LoopTest, NoWakeEverLeavesAJobLeasedAndSilent) {
     // the rest, and the round after a metered one begins with a buffer to drain.
     const bool metered = round % 2 == 0;
     if (metered) budget.postBytes = 300 + next() % 3000u;
-    const mm::WakeReport report = loop.wake(hourly(1 + static_cast<int>(next() % 8u)), budget);
+    const mm::WakeReport report = unit.loop->wake(hourly(1 + static_cast<int>(next() % 8u)), budget);
 
     ASSERT_EQ(report.jobsRun + report.jobsNotRun, report.jobsClaimed)
         << "round " << round << ": a claimed job was neither run nor answered";
@@ -808,8 +872,8 @@ TEST_F(LoopTest, NoWakeEverLeavesAJobLeasedAndSilent) {
     }
     // What is owed is exactly what the buffer holds: nothing claimed is forgotten, and nothing
     // is waiting that was not claimed.
-    EXPECT_EQ(owed.size(), static_cast<size_t>(jobs.queueDepth())) << "round " << round;
-    EXPECT_EQ(jobs.resultsDropped(), 0u) << "round " << round << ": a result was lost";
+    EXPECT_EQ(owed.size(), static_cast<size_t>(unit.jobs->queueDepth())) << "round " << round;
+    EXPECT_EQ(unit.jobs->resultsDropped(), 0u) << "round " << round << ": a result was lost";
     if (metered) {
       EXPECT_LE(report.bytesPosted, budget.postBytes) << "round " << round << ": the byte cap was passed";
     }
@@ -819,21 +883,24 @@ TEST_F(LoopTest, NoWakeEverLeavesAJobLeasedAndSilent) {
     EXPECT_LE(report.transactionsSpent, 8 + 33) << "round " << round;
   }
 
-  // One wake with no cap at the end: the buffer drains, and then **every** job any round claimed
-  // has a posted result.
+  EXPECT_EQ(sleeps, 4);
+  // One wake with no cap at the end, after one more sleep: the buffer drains, and then **every**
+  // job any round claimed has a posted result.
+  unit = boot(store, &unit);
   server.forgetCalls();
   server.forgetQueued();
   server.answerHeartbeat(mm::kDefaultMaxTransactionsPerMinute, mm::kDefaultMinGapSeconds, 3600, false,
                          platform.clock().now());
-  const mm::WakeReport drain = loop.wake(hourly(), mm::Budget());
+  const mm::WakeReport drain = unit.loop->wake(hourly(), mm::Budget());
   EXPECT_EQ(drain.resultsKept, 0);
   for (const fake::PostedResult& posted : server.results()) {
     postedInOrder.push_back(posted.jobId);
     owed.erase(posted.jobId);
   }
   EXPECT_TRUE(owed.empty()) << owed.size() << " claimed job(s) were never answered, the first being " << *owed.begin();
-  EXPECT_EQ(jobs.queueDepth(), 0);
-  EXPECT_EQ(jobs.resultsDropped(), 0u);
+  EXPECT_EQ(unit.jobs->queueDepth(), 0);
+  EXPECT_EQ(unit.jobs->resultsDropped(), 0u);
+  EXPECT_EQ(unit.loop->keptImagesRefused(), 0u);
   // The order: ids were handed out in increasing order and a result is made as its job ends, so
   // the server saw them in the order they were made if and only if this list is increasing.
   ASSERT_FALSE(postedInOrder.empty());
@@ -1282,6 +1349,527 @@ TEST_F(LoopTest, TheAirtimeGateStillPacesAWakeWithRoomForSixTransactions) {
     EXPECT_GE(sends[i].atMs - sends[i - 1].atMs, 20000u) << "send " << i << " came too soon after " << (i - 1);
   }
   EXPECT_GE(platform.millis() - began, 20000u) << "a paced wake takes the time the pacing costs";
+}
+
+// ---------------------------------------------------------------------------------------------
+// What a sleep keeps (task p1.6-22)
+//
+// A result a wake kept - for its budget, or because the server would not take it - lived in RAM,
+// and a deep sleep is the end of RAM: the next boot had nothing to post and the job stayed leased
+// until the server's lease lapsed. The cases below hand the loop a store (support/FakeRetained.h)
+// and sleep the way the library sees a sleep: **the loop and the runner are destroyed** and new
+// ones are built from `state()` and the image the store holds (`boot()` above). The world - the
+// server, the repeater, the clock - stays, except where a case says the clocks restart too.
+
+TEST_F(LoopTest, AKeptResultSurvivesASleepAndItsJobDoesNotStayLeased) {
+  fake::FakeRetained store;
+  Boot unit = boot(store);
+  EXPECT_FALSE(unit.restored) << "a first boot: the store holds nothing";
+  EXPECT_EQ(store.reads(), 1);
+
+  // A metered wake runs the job and keeps its result: the heartbeat goes, no result can.
+  server.answerHeartbeat(60, 1, 3600, true, platform.clock().now());
+  server.queue(fake::Job(16001, "trace").leasedUntil(kLease).json());
+  mm::Budget metered;
+  metered.postBytes = 1;
+  const mm::WakeReport first = unit.loop->wake(hourly(), metered);
+  ASSERT_EQ(first.jobsRun, 1);
+  ASSERT_EQ(first.resultsKept, 1);
+  ASSERT_EQ(unit.jobs->queueDepth(), 1);
+  EXPECT_TRUE(server.results().empty());
+  EXPECT_TRUE(first.keptImageWritten) << "the end of the wake wrote the image";
+  EXPECT_EQ(store.writes(), 1);
+  EXPECT_EQ(first.resultsNotKept, 0);
+  long long keptId = 0;
+  size_t keptLen = 0;
+  const char* kept = unit.jobs->results().oldest(keptId, keptLen);
+  ASSERT_NE(kept, nullptr);
+  const std::string keptBody(kept, keptLen);
+  const std::string clientId = memberOf(keptBody, "clientId");
+  ASSERT_EQ(clientId.rfind("16001-", 0), 0u) << clientId;
+  EXPECT_NE(store.text().find(keptBody), std::string::npos) << "the image holds the body as it would be posted";
+
+  // The sleep. The loop and the runner are destroyed; the next boot builds new ones from the
+  // state and the image.
+  Boot woken = boot(store, &unit);
+  EXPECT_TRUE(woken.restored);
+  EXPECT_EQ(woken.jobs->queueDepth(), 1) << "the result came back from the store";
+  EXPECT_EQ(woken.jobs->resultsDropped(), 0u);
+
+  // The next wake posts it first, under the client id it was made with, and the job is answered.
+  server.forgetCalls();
+  platform.advanceSeconds(3600);
+  server.answerHeartbeat(60, 1, 3600, false, platform.clock().now());
+  const mm::WakeReport second = woken.loop->wake(hourly(), mm::Budget());
+  EXPECT_EQ(second.results, mm::StepOutcome::Done);
+  EXPECT_EQ(second.resultsFlushed, 1);
+  ASSERT_EQ(server.results().size(), 1u);
+  EXPECT_EQ(server.results()[0].jobId, 16001);
+  EXPECT_EQ(memberOf(server.results()[0].body, "clientId"), clientId) << "the server de-duplicates on it";
+  EXPECT_EQ(server.results()[0].body, keptBody) << "byte for byte what was made before the sleep";
+  EXPECT_EQ(woken.jobs->queueDepth(), 0);
+  EXPECT_EQ(server.queuedJobs(), 0u) << "nothing is left on the server";
+  // And the store now says so: an empty image, written once, and not again while nothing changes.
+  EXPECT_TRUE(second.keptImageWritten);
+  EXPECT_EQ(store.writes(), 2);
+  const mm::WakeReport third = woken.loop->wake(hourly(), mm::Budget());
+  EXPECT_FALSE(third.keptImageWritten);
+  EXPECT_EQ(store.writes(), 2);
+  // A boot after *that* sleep finds nothing to post and nothing to post twice.
+  Boot again = boot(store, &woken);
+  EXPECT_TRUE(again.restored) << "an empty image is an image";
+  EXPECT_EQ(again.jobs->queueDepth(), 0);
+}
+
+TEST_F(LoopTest, AStoreTooSmallKeepsTheOldestWholeResultAndTheOldestAdvertsAndCountsTheRest) {
+  fake::FakeRetained store;
+  Boot unit = boot(store);
+
+  // Two jobs whose results the budget keeps, and twenty adverts it cannot post either.
+  server.answerHeartbeat(60, 1, 3600, true, platform.clock().now());
+  server.queue({fake::Job(16011, "trace").leasedUntil(kLease).json(), fake::Job(16012, "trace").leasedUntil(kLease).json()});
+  const uint32_t heardAt = platform.millis();
+  for (uint8_t i = 0; i < 20; i++) unit.loop->ring().push(advert(i, heardAt));
+  mm::Budget metered;
+  metered.postBytes = 1;
+  const mm::WakeReport first = unit.loop->wake(hourly(), metered);
+  ASSERT_EQ(first.jobsRun, 2);
+  ASSERT_EQ(unit.jobs->queueDepth(), 2);
+  ASSERT_EQ(unit.loop->ring().size(), 20u);
+  EXPECT_EQ(first.resultsNotKept, 0) << "the store was large";
+  EXPECT_EQ(first.observationsNotKept, 0);
+  long long oldestId = 0;
+  size_t oldestLen = 0;
+  ASSERT_NE(unit.jobs->results().oldest(oldestId, oldestLen), nullptr);
+  ASSERT_EQ(oldestId, 16011);
+  long long newerId = 0;
+  size_t newerLen = 0;
+  ASSERT_NE(unit.jobs->results().at(1, newerId, newerLen), nullptr);
+  ASSERT_EQ(newerId, 16012);
+
+  // A store that fits the header, the oldest result and three whole adverts - not a byte of a
+  // fourth, and so not the newer result either, which is larger than three adverts.
+  const size_t room = 3 * mm::kKeptAdvertLen;
+  ASSERT_GT(mm::kKeptResultHeaderLen + newerLen, room) << "a trace result outweighs three adverts; this case rests on it";
+  fake::FakeRetained small(mm::kKeptImageHeaderLen + mm::kKeptResultHeaderLen + oldestLen + room);
+  unit.loop->setRetained(&small, keptScratch, sizeof keptScratch);
+  server.answerHeartbeat(60, 1, 3600, false, platform.clock().now());
+  const mm::WakeReport second = unit.loop->wake(hourly(), metered);
+  EXPECT_TRUE(second.keptImageWritten);
+  EXPECT_EQ(second.resultsNotKept, 1) << "the newer result did not fit";
+  EXPECT_EQ(second.observationsNotKept, 17);
+  EXPECT_EQ(unit.jobs->queueDepth(), 1) << "the buffer agrees with the image";
+  EXPECT_EQ(unit.jobs->resultsDropped(), 1u);
+  EXPECT_EQ(unit.loop->ring().size(), 3u);
+  EXPECT_EQ(unit.loop->ring().dropped(), 17u);
+  EXPECT_EQ(second.observationsLeft, 3);
+  EXPECT_TRUE(fake::LogCapture::the().holds("1 result(s) and 17 advert(s) do not fit"));
+  EXPECT_EQ(small.image().size(), small.capacity()) << "to the byte";
+  mm::KeptImageReader image;
+  ASSERT_EQ(image.check(small.image().data(), small.image().size()), nullptr);
+  EXPECT_EQ(image.resultCount(), 1u);
+  EXPECT_EQ(image.advertCount(), 3u);
+  EXPECT_EQ(image.resultsDropped(), 1u);
+  EXPECT_EQ(image.observationsDropped(), 17u);
+  long long id = 0;
+  size_t len = 0;
+  ASSERT_NE(image.result(0, id, len), nullptr);
+  EXPECT_EQ(id, 16011) << "the oldest, whole";
+  EXPECT_EQ(len, oldestLen);
+  mm::HeardAdvert back;
+  ASSERT_TRUE(image.advert(0, back));
+  EXPECT_STREQ(back.name, "Repeater 0") << "the oldest advert first";
+  ASSERT_TRUE(image.advert(2, back));
+  EXPECT_STREQ(back.name, "Repeater 2");
+  EXPECT_FALSE(image.advert(3, back));
+
+  // After the sleep the oldest result is posted, the three adverts go, and the heartbeat carries
+  // both losses - a decision with a counter, which is what the store is for.
+  Boot woken = boot(small, &unit);
+  ASSERT_TRUE(woken.restored);
+  EXPECT_EQ(woken.jobs->queueDepth(), 1);
+  EXPECT_EQ(woken.loop->ring().size(), 3u);
+  EXPECT_EQ(woken.jobs->resultsDropped(), 1u);
+  EXPECT_EQ(woken.loop->ring().dropped(), 17u);
+  server.forgetCalls();
+  const mm::WakeReport third = woken.loop->wake(hourly(), mm::Budget());
+  EXPECT_EQ(third.resultsFlushed, 1);
+  ASSERT_EQ(server.results().size(), 1u);
+  EXPECT_EQ(server.results()[0].jobId, 16011);
+  EXPECT_EQ(third.observationsPosted, 3);
+  ASSERT_EQ(server.heartbeats().size(), 1u);
+  EXPECT_NE(server.heartbeats()[0].find("\"resultsDropped\":1"), std::string::npos) << server.heartbeats()[0];
+  EXPECT_NE(server.heartbeats()[0].find("\"observationsDropped\":17"), std::string::npos) << server.heartbeats()[0];
+}
+
+TEST_F(LoopTest, AdvertsKeepTheMomentTheyWereHeardAcrossASleepThatRestartsEveryClock) {
+  fake::FakeRetained store;
+  Boot unit = boot(store);
+  server.answerHeartbeat(60, 1, 3600, false, platform.clock().now());
+  const uint32_t heardAtEpoch = platform.clock().now();
+  for (uint8_t i = 0; i < 20; i++) unit.loop->ring().push(advert(i, platform.millis()));
+  mm::Budget metered;
+  metered.postBytes = 1;
+  const mm::WakeReport first = unit.loop->wake(hourly(), metered);
+  EXPECT_EQ(first.observations, mm::StepOutcome::NoBudget);
+  EXPECT_EQ(first.observationsLeft, 20);
+  EXPECT_TRUE(first.keptImageWritten);
+  const mm::WakeState saved = unit.loop->state();
+  unit.loop.reset();
+  unit.jobs.reset();
+
+  // The boot after the sleep, on a unit whose uptime clock starts at zero and whose wall clock
+  // knows nothing until the heartbeat answers - the Walter with no RTC fitted, two hours later.
+  fake::FakePlatform platform2;
+  fake::FakeMesh mesh2{platform2};
+  fake::FakeUplink server2{platform2};
+  server2.setLinkUp(true);
+  const uint32_t serverNow = heardAtEpoch + 7200;
+  server2.setServerTime(serverNow);
+  server2.answerHeartbeat(60, 1, 3600, false, serverNow);
+  ASSERT_FALSE(platform2.clock().hasTime());
+  ASSERT_EQ(platform2.millis(), 0u);
+  std::unique_ptr<mm::JobRunner> jobs2(new mm::JobRunner());
+  std::unique_ptr<mm::AgentLoop> loop2(new mm::AgentLoop());
+  jobs2->begin(mesh2, server2, platform2, nullptr);
+  loop2->begin(server2, platform2, mesh2, *jobs2, identity);
+  loop2->setIdentity(self().c_str());
+  loop2->setRetained(&store, keptScratch, sizeof keptScratch);
+  ASSERT_TRUE(loop2->restore(saved));
+  ASSERT_TRUE(loop2->restoreKept());
+  ASSERT_EQ(loop2->ring().size(), 20u);
+  EXPECT_EQ(loop2->ring().at(0).heardAtEpoch, heardAtEpoch) << "the moment it was heard came back with it";
+  EXPECT_STREQ(loop2->ring().at(19).name, "Repeater 19");
+
+  const mm::WakeReport second = loop2->wake(hourly(), mm::Budget());
+  EXPECT_EQ(second.observationsPosted, 20);
+  EXPECT_EQ(loop2->ring().size(), 0u);
+  ASSERT_EQ(server2.observations().size(), 1u);
+  const std::string items = memberOf(server2.observations()[0], "items");
+  uint32_t at = 0;
+  ASSERT_TRUE(mm::parseUtc(memberOf(items, "at").c_str(), at)) << items;
+  EXPECT_EQ(at, heardAtEpoch) << "two hours late, on clocks that restarted, and stamped with when it was heard";
+  EXPECT_EQ(platform2.clock().now(), serverNow) << "the heartbeat is where this boot's clock came from";
+  EXPECT_NE(items.find("\"name\":\"Repeater 0\""), std::string::npos) << items;
+  EXPECT_NE(items.find("\"role\":\"repeater\""), std::string::npos) << items;
+}
+
+TEST_F(LoopTest, EveryKindOfBadImageIsRefusedWholeAndCounted) {
+  fake::FakeRetained store;
+  Boot unit = boot(store);
+  server.answerHeartbeat(60, 1, 3600, true, platform.clock().now());
+  server.queue({fake::Job(16021, "trace").leasedUntil(kLease).json(), fake::Job(16022, "trace").leasedUntil(kLease).json()});
+  for (uint8_t i = 0; i < 3; i++) unit.loop->ring().push(advert(i, platform.millis()));
+  mm::Budget metered;
+  metered.postBytes = 1;
+  ASSERT_EQ(unit.loop->wake(hourly(), metered).jobsRun, 2);
+  ASSERT_EQ(store.writes(), 1);
+  const std::vector<uint8_t> good = store.image();
+  {
+    mm::KeptImageReader whole;
+    ASSERT_EQ(whole.check(good.data(), good.size()), nullptr);
+    ASSERT_EQ(whole.resultCount(), 2u);
+    ASSERT_EQ(whole.advertCount(), 3u);
+  }
+  unit.loop.reset();
+  unit.jobs.reset();
+
+  // The checksum written again over a header somebody changed on purpose, so that what is
+  // tested is the check that comes after the checksum and not the checksum itself.
+  const auto reseal = [](std::vector<uint8_t>& img) {
+    const uint32_t crc = mm::crc32Of(img.data() + 8, img.size() - 8);
+    img[4] = static_cast<uint8_t>(crc);
+    img[5] = static_cast<uint8_t>(crc >> 8);
+    img[6] = static_cast<uint8_t>(crc >> 16);
+    img[7] = static_cast<uint8_t>(crc >> 24);
+  };
+  struct Damage {
+    const char* name;
+    std::function<void(std::vector<uint8_t>&)> apply;
+    const char* said;
+  };
+  const Damage damages[] = {
+      {"short", [](std::vector<uint8_t>& img) { img.resize(10); }, "shorter than a header"},
+      {"torn", [](std::vector<uint8_t>& img) { img.resize(img.size() - 1); }, "torn"},
+      {"not an image", [](std::vector<uint8_t>& img) { img[0] ^= 0xFF; }, "not a kept image"},
+      {"another version",
+       [&](std::vector<uint8_t>& img) {
+         img[8] = static_cast<uint8_t>(mm::kKeptImageVersion + 1);
+         reseal(img);
+       },
+       "another version"},
+      {"a bad checksum", [](std::vector<uint8_t>& img) { img[mm::kKeptImageHeaderLen + 20] ^= 0x01; }, "checksum"},
+      {"a count the buffer cannot hold",
+       [&](std::vector<uint8_t>& img) {
+         img[10] = static_cast<uint8_t>(mm::ResultBuffer::kMaxResults + 1);
+         reseal(img);
+       },
+       "counts do not add up"},
+      {"a record past the end",
+       [&](std::vector<uint8_t>& img) {
+         img[mm::kKeptImageHeaderLen + 11] = 0x7F;  // the first result's length, now enormous
+         reseal(img);
+       },
+       "records do not add up"},
+  };
+  for (const Damage& damage : damages) {
+    std::vector<uint8_t> bad = good;
+    damage.apply(bad);
+    store.set(bad);
+    store.forgetCounts();
+    fake::LogCapture::the().clear();
+    std::unique_ptr<mm::JobRunner> jobs2(new mm::JobRunner());
+    std::unique_ptr<mm::AgentLoop> loop2(new mm::AgentLoop());
+    jobs2->begin(mesh, server, platform, nullptr);
+    loop2->begin(server, platform, mesh, *jobs2, identity);
+    loop2->setIdentity(self().c_str());
+    loop2->setRetained(&store, keptScratch, sizeof keptScratch);
+
+    EXPECT_FALSE(loop2->restoreKept()) << damage.name;
+    EXPECT_EQ(jobs2->queueDepth(), 0) << damage.name << ": a result of a refused image reached the buffer";
+    EXPECT_EQ(loop2->ring().size(), 0u) << damage.name << ": an advert of a refused image reached the ring";
+    EXPECT_EQ(loop2->keptImagesRefused(), 1u) << damage.name;
+    EXPECT_TRUE(fake::LogCapture::the().holds("refused whole")) << damage.name;
+    EXPECT_TRUE(fake::LogCapture::the().holds(damage.said)) << damage.name << ": " << fake::LogCapture::the().text();
+
+    // And the next wake writes a fresh image over the bad one, whatever it would hold, carrying
+    // the count - so a refusal is a figure that survives the sleep and not a line that scrolled by.
+    server.forgetCalls();
+    server.answerHeartbeat(60, 1, 3600, false, platform.clock().now());
+    const mm::WakeReport fresh = loop2->wake(hourly(), mm::Budget());
+    EXPECT_TRUE(fresh.keptImageWritten) << damage.name;
+    EXPECT_EQ(store.writes(), 1) << damage.name;
+    mm::KeptImageReader written;
+    ASSERT_EQ(written.check(store.image().data(), store.image().size()), nullptr) << damage.name;
+    EXPECT_EQ(written.imagesRefused(), 1u) << damage.name;
+    EXPECT_EQ(written.resultCount(), 0u) << damage.name;
+  }
+
+  // The count comes back from the image after a sleep, and a good image is read whole.
+  {
+    std::unique_ptr<mm::JobRunner> jobs2(new mm::JobRunner());
+    std::unique_ptr<mm::AgentLoop> loop2(new mm::AgentLoop());
+    jobs2->begin(mesh, server, platform, nullptr);
+    loop2->begin(server, platform, mesh, *jobs2, identity);
+    loop2->setRetained(&store, keptScratch, sizeof keptScratch);
+    EXPECT_TRUE(loop2->restoreKept());
+    EXPECT_EQ(loop2->keptImagesRefused(), 1u) << "the refusal before the sleep is still counted after it";
+  }
+  store.set(good);
+  Boot whole = boot(store);
+  EXPECT_TRUE(whole.restored);
+  EXPECT_EQ(whole.jobs->queueDepth(), 2);
+  EXPECT_EQ(whole.loop->ring().size(), 3u);
+  EXPECT_EQ(whole.loop->keptImagesRefused(), 0u);
+}
+
+TEST_F(LoopTest, TheImageHoldsNothingAResultDoesNot) {
+  // The rail, on the image's own bytes: a rotation, a guest login, a `cli` line and two logins
+  // with the contract fixtures' sample passwords all pass through the runner, every result is
+  // kept for the budget, and the image that would go to a flash somebody can read holds none of
+  // the five secrets - because a result holds none, and the image holds nothing a result does not.
+  const std::string admin = "hunter2";                       // MeshMaster.Agent.Tests' CredentialTests
+  const std::string rotated = "Rotated-Admin-9";             // and its rotation
+  const std::string guestSample = "guest-password-sample";   // the contract fixtures' three samples
+  const std::string adminSample = "admin-password-sample";
+  const std::string newSample = "new-password-sample";
+  mesh.setAdminPassword(admin);
+  mesh.setGuestPassword(guestSample);  // the repeater keeps fifteen bytes of it, as stock firmware does
+
+  fake::FakeRetained store;
+  Boot unit = boot(store);
+  mm::Budget metered;
+  metered.postBytes = 1;  // every result is kept, so every one of them is in the image
+
+  // Wake one: the guest login and the CLI line.
+  server.answerHeartbeat(60, 1, 3600, true, platform.clock().now());
+  server.queue({fake::Job(16031, "status").atClass("guest").leasedUntil(kLease).withGuestPassword(guestSample).json(),
+                fake::Job(16032, "cli")
+                    .atClass("admin")
+                    .leasedUntil(kLease)
+                    .withAdminPassword(admin)
+                    .withAclLevel(mm::kPermReadOnly)
+                    .withPayload("{\"command\":\"get name\"}")
+                    .json()});
+  ASSERT_EQ(unit.loop->wake(hourly(), metered).jobsRun, 2);
+  // Wake two: the rotation, then a rotation to a value the firmware would cut, which is refused.
+  server.answerHeartbeat(60, 1, 3600, true, platform.clock().now());
+  server.queue({fake::Job(16033, "password.set")
+                    .atClass("admin")
+                    .leasedUntil(kLease)
+                    .withAdminPassword(admin)
+                    .withNewPassword(rotated)
+                    .withAclLevel(mm::kPermReadOnly)
+                    .withPayload("{\"field\":\"adminPassword\"}")
+                    .json(),
+                fake::Job(16034, "password.set")
+                    .atClass("admin")
+                    .leasedUntil(kLease)
+                    .withAdminPassword(rotated)
+                    .withNewPassword(newSample)
+                    .withAclLevel(mm::kPermReadOnly)
+                    .withPayload("{\"field\":\"adminPassword\"}")
+                    .json()});
+  ASSERT_EQ(unit.loop->wake(hourly(), metered).jobsRun, 2);
+  EXPECT_EQ(mesh.adminPassword(), rotated) << "the rotation went through";
+  // Wake three: an admin login with the sample, which the repeater no longer answers.
+  server.answerHeartbeat(60, 1, 3600, true, platform.clock().now());
+  server.queue(fake::Job(16035, "cli")
+                   .atClass("admin")
+                   .leasedUntil(kLease)
+                   .withAdminPassword(adminSample)
+                   .withAclLevel(mm::kPermReadOnly)
+                   .withPayload("{\"command\":\"get name\"}")
+                   .json());
+  const mm::WakeReport third = unit.loop->wake(hourly(), metered);
+  ASSERT_EQ(third.jobsRun, 1);
+  ASSERT_EQ(unit.jobs->queueDepth(), 5) << "all five results kept";
+  EXPECT_TRUE(third.keptImageWritten);
+
+  // The image: five results, as they would be posted, and not one byte of a secret.
+  const std::string image = store.text();
+  mm::KeptImageReader whole;
+  ASSERT_EQ(whole.check(store.image().data(), store.image().size()), nullptr);
+  EXPECT_EQ(whole.resultCount(), 5u);
+  for (long long id = 16031; id <= 16035; id++) {
+    EXPECT_NE(image.find("\"clientId\":\"" + std::to_string(id) + "-"), std::string::npos) << "job " << id << " is not in the image";
+  }
+  // The rotation's echo, redacted: `password now: <set>`, with the angle brackets as the writer
+  // escapes them - a backslash, then u003C and u003E, the strict encoder's uppercase hex
+  // (agent/JsonWriter.h, until task p1.6-24 moves the dialect).
+  EXPECT_NE(image.find("password now: " + std::string(1, 0x5C) + "u003Cset" + std::string(1, 0x5C) + "u003E"), std::string::npos)
+      << "the rotation's echo is in it, redacted: " << image.substr(image.find("16033-"), 600);
+  EXPECT_NE(image.find("lock-out"), std::string::npos) << "the refused rotation's reason is in it";
+  for (const std::string& secret : {admin, rotated, guestSample, adminSample, newSample}) {
+    EXPECT_EQ(image.find(secret), std::string::npos) << "the image carries " << secret;
+    // And the fifteen bytes a repeater would have kept of a longer one.
+    EXPECT_EQ(image.find(secret.substr(0, mm::kMaxPasswordLen)), std::string::npos) << "the image carries " << secret;
+    EXPECT_FALSE(fake::LogCapture::the().holds(secret)) << "a log line carries " << secret;
+  }
+  // The same bytes, read back after the sleep, are still what would be posted - and no more.
+  Boot woken = boot(store, &unit);
+  ASSERT_TRUE(woken.restored);
+  EXPECT_EQ(woken.jobs->queueDepth(), 5);
+  server.forgetCalls();
+  server.answerHeartbeat(60, 1, 3600, false, platform.clock().now());
+  EXPECT_EQ(woken.loop->wake(hourly(), mm::Budget()).resultsFlushed, 5);
+  ASSERT_EQ(server.results().size(), 5u);
+  for (const fake::PostedResult& posted : server.results()) {
+    for (const std::string& secret : {admin, rotated, guestSample, adminSample, newSample}) {
+      EXPECT_EQ(posted.body.find(secret.substr(0, mm::kMaxPasswordLen)), std::string::npos) << posted.body;
+    }
+  }
+}
+
+TEST_F(LoopTest, AWakeWritesAtMostOneImageAndNoneWhenTheStoreAlreadyHoldsIt) {
+  fake::FakeRetained store;
+  Boot unit = boot(store);
+  EXPECT_FALSE(unit.restored);
+  mm::Budget metered;
+  metered.postBytes = 1;
+
+  // Nothing kept and nothing in the store: no write.
+  server.answerHeartbeat(60, 1, 3600, false, platform.clock().now());
+  EXPECT_FALSE(unit.loop->wake(hourly(), mm::Budget()).keptImageWritten);
+  EXPECT_EQ(store.writes(), 0);
+
+  // A kept result: one write.
+  server.answerHeartbeat(60, 1, 3600, true, platform.clock().now());
+  server.queue(fake::Job(16041, "trace").leasedUntil(kLease).json());
+  EXPECT_TRUE(unit.loop->wake(hourly(), metered).keptImageWritten);
+  EXPECT_EQ(store.writes(), 1);
+
+  // The same wake again with nothing new: the store already holds this image, so no write.
+  server.answerHeartbeat(60, 1, 3600, false, platform.clock().now());
+  EXPECT_FALSE(unit.loop->wake(hourly(), metered).keptImageWritten);
+  EXPECT_FALSE(unit.loop->wake(hourly(), metered).keptImageWritten);
+  EXPECT_EQ(store.writes(), 1);
+
+  // Something new and a store that will not take it: said, and tried again at the next wake
+  // even though nothing changed since, because what the store holds is unknown from here.
+  unit.loop->ring().push(advert(1, platform.millis()));
+  store.refuseWrites(true);
+  const mm::WakeReport refused = unit.loop->wake(hourly(), metered);
+  EXPECT_FALSE(refused.keptImageWritten);
+  EXPECT_EQ(store.writes(), 2) << "one attempt";
+  EXPECT_TRUE(fake::LogCapture::the().holds("the store would not take an image"));
+  store.refuseWrites(false);
+  EXPECT_TRUE(unit.loop->wake(hourly(), metered).keptImageWritten);
+  EXPECT_EQ(store.writes(), 3);
+
+  // Everything posted: the empty image is written once, and then not again.
+  const mm::WakeReport drained = unit.loop->wake(hourly(), mm::Budget());
+  EXPECT_EQ(drained.resultsFlushed, 1);
+  EXPECT_EQ(drained.observationsPosted, 1);
+  EXPECT_TRUE(drained.keptImageWritten);
+  EXPECT_EQ(store.writes(), 4);
+  EXPECT_FALSE(unit.loop->wake(hourly(), mm::Budget()).keptImageWritten);
+  EXPECT_FALSE(unit.loop->wake(hourly(), mm::Budget()).keptImageWritten);
+  EXPECT_EQ(store.writes(), 4);
+  mm::KeptImageReader empty;
+  ASSERT_EQ(empty.check(store.image().data(), store.image().size()), nullptr);
+  EXPECT_EQ(empty.resultCount(), 0u);
+  EXPECT_EQ(empty.advertCount(), 0u);
+  EXPECT_EQ(store.image().size(), mm::kKeptImageHeaderLen);
+}
+
+TEST(WhatASleepKeeps, TheCrcIsTheOneZlibAndTheEspRomCompute) {
+  // CRC-32/ISO-HDLC's check value, so a consumer may verify an image with the CRC it has.
+  const char* check = "123456789";
+  EXPECT_EQ(mm::crc32Of(reinterpret_cast<const uint8_t*>(check), 9), 0xCBF43926u);
+  EXPECT_EQ(mm::crc32Of(nullptr, 0), 0u);
+}
+
+TEST(WhatASleepKeeps, TheHeltecsLoopNeverTouchesTheStore) {
+  // `loop()` is the Heltec, and the store is a sleeping consumer's: the loop's text holds that
+  // every use of the store is inside the two functions only `wake()` and a consumer reach.
+  const std::string loop = readFile(fs::path(PROJECT_DIR) / "lib/agent-core/src/AgentLoop.cpp");
+  ASSERT_FALSE(loop.empty());
+  const auto bodyOf = [&loop](const char* signature) {
+    const size_t at = loop.find(signature);
+    EXPECT_NE(at, std::string::npos) << signature;
+    if (at == std::string::npos) return std::string();
+    const size_t end = loop.find("\n}", at);
+    EXPECT_NE(end, std::string::npos) << signature;
+    return loop.substr(at, end - at);
+  };
+  const std::string heltec = bodyOf("void AgentLoop::loop() {");
+  EXPECT_EQ(heltec.find("retained_"), std::string::npos) << "loop() reaches the store";
+  EXPECT_EQ(heltec.find("keepAcrossSleep("), std::string::npos) << "loop() writes an image";
+  EXPECT_EQ(heltec.find("restoreKept("), std::string::npos) << "loop() reads an image";
+
+  // Every call on the store is inside keepAcrossSleep, restoreKept, setRetained or the one
+  // helper that asks the store's capacity for them.
+  const std::string keep = bodyOf("void AgentLoop::keepAcrossSleep(WakeReport& report) {");
+  const std::string read = bodyOf("bool AgentLoop::restoreKept() {");
+  const std::string set = bodyOf("void AgentLoop::setRetained(IRetained* store, uint8_t* scratch, size_t scratchLen) {");
+  const std::string cap = bodyOf("size_t AgentLoop::imageCap() const {");
+  size_t uses = 0;
+  for (const char* call : {"retained_->", "store->"}) {
+    size_t at = 0;
+    while ((at = loop.find(call, at)) != std::string::npos) {
+      uses++;
+      at += std::strlen(call);
+    }
+  }
+  size_t inside = 0;
+  for (const std::string* body : {&keep, &read, &set, &cap}) {
+    for (const char* call : {"retained_->", "store->"}) {
+      size_t at = 0;
+      while ((at = body->find(call, at)) != std::string::npos) {
+        inside++;
+        at += std::strlen(call);
+      }
+    }
+  }
+  EXPECT_GE(uses, 3u) << "no use of the store was found at all: this test has stopped checking anything";
+  EXPECT_EQ(uses, inside) << "the store is used somewhere other than the functions a sleeping consumer reaches";
+  // And the one write is at the end of wake(), after every step, once.
+  const std::string wake = bodyOf("WakeReport AgentLoop::wake(const WakeIntent& intent, const Budget& budget) {");
+  const size_t written = wake.find("keepAcrossSleep(report);");
+  ASSERT_NE(written, std::string::npos);
+  EXPECT_EQ(wake.find("keepAcrossSleep(", written + 1), std::string::npos) << "written twice in one wake";
+  EXPECT_GT(written, wake.find("wakeObservations(report);")) << "the image goes after the last step";
 }
 
 // ---------------------------------------------------------------------------------------------
