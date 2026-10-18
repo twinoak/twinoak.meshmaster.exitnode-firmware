@@ -112,6 +112,20 @@ const mm::WakeReport report = loop.wake(intent, budget);
 // sleep for report.acceptedIntervalS, but never less than report.sleepAtLeastS
 ```
 
+**A wake's byte and uplink budgets cover every call it makes** — the config, the
+heartbeat, the claim, every result of every job it claimed and every observation
+batch, through one ledger (`agent/UplinkMeter.h`), which is why `report.uplinkMs`
+and `report.bytesPosted` are the whole of what a wake spent and not a part of it.
+A post the budget has no room for is **kept** in the offline buffer, behind
+whatever is already there, and the report counts it as `resultsKept` (*kept:
+budget*): a bound of ours is not a failure of the server's, so nothing backs off
+for one, and the next wake posts it with the timestamps it was made with. Task
+p1.6-21 closed the two leaks 1.5's review found at the job step; the fake server
+charges every call the same milliseconds of the test's clock, so
+`EveryCallOfAWakeIsInItsUplinkSecondsAndEveryPostedByteInItsBytes` is arithmetic,
+and two text tests hold that no call to the server is made anywhere but through
+that ledger.
+
 Three things a test of a wake is about, and they are what `test/test_loop`'s
 wake cases hold:
 

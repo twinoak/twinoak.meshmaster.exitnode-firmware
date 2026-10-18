@@ -84,6 +84,11 @@ void AgentLoop::begin(IUplink& server, IPlatform& platform, IMesh& mesh, JobRunn
   jobs_ = &jobs;
   identity_ = &identity;
   mesh_->setRing(&ring_);
+  // One ledger for the whole library's calls to the server: this object's and the runner's
+  // (agent/UplinkMeter.h, task p1.6-21). It has no bounds until a wake sets them, so `loop()`
+  // is what it always was and the Heltec posts the bytes it always posted.
+  meter_.begin(platform);
+  jobs.setMeter(&meter_);
   budget_.maxTransactionsPerMinute = kDefaultMaxTransactionsPerMinute;
   budget_.minGapSeconds = kDefaultMinGapSeconds;
   jobs_->setBudget(budget_);
@@ -146,14 +151,13 @@ void AgentLoop::loop() {
   // a fact about the ring and needs no timer of its own.
   const uint32_t waited = ring_.empty() ? 0 : now - ring_.at(0).heardAtMillis;
   if (observationBatchDue(ring_.size(), waited)) {
-    size_t unbounded = kNoByteCap;
-    doObservations(unbounded);
+    doObservations();
   }
 }
 
 bool AgentLoop::doConfig() {
   configDue_ = false;
-  if (server_->fetchConfig()) {
+  if (meter_.spend(0, [&] { return server_->fetchConfig(); })) {
     budget_ = server_->config().budget;
     pollIntervalS_ = server_->config().pollIntervalS > 0 ? server_->config().pollIntervalS : 30;
   } else {
@@ -325,7 +329,7 @@ bool AgentLoop::doHeartbeat() {
   hb.errorCount = static_cast<int>(sizeof errors / sizeof errors[0]);
 
   HeartbeatReply reply;
-  const bool ok = server_->postHeartbeat(hb, reply);
+  const bool ok = meter_.spend(0, [&] { return server_->postHeartbeat(hb, reply); });
   inHeartbeat_ = false;
   // Whatever happened, the next one is due an interval from now: a failure backs off on top.
   nextHeartbeatAt_ = millis() + static_cast<uint32_t>(pollIntervalS_) * 1000u;
@@ -364,12 +368,11 @@ bool AgentLoop::doHeartbeat() {
 }
 
 void AgentLoop::doPendingResults() {
-  const int before = jobs_->queueDepth();
-  jobs_->flushResults();
+  const int posted = jobs_->flushResults();
   const int after = jobs_->queueDepth();
-  if (after < before) {
-    counters_.resultsPosted += static_cast<uint32_t>(before - after);
-    LOG_I("jobs: %d result(s) that waited went through; %d still waiting", before - after, after);
+  if (posted > 0) {
+    counters_.resultsPosted += static_cast<uint32_t>(posted);
+    LOG_I("jobs: %d result(s) that waited went through; %d still waiting", posted, after);
   }
   if (after == 0) {
     succeeded();
@@ -446,7 +449,7 @@ size_t AgentLoop::buildBatch(uint32_t nowMs, char* out, size_t cap, size_t maxIt
   return writeObservationBatch(batchId_, g_items, static_cast<int>(count), out, cap);
 }
 
-bool AgentLoop::doObservations(size_t& bytesAllowed, bool* capped) {
+bool AgentLoop::doObservations(bool* capped) {
   const uint32_t now = millis();
   // A batch already built and not yet accepted is pending: it must go out again exactly as it
   // was, under the client id it was built with, or the server would de-duplicate on that id and
@@ -458,15 +461,15 @@ bool AgentLoop::doObservations(size_t& bytesAllowed, bool* capped) {
   // half until the body fits. What is left stays in the ring with the moment each entry was
   // heard, which is what the next wake posts (the ring's own rule, Observations.h).
   if (!retrying) {
-    while (len > bytesAllowed && batchCount_ > 1) {
+    while (len > meter_.bytesLeft() && batchCount_ > 1) {
       const size_t fewer = batchCount_ / 2;
       batchCount_ = 0;
       len = buildBatch(now, g_batchJson, sizeof g_batchJson, fewer);
     }
   }
-  if (len > bytesAllowed) {
+  if (len > meter_.bytesLeft()) {
     LOG_I("observations: the shortest batch is %u bytes and this wake has %u left; the ring keeps them",
-          static_cast<unsigned>(len), static_cast<unsigned>(bytesAllowed));
+          static_cast<unsigned>(len), static_cast<unsigned>(meter_.bytesLeft()));
     // Nothing went out under this id, so a batch that was built here is forgotten whole: the next
     // wake builds a full one again rather than inheriting a count a byte cap shortened.
     if (!retrying) {
@@ -489,7 +492,8 @@ bool AgentLoop::doObservations(size_t& bytesAllowed, bool* capped) {
 
   int accepted = 0;
   bool duplicate = false;
-  const bool ok = server_->postObservations(g_batchJson, len, accepted, duplicate);
+  const bool ok =
+      meter_.spend(len, [&] { return server_->postObservations(g_batchJson, len, accepted, duplicate); });
   if (ok) {
     counters_.batches++;
     counters_.observationsPosted += static_cast<uint32_t>(batchCount_);
@@ -498,7 +502,6 @@ bool AgentLoop::doObservations(size_t& bytesAllowed, bool* capped) {
     LOG_I("observations: %u posted, %d accepted%s", static_cast<unsigned>(batchCount_), accepted,
           duplicate ? " (the server had this batch already)" : "");
     ring_.consume(batchCount_);
-    bytesAllowed -= len;
     batchCount_ = 0;
     batchId_[0] = '\0';
     succeeded();
@@ -542,18 +545,9 @@ void AgentLoop::doJobs() {
 // much as it can - and every one of them is measured on the platform's millisecond clock, which
 // in a test is the clock the test moves (support/FakePlatform.h).
 
-uint32_t AgentLoop::wakeMsLeft() const {
-  if (wakeBudget_.wakeSeconds == 0) return 0xFFFFFFFFu;
-  const uint32_t whole = wakeBudget_.wakeSeconds * 1000u;
-  const uint32_t spent = millis() - wakeStartedAtMs_;
-  return spent >= whole ? 0 : whole - spent;
-}
+uint32_t AgentLoop::wakeMsLeft() const { return meter_.wakeMsLeft(); }
 
-bool AgentLoop::uplinkTimeLeft() const {
-  if (wakeMsLeft() == 0) return false;
-  if (wakeBudget_.uplinkSeconds == 0) return true;
-  return uplinkSpentMs_ < wakeBudget_.uplinkSeconds * 1000u;
-}
+bool AgentLoop::uplinkTimeLeft() const { return meter_.timeLeft(); }
 
 int AgentLoop::transactionsLeft() const {
   if (intent_.maxTransactionsThisWake <= 0) return 0x7FFFFFFF;
@@ -583,10 +577,7 @@ void AgentLoop::wakeConfig(WakeReport& report) {
     report.config = StepOutcome::NoTime;
     return;
   }
-  const uint32_t at = millis();
-  const bool ok = doConfig();
-  uplinkSpentMs_ += millis() - at;
-  report.config = ok ? StepOutcome::Done : StepOutcome::Failed;
+  report.config = doConfig() ? StepOutcome::Done : StepOutcome::Failed;
 }
 
 void AgentLoop::wakeHeartbeat(WakeReport& report) {
@@ -598,9 +589,7 @@ void AgentLoop::wakeHeartbeat(WakeReport& report) {
   // heartbeat that fell due from inside its own wait (heartbeatIfOverdue), exactly as on the
   // board. At an interval of an hour that never happens, which is the point of proposing one.
   heartbeatScheduled_ = true;
-  const uint32_t at = millis();
   const bool ok = doHeartbeat();
-  uplinkSpentMs_ += millis() - at;
   report.heartbeat = ok ? StepOutcome::Done : StepOutcome::Failed;
   if (ok) report.serverTime = lastServerTimeUnix_;
 }
@@ -611,18 +600,9 @@ void AgentLoop::wakeResults(WakeReport& report) {
     report.results = StepOutcome::NoTime;
     return;
   }
-  if (wakeBytesLeft_ == 0) {
-    report.results = StepOutcome::NoBudget;
-    return;
-  }
   const uint32_t failuresBefore = jobs_->postFailures();
-  const size_t bytesBefore = wakeBytesLeft_;
-  int posted = 0;
-  const uint32_t at = millis();
-  jobs_->flushResults(wakeBytesLeft_, posted);
-  uplinkSpentMs_ += millis() - at;
+  const int posted = jobs_->flushResults();
   report.resultsFlushed = posted;
-  report.bytesPosted += bytesBefore - wakeBytesLeft_;
   counters_.resultsPosted += static_cast<uint32_t>(posted);
   if (posted > 0) LOG_I("jobs: %d result(s) that waited went through", posted);
   if (jobs_->postFailures() > failuresBefore) {
@@ -652,9 +632,7 @@ void AgentLoop::wakeJobs(WakeReport& report) {
           transactionsLeft(), intent_.maxTransactionsThisWake);
     return;
   }
-  const uint32_t at = millis();
   const int count = jobs_->claim(max);
-  uplinkSpentMs_ += millis() - at;
   if (count < 0) {
     counters_.claimFailures++;
     report.claim = StepOutcome::Failed;
@@ -679,8 +657,11 @@ void AgentLoop::wakeJobs(WakeReport& report) {
     // A job this wake cannot finish is reported `failed` with *wake budget* and nothing is sent
     // for it: what must never happen is a job claimed, leased, and silent (EXIT-NODES §6 as
     // built in meshmaster.dk's task 121 - what is left behind is queued and bound to nothing,
-    // and a job the server did hand over is this agent's to answer). Its own result's bytes are
-    // not counted against the byte cap: answering the lease comes first.
+    // and a job the server did hand over is this agent's to answer). Its result goes through the
+    // same budget as every other post (task p1.6-21), and when that has run out the result is
+    // **kept** in the offline buffer rather than posted past the cap: "offline is normal" and a
+    // late result is still taken (EXIT-NODES §5), which is the way of answering a lease that
+    // costs no byte this wake has not got.
     if (price > left) {
       std::snprintf(why, sizeof why, "wake budget: %d transaction(s) left of this wake's %d and %s needs about %d",
                     left, intent_.maxTransactionsThisWake, job.type, price);
@@ -714,17 +695,9 @@ void AgentLoop::wakeObservations(WakeReport& report) {
       report.observations = StepOutcome::NoTime;
       break;
     }
-    if (wakeBytesLeft_ == 0) {
-      report.observations = StepOutcome::NoBudget;
-      break;
-    }
     const size_t before = ring_.size();
-    const size_t bytesBefore = wakeBytesLeft_;
     bool capped = false;
-    const uint32_t at = millis();
-    const bool ok = doObservations(wakeBytesLeft_, &capped);
-    uplinkSpentMs_ += millis() - at;
-    report.bytesPosted += bytesBefore - wakeBytesLeft_;
+    const bool ok = doObservations(&capped);
     if (!ok) {
       report.observations = capped ? StepOutcome::NoBudget : StepOutcome::Failed;
       break;
@@ -743,13 +716,14 @@ WakeReport AgentLoop::wake(const WakeIntent& intent, const Budget& budget) {
   }
 
   intent_ = intent;
-  wakeBudget_ = budget;
   inWake_ = true;
   wakeReport_ = &report;
   wakeStartedAtMs_ = millis();
-  uplinkSpentMs_ = 0;
   transactionsAtWakeStart_ = jobs_->gate().transmissions();
-  wakeBytesLeft_ = budget.postBytes == 0 ? kNoByteCap : budget.postBytes;
+  // The three bounds every call of this wake is measured against, the runner's with the loop's:
+  // one ledger, one byte cap, one set of uplink seconds (task p1.6-21).
+  meter_.beginWake(budget.wakeSeconds, budget.uplinkSeconds, budget.postBytes);
+  const uint32_t keptBefore = jobs_->resultsKeptForBudget();
 
   if (halted_) {
     // A 401 is still a 401 after a sleep: nothing is sent until a person fixes the token.
@@ -778,20 +752,28 @@ WakeReport AgentLoop::wake(const WakeIntent& intent, const Budget& budget) {
   report.halted = halted_;
   report.acceptedIntervalS = pollIntervalS_;
   report.sleepAtLeastS = retrySeconds();
+  // Every byte and every millisecond this wake spent at the server, whichever step spent it.
+  report.bytesPosted = meter_.bytesPosted();
+  report.uplinkMs = meter_.uplinkSpentMs();
+  report.resultsKept = static_cast<int>(jobs_->resultsKeptForBudget() - keptBefore);
   report.transactionsSpent = static_cast<int>(jobs_->gate().transmissions() - transactionsAtWakeStart_);
   report.observationsLeft = static_cast<int>(ring_.size());
   report.elapsedMs = millis() - wakeStartedAtMs_;
   report.counters = counters_;
   inWake_ = false;
   wakeReport_ = nullptr;
+  meter_.endWake();
 
   LOG_I("wake: config %s, heartbeat %s, results %s, claim %s, jobs %s, observations %s", stepOutcomeName(report.config),
         stepOutcomeName(report.heartbeat), stepOutcomeName(report.results), stepOutcomeName(report.claim),
         stepOutcomeName(report.jobs), stepOutcomeName(report.observations));
-  LOG_I("wake: %d job(s) run, %d not run, %d transaction(s), %d batch(es), %u byte(s) in %lu ms; next in %d s%s%s",
+  LOG_I("wake: %d job(s) run, %d not run, %d transaction(s), %d batch(es), %u byte(s) posted; %lu ms of %lu at "
+        "the server%s; next in %d s%s%s",
         report.jobsRun, report.jobsNotRun, report.transactionsSpent, report.batchesPosted,
-        static_cast<unsigned>(report.bytesPosted), static_cast<unsigned long>(report.elapsedMs),
-        report.acceptedIntervalS, report.sleepAtLeastS > 0 ? ", holding off first" : "",
+        static_cast<unsigned>(report.bytesPosted), static_cast<unsigned long>(report.uplinkMs),
+        static_cast<unsigned long>(report.elapsedMs),
+        report.resultsKept > 0 ? ", a result kept: budget" : "", report.acceptedIntervalS,
+        report.sleepAtLeastS > 0 ? ", holding off first" : "",
         report.why[0] == '\0' ? "" : " - nothing was sent");
   if (report.why[0] != '\0') LOG_I("wake: %s", report.why);
   return report;

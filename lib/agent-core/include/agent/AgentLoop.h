@@ -72,6 +72,7 @@
 #include <agent/Observations.h>
 #include <agent/ServerPolicy.h>
 #include <agent/TextOut.h>
+#include <agent/UplinkMeter.h>
 
 namespace mm {
 
@@ -102,9 +103,6 @@ int transactionsOf(const ClaimedJob& job);
 // types are not known until the claim has answered.
 constexpr int kTransactionsPerJobAtLeast = 2;
 
-// "No byte cap": what `loop()` posts with, and what a Budget of 0 bytes means.
-constexpr size_t kNoByteCap = static_cast<size_t>(-1);
-
 // What one wake promises the server, in the heartbeat (EXIT-NODES §6, *An agent that paces
 // itself*). Both fields are 0 for an agent that proposes nothing - the Heltec, whose heartbeat
 // bytes are then exactly what they were - and `loop()` never sets either.
@@ -128,11 +126,17 @@ struct Budget {
   // said so in the report (the Walter's *no time*, docs/ARCHITECTURE.md §10).
   uint32_t wakeSeconds = 0;
   // Of that, what the calls to meshmaster.dk together may take: an LTE attach that went badly
-  // must not eat the slice the radio needs.
+  // must not eat the slice the radio needs. **Every** call the wake makes is in it - the config,
+  // the heartbeat, the claim, every result and every batch - because they all go through one
+  // ledger (agent/UplinkMeter.h, task p1.6-21). When it is spent the wake stops calling the
+  // server and keeps what is left for the next wake.
   uint32_t uplinkSeconds = 0;
-  // The bytes of body this wake may post - results and observation batches, the two things that
-  // carry weight - because an LTE plan is metered in bytes. What does not fit stays where it is,
-  // with the timestamps it was made with, for the next wake.
+  // The bytes of body this wake may post, because an LTE plan is metered in bytes: **every**
+  // body it posts, from every step - the offline buffer, every result of a job it claimed, every
+  // observation batch - against one number (task p1.6-21). What does not fit stays where it is,
+  // with the timestamps it was made with, for the next wake. The bytes of the config call, the
+  // heartbeat and the claim are not counted here: those bodies are the uplink implementation's
+  // to write and are not countable from inside the library. Their seconds are counted.
   size_t postBytes = 0;
 };
 
@@ -181,6 +185,13 @@ struct WakeReport {
   uint32_t sleepAtLeastS = 0;  // a backoff or a Retry-After: do not come back before this
 
   int resultsFlushed = 0;      // results that had been waiting and went through
+  // Results this wake could not post inside its byte cap or its uplink seconds: **kept** in the
+  // offline buffer, behind whatever was already there, for the next wake to post with the
+  // timestamps they were made with (*kept: budget*). A bound of ours is not a failure of the
+  // server's, so nothing backs off for one; what must never happen is a claimed job left leased
+  // and silent, and a kept result is the buffer's answer to that (EXIT-NODES §5, *offline is
+  // normal*).
+  int resultsKept = 0;
   int jobsClaimed = 0;
   int jobsRun = 0;
   int jobsNotRun = 0;          // claimed, never on the air: reported `failed`, *wake budget*
@@ -188,7 +199,8 @@ struct WakeReport {
   int observationsPosted = 0;
   int observationsLeft = 0;    // still in the ring when the wake ended
   int transactionsSpent = 0;   // what went on the air, against the intent's cap
-  size_t bytesPosted = 0;
+  size_t bytesPosted = 0;      // every byte of body this wake posted, from every step
+  uint32_t uplinkMs = 0;       // what the server calls took together, which uplinkSeconds bounds
   uint32_t elapsedMs = 0;
 
   bool halted = false;         // a 401: nothing more is sent until a person fixes it
@@ -325,12 +337,12 @@ class AgentLoop {
   bool doConfig();
   bool doHeartbeat();
   void doPendingResults();
-  // One observation batch, bounded by what a wake may still post: `bytesAllowed` is decremented
-  // by the body that went through, and a batch that will not fit is shortened until it does.
-  // `loop()` passes kNoByteCap, which is what it always had.
+  // One observation batch, bounded by what a wake may still post (the ledger's `bytesLeft`): a
+  // batch that will not fit is shortened until it does, and `loop()`, whose ledger has no
+  // bounds, sends the batch it always sent.
   // `capped` says the batch would not fit in the bytes left rather than the server having
   // refused it, which are the two ways this returns false and two different things to report.
-  bool doObservations(size_t& bytesAllowed, bool* capped = nullptr);
+  bool doObservations(bool* capped = nullptr);
   void doJobs();
   void buildHeartbeat(Heartbeat& hb);
   // The steps of one wake, each of which records its own outcome in the report.
@@ -409,12 +421,15 @@ class AgentLoop {
   // the loop: `wake()` sets it and `loop()` never does, so a board that only ever calls `loop()`
   // proposes nothing and its heartbeat bytes are what they always were.
   WakeIntent intent_;
-  Budget wakeBudget_;
+  // The budget itself is not kept here: `wake()` hands it straight to the ledger below, which is
+  // what every bound of it is read off (and the transaction cap is the intent's).
   bool inWake_ = false;             // the reboot guard is told, not taken; a BackOff returns
   uint32_t wakeStartedAtMs_ = 0;
-  uint32_t uplinkSpentMs_ = 0;      // the server calls of this wake, together
   uint32_t transactionsAtWakeStart_ = 0;  // the gate's count when the wake began
-  size_t wakeBytesLeft_ = kNoByteCap;
+  // What this wake spends at the server - its seconds and its bytes - and the one place every
+  // call of the library is made from, this object's and the runner's alike (agent/UplinkMeter.h,
+  // task p1.6-21). `begin()` lends it to the runner; `loop()` uses it with no bounds set.
+  UplinkMeter meter_;
   WakeReport* wakeReport_ = nullptr;  // the report being filled, for noteFailure's reboot line
   // The server time the last heartbeat reply carried, 0 when none has.
   uint32_t lastServerTimeUnix_ = 0;

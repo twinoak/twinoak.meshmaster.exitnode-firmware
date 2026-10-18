@@ -11,12 +11,24 @@
 // Nothing sleeps and nothing restarts: the clock is the test's (support/FakePlatform.h) and
 // `rebootForHealth` records its reason and throws, because the method may not return and a test
 // that saw the guard fire must not fall through into the rest of the loop.
+//
+// Since task p1.6-21 the wake cases also hold **the budget over every call a wake makes**: the
+// fake server charges every call the same milliseconds on that clock and records the bytes of
+// every body it was handed, so "the uplink's seconds" and "the bytes posted" are arithmetic and
+// not an estimate - and the last two cases of the file read the library's own text for the rule
+// that cannot be reached from outside: that no call to the server is made anywhere but through
+// the wake's ledger.
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -33,7 +45,18 @@
 #include <support/Fixtures.h>
 #include <support/Jobs.h>
 
+#ifndef PROJECT_DIR
+#error "PROJECT_DIR must be defined; platformio.ini's [env:native] does it"
+#endif
+
 namespace {
+
+namespace fs = std::filesystem;
+
+std::string readFile(const fs::path& path) {
+  std::ifstream in(path, std::ios::binary);
+  return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
 
 constexpr uint32_t kNow = 1790000000;
 constexpr uint32_t kLease = kNow + 1800;
@@ -718,9 +741,16 @@ TEST_F(LoopTest, AJobTheWakesTransactionCapHasNoRoomForIsFailedTheSameWay) {
 }
 
 TEST_F(LoopTest, NoWakeEverLeavesAJobLeasedAndSilent) {
-  // The property, over a spread of budgets, caps and claims: **every job a claim handed over has
-  // a posted result**, whether it ran, overran or was never sent. The randomness is seeded, so a
-  // failure is the same failure twice.
+  // The property, over a spread of budgets, transaction caps, byte caps and claims: **every job a
+  // claim handed over is answered** - posted in the wake that ran it, or kept in the offline
+  // buffer and posted by a later one - and the results reach the server **in the order they were
+  // made**, under any cap. Nothing is dropped and nothing is left leased and silent. The
+  // randomness is seeded, so a failure is the same failure twice.
+  //
+  // Since task p1.6-21 the byte cap is part of it: every other round is metered, which also means
+  // every other round starts with results in the buffer from the one before. `owed` is what has
+  // been claimed and not yet posted, and the invariant that ties the two halves together is
+  // `owed.size() == jobs.queueDepth()` - what is owed is exactly what the buffer holds.
   uint32_t seed = 0x1f35c6d1u;
   const auto next = [&seed]() {
     seed ^= seed << 13;
@@ -729,6 +759,9 @@ TEST_F(LoopTest, NoWakeEverLeavesAJobLeasedAndSilent) {
     return seed;
   };
   const char* const shapes[] = {"trace", "status", "telemetry", "config.read", "cli"};
+
+  std::set<long long> owed;             // claimed, not yet posted: the buffer's contents
+  std::vector<long long> postedInOrder; // every result the server was handed, in the order it came
 
   for (int round = 0; round < 24; round++) {
     server.forgetCalls();
@@ -756,28 +789,57 @@ TEST_F(LoopTest, NoWakeEverLeavesAJobLeasedAndSilent) {
 
     mm::Budget budget;
     budget.wakeSeconds = 1 + next() % 400u;
+    // Every other round is on a metered plan, and a cap of a few hundred to a few thousand bytes
+    // is one result's worth or two: so some rounds post everything, some post what fits and keep
+    // the rest, and the round after a metered one begins with a buffer to drain.
+    const bool metered = round % 2 == 0;
+    if (metered) budget.postBytes = 300 + next() % 3000u;
     const mm::WakeReport report = loop.wake(hourly(1 + static_cast<int>(next() % 8u)), budget);
 
     ASSERT_EQ(report.jobsRun + report.jobsNotRun, report.jobsClaimed)
         << "round " << round << ": a claimed job was neither run nor answered";
     // A claim takes the oldest of what is queued, in order, so the first `jobsClaimed` ids of
-    // this round are the ones this wake is answerable for - and every one of them has a result.
+    // this round are the ones this wake is answerable for.
     ASSERT_LE(static_cast<size_t>(report.jobsClaimed), queuedIds.size());
-    for (int i = 0; i < report.jobsClaimed; i++) {
-      const long long id = queuedIds[static_cast<size_t>(i)];
-      bool answered = false;
-      for (const fake::PostedResult& posted : server.results()) {
-        if (posted.jobId == id) answered = true;
-      }
-      // Or it is in the offline buffer, which is a result the server will be given later; this
-      // fake server answers every post, so nothing should be waiting.
-      EXPECT_TRUE(answered) << "round " << round << ": job " << id << " was claimed and never answered";
+    for (int i = 0; i < report.jobsClaimed; i++) owed.insert(queuedIds[static_cast<size_t>(i)]);
+    for (const fake::PostedResult& posted : server.results()) {
+      postedInOrder.push_back(posted.jobId);
+      owed.erase(posted.jobId);
+    }
+    // What is owed is exactly what the buffer holds: nothing claimed is forgotten, and nothing
+    // is waiting that was not claimed.
+    EXPECT_EQ(owed.size(), static_cast<size_t>(jobs.queueDepth())) << "round " << round;
+    EXPECT_EQ(jobs.resultsDropped(), 0u) << "round " << round << ": a result was lost";
+    if (metered) {
+      EXPECT_LE(report.bytesPosted, budget.postBytes) << "round " << round << ": the byte cap was passed";
     }
     // And whatever was left behind is still queued and bound to nothing, for the next wake.
     EXPECT_EQ(server.queuedJobs(), queuedIds.size() - static_cast<size_t>(report.jobsClaimed)) << "round " << round;
-    ASSERT_EQ(jobs.queueDepth(), 0) << "round " << round;
     // And the cap was honoured, which is the other half of the promise to the server.
     EXPECT_LE(report.transactionsSpent, 8 + 33) << "round " << round;
+  }
+
+  // One wake with no cap at the end: the buffer drains, and then **every** job any round claimed
+  // has a posted result.
+  server.forgetCalls();
+  server.forgetQueued();
+  server.answerHeartbeat(mm::kDefaultMaxTransactionsPerMinute, mm::kDefaultMinGapSeconds, 3600, false,
+                         platform.clock().now());
+  const mm::WakeReport drain = loop.wake(hourly(), mm::Budget());
+  EXPECT_EQ(drain.resultsKept, 0);
+  for (const fake::PostedResult& posted : server.results()) {
+    postedInOrder.push_back(posted.jobId);
+    owed.erase(posted.jobId);
+  }
+  EXPECT_TRUE(owed.empty()) << owed.size() << " claimed job(s) were never answered, the first being " << *owed.begin();
+  EXPECT_EQ(jobs.queueDepth(), 0);
+  EXPECT_EQ(jobs.resultsDropped(), 0u);
+  // The order: ids were handed out in increasing order and a result is made as its job ends, so
+  // the server saw them in the order they were made if and only if this list is increasing.
+  ASSERT_FALSE(postedInOrder.empty());
+  for (size_t i = 1; i < postedInOrder.size(); i++) {
+    EXPECT_GT(postedInOrder[i], postedInOrder[i - 1])
+        << "result " << i << " (job " << postedInOrder[i] << ") reached the server out of order";
   }
 }
 
@@ -849,6 +911,179 @@ TEST_F(LoopTest, AByteCapPostsAsManyBatchesAsItFitsAndTheRestWaitForTheNextWake)
   EXPECT_LE(at, heardAtEpoch + 2) << "an hour late, and still stamped with when it was heard";
   EXPECT_GE(at + 2, heardAtEpoch);
   EXPECT_GE(platform.clock().now() - at, 3500u);
+}
+
+// ---------------------------------------------------------------------------------------------
+// A wake keeps its budget (task p1.6-21): every call it makes, and every byte it posts
+//
+// 18 gave a wake four bounds and two of them leaked at the job step: `JobRunner::post()` began
+// with the **whole** offline buffer flushed under no cap, and none of the job step's posts was in
+// `report.bytesPosted` or in the uplink's seconds. One claimed job could post a day of kept
+// results on a plan priced by the byte. Now every call either object makes goes through one
+// ledger (agent/UplinkMeter.h), and these cases are its arithmetic.
+
+TEST_F(LoopTest, EveryCallOfAWakeIsInItsUplinkSecondsAndEveryPostedByteInItsBytes) {
+  // The fake charges every call the same hundred milliseconds of the test's clock, so "the
+  // uplink's seconds" is a multiplication - and the job's own waits on the radio, which are the
+  // rest of the wake, are deliberately not in it.
+  server.setCallMs(100);
+  server.answerHeartbeat(60, 1, 3600, true, platform.clock().now());
+  server.failResults(fake::FakeUplink::Fault::Unreachable, 1);
+  server.queue(fake::Job(14100, "trace").leasedUntil(kLease).json());
+
+  // The first wake of the boot: the config call, the heartbeat, the claim, and a result the
+  // server would not take - four calls, and nothing of it arrived.
+  const mm::WakeReport first = loop.wake(hourly(), mm::Budget());
+  ASSERT_EQ(first.jobsRun, 1);
+  ASSERT_EQ(jobs.queueDepth(), 1) << "the result the server refused";
+  EXPECT_EQ(server.calls().size(), 4u) << "config, heartbeat, claim, result";
+  EXPECT_EQ(first.uplinkMs, 100u * server.calls().size()) << "the config call is in the wake's seconds too";
+  EXPECT_EQ(first.bytesPosted, 0u) << "the result did not arrive, so no byte of it was posted";
+
+  // The second: the kept result, then the claim, the new result and the batch. Five calls of four
+  // kinds, and the bytes are the bodies the fake was handed - from every step, which is the half
+  // of this that leaked.
+  server.forgetCalls();
+  server.queue(fake::Job(14101, "trace").leasedUntil(platform.clock().now() + 1800).json());
+  for (uint8_t i = 0; i < mm::kObservationBatchSize; i++) loop.ring().push(advert(i, platform.millis()));
+
+  const mm::WakeReport second = loop.wake(hourly(), mm::Budget());
+
+  ASSERT_EQ(server.calls().size(), 5u) << "heartbeat, result, claim, result, observations";
+  EXPECT_EQ(server.calls()[1], "result") << "the buffer, before the claim";
+  EXPECT_EQ(second.uplinkMs, 500u);
+  EXPECT_EQ(second.resultsFlushed, 1);
+  EXPECT_EQ(second.jobsRun, 1);
+  EXPECT_EQ(second.batchesPosted, 1);
+  size_t bodies = 0;
+  for (const fake::PostedResult& posted : server.results()) bodies += posted.body.size();
+  for (const std::string& batch : server.observations()) bodies += batch.size();
+  ASSERT_EQ(server.results().size(), 2u) << "the kept one and this wake's own";
+  EXPECT_EQ(second.bytesPosted, bodies) << "every byte of body, from every step";
+  EXPECT_GT(second.bytesPosted, 0u);
+  EXPECT_GT(second.elapsedMs, second.uplinkMs) << "the job's own waits are not the server's seconds";
+}
+
+TEST_F(LoopTest, AKeptResultGoesFirstAndANewOneWaitsBehindItUnderACapThatFitsOne) {
+  // A cap that fits one of the two: the **older** result goes and the new one is kept behind it.
+  // Posting the new one because it happened to fit would put the server's view of this exit node
+  // out of order, which is the one thing the offline buffer exists to prevent (EXIT-NODES §5).
+  server.answerHeartbeat(60, 1, 3600, true, platform.clock().now());
+  server.failResults(fake::FakeUplink::Fault::Unreachable, 1);
+  server.queue(fake::Job(14110, "trace").leasedUntil(kLease).json());
+
+  ASSERT_EQ(loop.wake(hourly(), mm::Budget()).jobsRun, 1);
+  ASSERT_EQ(jobs.queueDepth(), 1);
+  // What the kept result weighs, exactly: the buffer's own figure, not an estimate.
+  const size_t kept = jobs.results().bytes();
+  ASSERT_GT(kept, 0u);
+
+  server.forgetCalls();
+  server.queue(fake::Job(14111, "trace").leasedUntil(platform.clock().now() + 1800).json());
+  mm::Budget budget;
+  budget.postBytes = kept;  // the one that waited, and not a byte more
+
+  const mm::WakeReport report = loop.wake(hourly(), budget);
+
+  EXPECT_EQ(report.results, mm::StepOutcome::Done);
+  EXPECT_EQ(report.resultsFlushed, 1);
+  EXPECT_EQ(report.jobsRun, 1) << "the job still ran: the cap is on what is posted";
+  EXPECT_EQ(report.resultsKept, 1) << "and its result did not fit: kept: budget";
+  EXPECT_EQ(report.bytesPosted, kept) << "to the byte, and not one past the cap";
+  ASSERT_EQ(server.results().size(), 1u);
+  EXPECT_EQ(server.results()[0].jobId, 14110) << "the older result went first";
+  EXPECT_EQ(jobs.queueDepth(), 1) << "and the new one is in the buffer, behind nothing";
+  EXPECT_EQ(jobs.postFailures(), 1u) << "a byte cap of ours is not a failure of the server's";
+  EXPECT_EQ(report.counters.consecutiveFailures, 0u) << "and nothing backs off for it";
+  EXPECT_TRUE(fake::LogCapture::the().holds("kept: budget"));
+
+  // The next wake, with room, posts it - with the timestamps it was made with.
+  server.forgetCalls();
+  platform.advanceSeconds(3600);
+  const mm::WakeReport after = loop.wake(hourly(), mm::Budget());
+  EXPECT_EQ(after.resultsFlushed, 1);
+  ASSERT_EQ(server.results().size(), 1u);
+  EXPECT_EQ(server.results()[0].jobId, 14111);
+  EXPECT_EQ(jobs.queueDepth(), 0);
+  uint32_t finishedAt = 0;
+  ASSERT_TRUE(mm::parseUtc(memberOf(server.results()[0].body, "finishedAt").c_str(), finishedAt));
+  EXPECT_GE(platform.clock().now() - finishedAt, 3500u) << "an hour late, with its own timestamps";
+}
+
+TEST_F(LoopTest, AnUplinkBudgetSpentAtTheJobStepKeepsTheResultRatherThanPostingPastIt) {
+  // The other bound, at the same place: a second of uplink per call and three seconds to spend,
+  // which the config call, the heartbeat and the claim use up. The job runs - its airtime is not
+  // the uplink's - and its result is kept rather than posted outside the budget.
+  server.setCallMs(1000);
+  server.answerHeartbeat(60, 1, 3600, true, platform.clock().now());
+  server.queue(fake::Job(14120, "trace").leasedUntil(kLease).json());
+  mm::Budget budget;
+  budget.uplinkSeconds = 3;
+
+  const mm::WakeReport report = loop.wake(hourly(), budget);
+
+  EXPECT_EQ(report.claim, mm::StepOutcome::Done);
+  EXPECT_EQ(report.jobsRun, 1);
+  EXPECT_EQ(report.resultsKept, 1);
+  EXPECT_EQ(report.uplinkMs, 3000u) << "three calls of a second, and the fourth was not made";
+  EXPECT_EQ(report.bytesPosted, 0u);
+  EXPECT_TRUE(server.results().empty()) << "the wake's seconds at the server were spent";
+  EXPECT_EQ(jobs.queueDepth(), 1);
+  EXPECT_EQ(jobs.postFailures(), 0u) << "nothing failed: the wake stopped posting";
+  EXPECT_GT(report.elapsedMs, report.uplinkMs);
+
+  // And the next wake posts it, which is what makes keeping it an answer and not a loss.
+  server.forgetCalls();
+  const mm::WakeReport next = loop.wake(hourly(), mm::Budget());
+  EXPECT_EQ(next.resultsFlushed, 1);
+  ASSERT_EQ(server.results().size(), 1u);
+  EXPECT_EQ(server.results()[0].jobId, 14120);
+}
+
+TEST_F(LoopTest, AWakeWhoseCapNoPostCanFitPostsNothingAndKeepsEverything) {
+  // A cap of nothing, spelled one byte: `Budget::postBytes` of 0 is "no bound", as every bound in
+  // a Budget is, and no result and no batch this firmware writes is one byte long. The heartbeat
+  // still goes - the byte cap is on what the library's own steps post, and a wake that could not
+  // say hello would be a wake that learns nothing - and everything else waits.
+  server.answerHeartbeat(60, 1, 3600, true, platform.clock().now());
+  server.failResults(fake::FakeUplink::Fault::Unreachable, 1);
+  server.queue(fake::Job(14130, "trace").leasedUntil(kLease).json());
+  ASSERT_EQ(loop.wake(hourly(), mm::Budget()).jobsRun, 1);
+  ASSERT_EQ(jobs.queueDepth(), 1);
+
+  server.forgetCalls();
+  server.queue(fake::Job(14131, "trace").leasedUntil(platform.clock().now() + 1800).json());
+  for (uint8_t i = 0; i < mm::kObservationBatchSize; i++) loop.ring().push(advert(i, platform.millis()));
+  mm::Budget budget;
+  budget.postBytes = 1;
+
+  const mm::WakeReport report = loop.wake(hourly(), budget);
+
+  EXPECT_EQ(report.heartbeat, mm::StepOutcome::Done) << "the heartbeat is not what a byte cap stops";
+  EXPECT_EQ(report.results, mm::StepOutcome::NoBudget);
+  EXPECT_EQ(report.resultsFlushed, 0);
+  EXPECT_EQ(report.jobsRun, 1);
+  EXPECT_EQ(report.resultsKept, 1);
+  EXPECT_EQ(report.observations, mm::StepOutcome::NoBudget);
+  EXPECT_EQ(report.batchesPosted, 0);
+  EXPECT_EQ(report.bytesPosted, 0u);
+  EXPECT_TRUE(server.results().empty());
+  EXPECT_TRUE(server.observations().empty());
+  EXPECT_EQ(jobs.queueDepth(), 2) << "both results wait, in the order they were made";
+  EXPECT_EQ(jobs.resultsDropped(), 0u);
+  EXPECT_EQ(loop.ring().size(), mm::kObservationBatchSize) << "and every advert is still in the ring";
+  EXPECT_EQ(loop.ring().dropped(), 0u);
+  EXPECT_EQ(report.observationsLeft, static_cast<int>(mm::kObservationBatchSize));
+
+  // Nothing of it was lost: a wake with room posts the two results, oldest first, and the batch.
+  server.forgetCalls();
+  const mm::WakeReport after = loop.wake(hourly(), mm::Budget());
+  EXPECT_EQ(after.resultsFlushed, 2);
+  ASSERT_EQ(server.results().size(), 2u);
+  EXPECT_EQ(server.results()[0].jobId, 14130);
+  EXPECT_EQ(server.results()[1].jobId, 14131);
+  EXPECT_EQ(after.batchesPosted, 1);
+  EXPECT_EQ(loop.ring().size(), 0u);
 }
 
 TEST_F(LoopTest, AServerThatIsAwayIsABackoffTheCallerSleepsThroughAndTheNextWakeHonoursIt) {
@@ -1047,6 +1282,109 @@ TEST_F(LoopTest, TheAirtimeGateStillPacesAWakeWithRoomForSixTransactions) {
     EXPECT_GE(sends[i].atMs - sends[i - 1].atMs, 20000u) << "send " << i << " came too soon after " << (i - 1);
   }
   EXPECT_GE(platform.millis() - began, 20000u) << "a paced wake takes the time the pacing costs";
+}
+
+// ---------------------------------------------------------------------------------------------
+// The rule the fakes cannot reach: there is one place a call to the server is made from
+//
+// Every case above holds what a wake spends. These two hold that it *cannot* spend anything
+// uncounted: the library's own text, read for the seven calls `IUplink` has and for where they
+// are made. A call added to a step tomorrow and counted nowhere is a red build here, which is
+// what "through one place" has to mean to be worth saying.
+
+// The calls of IUplink: its virtual methods that are not `const`. The seven of API §3 cost a
+// request each; the accessors beside them (`configured`, `link`, `lastCall`, ...) are reads of
+// what the last one left and cost nothing. The list comes out of the header rather than being
+// typed here, so a call added to the interface is a call this test looks for.
+std::vector<std::string> uplinkCalls() {
+  const std::string header = readFile(fs::path(PROJECT_DIR) / "lib/agent-core/include/agent/IUplink.h");
+  std::vector<std::string> names;
+  size_t at = 0;
+  while ((at = header.find("virtual ", at)) != std::string::npos) {
+    const size_t eol = header.find('\n', at);
+    const size_t open = header.find('(', at);
+    at += 8;
+    if (open == std::string::npos || eol == std::string::npos || open > eol) continue;
+    const size_t close = header.find(')', open);
+    if (close == std::string::npos) continue;
+    if (header.compare(close, 7, ") const") == 0) continue;  // an accessor: no request, no time
+    size_t start = open;
+    while (start > 0) {
+      const char c = header[start - 1];
+      if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '~')) break;
+      start--;
+    }
+    const std::string name = header.substr(start, open - start);
+    if (name.empty() || name[0] == '~') continue;
+    names.push_back(name);
+  }
+  return names;
+}
+
+TEST(TheWakesLedger, EveryCallToTheServerInTheLibraryIsMadeThroughIt) {
+  const std::vector<std::string> calls = uplinkCalls();
+  ASSERT_GE(calls.size(), 7u) << "IUplink's calls could not be read out of the header";
+  for (const char* expected : {"fetchConfig", "postHeartbeat", "postObservations", "claimJobs", "postJobResult",
+                               "extendLease", "postProgress"}) {
+    EXPECT_NE(std::find(calls.begin(), calls.end(), std::string(expected)), calls.end())
+        << expected << " is not in the list this test checks";
+  }
+
+  int found = 0;
+  for (const char* file : {"lib/agent-core/src/AgentLoop.cpp", "lib/agent-core/src/JobRunner.cpp"}) {
+    const std::string text = readFile(fs::path(PROJECT_DIR) / file);
+    ASSERT_FALSE(text.empty()) << file;
+    size_t from = 0;
+    int line = 1;
+    while (from < text.size()) {
+      size_t eol = text.find('\n', from);
+      if (eol == std::string::npos) eol = text.size();
+      const std::string one = text.substr(from, eol - from);
+      for (const std::string& call : calls) {
+        if (one.find("server_->" + call + "(") == std::string::npos) continue;
+        found++;
+        EXPECT_NE(one.find("spend("), std::string::npos)
+            << file << ":" << line << " calls the server outside the wake's ledger:" << one;
+      }
+      from = eol + 1;
+      line++;
+    }
+  }
+  EXPECT_GE(found, 5) << "no call site was found at all: this test has stopped checking anything";
+}
+
+TEST(TheWakesLedger, TheRunnerHasNoUnboundedFlushAndAsksBeforeEveryPost) {
+  const std::string runner = readFile(fs::path(PROJECT_DIR) / "lib/agent-core/src/JobRunner.cpp");
+  ASSERT_FALSE(runner.empty());
+
+  // One flush, and it asks the budget about every body before it goes. The pair of overloads 18
+  // left - one bounded, one not - is what let the job step flush a day of results under no cap.
+  EXPECT_EQ(runner.find("flushResults(size_t"), std::string::npos) << "the unbounded flush is back";
+  const size_t flush = runner.find("int JobRunner::flushResults() {");
+  ASSERT_NE(flush, std::string::npos);
+  const size_t flushEnd = runner.find("\n}", flush);
+  ASSERT_NE(flushEnd, std::string::npos);
+  const std::string flushBody = runner.substr(flush, flushEnd - flush);
+  EXPECT_NE(flushBody.find("if (!mayPost(len))"), std::string::npos) << "the flush does not ask the budget";
+
+  // And `post()` - which every job's result goes through - flushes the queue first, asks before
+  // its own body goes out, and keeps it when the answer is no.
+  const size_t post = runner.find("bool JobRunner::post(long long jobId, const char* body, size_t len) {");
+  ASSERT_NE(post, std::string::npos);
+  const size_t postEnd = runner.find("\n}", post);
+  ASSERT_NE(postEnd, std::string::npos);
+  const std::string postBody = runner.substr(post, postEnd - post);
+  const size_t queueFirst = postBody.find("flushResults();");
+  const size_t asks = postBody.find("mayPost(len)");
+  const size_t sends = postBody.find("server_->postJobResult(");
+  const size_t keeps = postBody.find("results_.push(");
+  ASSERT_NE(queueFirst, std::string::npos) << "post() no longer posts the queue ahead of this result first";
+  ASSERT_NE(asks, std::string::npos) << "post() does not ask the budget";
+  ASSERT_NE(sends, std::string::npos);
+  ASSERT_NE(keeps, std::string::npos);
+  EXPECT_LT(queueFirst, sends) << "the queue goes first, or the server sees results out of order";
+  EXPECT_LT(asks, sends) << "the budget is asked before the body goes out";
+  EXPECT_NE(postBody.find("kept: budget"), std::string::npos) << "and a result the budget kept says so";
 }
 
 }  // namespace

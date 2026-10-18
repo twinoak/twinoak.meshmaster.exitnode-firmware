@@ -465,10 +465,23 @@ intent.maxTransactionsThisWake = 12;   // and what this wake has the energy for
 mm::Budget budget;
 budget.wakeSeconds = 240;              // the whole wake; 0 is "no bound"
 budget.uplinkSeconds = 60;             // of that, what the server calls together may take
-budget.postBytes = 16384;              // results and observation batches, for a metered plan
+budget.postBytes = 16384;              // every body this wake posts, for a metered plan
 
 const mm::WakeReport r = agent.wake(intent, budget);
 ```
+
+**A wake's byte and uplink budgets cover every call it makes.** Not only the
+loop's — the claim and every result a job posts go through the same ledger
+(`agent/UplinkMeter.h`), so `r.bytesPosted` is every byte of body the wake
+posted from every step and `r.uplinkMs` is what all its calls took together.
+What the budget has no room for is **kept**, never dropped and never posted out
+of turn: the oldest result goes first, a result that does not fit waits in the
+offline buffer behind the queue, and `r.resultsKept` counts it (*kept: budget*).
+That is a bound of yours and not a failure of the server's — nothing backs off
+for one, and the next wake posts it with the timestamps it was made with. The
+one thing the byte cap does not bound is the config call, the heartbeat and the
+claim: their bodies are written inside your `IUplink` and are not countable from
+here, though their seconds are counted like any other call's.
 
 The six steps run in this order, each recording its own outcome in the report —
 `Skipped`, `Done`, `Failed`, `NoTime` or `NoBudget`: **config** (only when this
@@ -483,9 +496,12 @@ allows).
 
 Three guarantees worth relying on: **no job a claim handed over is ever left
 leased and silent** — one the wake has no room for is reported `failed` with
-*wake budget* in its log, at no transaction and with nothing sent; **a backoff
-does not spin**, it comes back as `sleepAtLeastS`; and **the reboot guard does not
-fire**, it sets `rebootWanted` and the reason.
+*wake budget* in its log, at no transaction and with nothing sent, and one whose
+result the byte cap or the uplink seconds cannot carry is kept in the offline
+buffer for the next wake rather than posted past the budget (*offline is normal*:
+a late result is still taken, and de-duplicated on the client id it was written
+with); **a backoff does not spin**, it comes back as `sleepAtLeastS`; and **the
+reboot guard does not fire**, it sets `rebootWanted` and the reason.
 
 The transaction cap is the *intent's* `maxTransactionsThisWake` and not a field
 of `Budget`, deliberately: it is stated to the server in the heartbeat and
