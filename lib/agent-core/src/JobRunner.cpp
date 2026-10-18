@@ -1297,6 +1297,15 @@ Outcome JobRunner::runJob(const ClaimedJob& job, Context& ctx, size_t& dataLen) 
     g_log.add("%s", why);
     return Outcome::Unsupported;
   }
+  // The mesh's own answer for one of the thirteen (IMesh::supports, task p1.6-23). A type it
+  // cannot carry is not advertised, so the server routes none of it here - but a job claimed
+  // before a heartbeat said so, or one bound to this agent, can still arrive, and it is
+  // `unsupported` at no transaction with nothing sent, as a type nobody handles is. Asked
+  // before beginJob(), so the mesh is never given a job it has already declined.
+  if (!offered && !mesh_->supports(job.type)) {
+    g_log.add("this mesh cannot carry a '%s' job, so it is not advertised and nothing was sent", job.type);
+    return Outcome::Unsupported;
+  }
 
   uint8_t hashSize = 0;
   const uint8_t hops = pathToBytes(job, g_pathBytes, sizeof g_pathBytes, hashSize);

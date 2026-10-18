@@ -402,6 +402,70 @@ TEST_F(LoopTest, AnExtensionsTypesFollowTheThirteenInTheHeartbeat) {
       << "the thirteen first, then the extension's: " << types;
 }
 
+// The interface says what it is (task p1.6-23). The test above holds the default - the fixture
+// nothing of this harness sets `transport`, and the heartbeat says `onboard` - and this one
+// holds a consumer's word: the unit of D-45 fills `native` into the identity and the heartbeat
+// carries it, with nothing else of the body moved by it.
+TEST_F(LoopTest, AConsumerSaysWhatItsTransportIsAndTheHeartbeatCarriesIt) {
+  identity.transport = "native";
+
+  linkUp();
+  ASSERT_TRUE(untilACall());  // config
+  ASSERT_TRUE(untilACall());  // heartbeat
+  ASSERT_EQ(server.heartbeats().size(), 1u);
+  const std::string hb = server.heartbeats()[0];
+
+  EXPECT_TRUE(fake::followsShapeOf(hb, fake::contract("AgentHeartbeat"))) << hb;
+  EXPECT_NE(hb.find("\"agentVersion\":\"0.2.0\",\"transport\":\"native\",\"at\":"), std::string::npos) << hb;
+  EXPECT_EQ(hb.find("onboard"), std::string::npos) << hb;
+}
+
+// A mesh that cannot carry one of the thirteen (IMesh::supports). The heartbeat does not
+// advertise it - twelve types, the other twelve in the order of the thirteen, and the extension's
+// after them as before - so routing sends none here; and a job of it that arrives all the same
+// is answered `unsupported` at no transaction with **nothing sent**: no login, no packet, the
+// job never begun on the mesh. This is the Walter's local door (its p4-02): a trace its UART link
+// has no request for, declined once in `supports()` rather than failed on the air.
+TEST_F(LoopTest, AMeshThatCannotTraceIsNotAdvertisedTraceAndATraceSentAnywayIsUnsupportedWithNothingSent) {
+  FakeExtension extension;
+  jobs.setExtension(&extension);
+  mesh.cannotServe("trace");
+  wideBudget();
+  server.queue(fake::Job(13023, "trace").atClass("none").leasedUntil(kLease).json());
+
+  linkUp();
+  ASSERT_TRUE(untilACall());  // config
+  ASSERT_TRUE(untilACall());  // heartbeat
+  ASSERT_EQ(server.heartbeats().size(), 1u);
+  const std::string types = memberOf(server.heartbeats()[0], "jobTypes");
+
+  std::string expected = "[";
+  int count = 0;
+  for (int i = 0; i < mm::kJobTypeCount; i++) {
+    if (std::strcmp(mm::kJobTypes[i], "trace") == 0) continue;
+    expected += std::string(count++ > 0 ? "," : "") + "\"" + mm::kJobTypes[i] + "\"";
+  }
+  expected += ",\"walter.sleep\",\"walter.firmware\"]";
+  EXPECT_EQ(count, mm::kJobTypeCount - 1);
+  EXPECT_EQ(types, expected) << "the twelve the mesh carries, then the extension's";
+  EXPECT_EQ(types.find("trace"), std::string::npos) << types;
+
+  ASSERT_TRUE(untilACall());  // the claim, the job, and its result
+  ASSERT_EQ(server.results().size(), 1u) << "the job was answered";
+  const std::string body = server.results()[0].body;
+  EXPECT_EQ(memberOf(body, "outcome"), "unsupported") << body;
+  EXPECT_EQ(memberOf(body, "transactions"), "0") << body;
+  // The log carries the repeater's quoted label and a unicode-escaped quote around the type, which
+  // the member helper above does not unescape, so the line is held in the whole body, by halves.
+  EXPECT_NE(body.find("this mesh cannot carry a "), std::string::npos) << body;
+  EXPECT_NE(body.find("job, so it is not advertised and nothing was sent"), std::string::npos) << body;
+  EXPECT_EQ(mesh.sendCount(), 0) << "nothing went on the air for a job the mesh declined";
+  EXPECT_EQ(mesh.logins(), 0);
+  EXPECT_EQ(jobs.ran(), 1u);
+  EXPECT_EQ(jobs.queueDepth(), 0) << "and the result was posted, so no job is left leased";
+  EXPECT_TRUE(fake::followsShapeOf(body, fake::contract("JobResultReport")));
+}
+
 TEST_F(LoopTest, TheObservationBatchIsTheContractsShapeAndKeepsItsClientIdAcrossARetry) {
   // No jobs waiting: the batch is what the pass after the heartbeat has to do.
   server.answerHeartbeat(60, 1, 120, false, platform.clock().now());

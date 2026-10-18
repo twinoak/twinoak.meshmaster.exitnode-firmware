@@ -37,8 +37,9 @@
 //         first answer
 //
 // `jobTypes` is the thirteen types JobRunner has a handler for - every type of API §3 since
-// task 05 - and the types of the extension the board set, if any (IJobExtension.h); routing
-// sends nothing else, because it requires the type advertised.
+// task 05 - less any the mesh says it cannot carry (IMesh::supports, task p1.6-23; the Heltec's
+// mesh carries all thirteen), and then the types of the extension the board set, if any
+// (IJobExtension.h); routing sends nothing else, because it requires the type advertised.
 //
 // Host-portable since task p1.5-15: the server, the platform and the mesh are the three seams
 // (IUplink.h, IPlatform.h, IMesh.h), and what the heartbeat says about this board - the version,
@@ -261,6 +262,14 @@ static_assert(std::is_trivially_copyable<WakeState>::value, "a wake's state goes
 // when a `radio.*` setting changes: the library reads no setting of its own.
 struct HeartbeatIdentity {
   const char* agentVersion = "";           // meshmaster_agent_version()
+  // How this exit node reaches its radio, in meshmaster.dk's words (EXIT-NODES §2, the server's
+  // `AgentTransports`): `serial` and `tcp` are a companion on a cable, `native` is an exit node
+  // that *is* its repeater (the unit of D-45: the Walter over its box link), and `onboard` is a
+  // board that is its own exit node (D-28) - this one, so the default is its word and the Heltec
+  // sets nothing. The library validates nothing here: the vocabulary is the server's, a word it
+  // does not know is its to refuse, and a hand-written list in this library would be a second
+  // copy of it that could drift (task p1.6-23).
+  const char* transport = "onboard";
   const char* board = nullptr;             // boardName(); nullptr leaves the field out
   const char* companionFirmware = nullptr; // meshcoreTag() on the Heltec, whose companion firmware is the one it is built from
   RadioParameters radio;                   // what the radio is programmed with; sent while there is an identity
@@ -438,7 +447,8 @@ class AgentLoop {
   ObservationRing ring_;
   Counters counters_;
   const char* publicKey_ = nullptr;
-  // The heartbeat's `jobTypes`: the thirteen, then the extension's (IJobExtension.h).
+  // The heartbeat's `jobTypes`: the thirteen the mesh carries (IMesh::supports), then the
+  // extension's (IJobExtension.h).
   const char* jobTypes_[kJobTypeCount + kMaxExtensionTypes] = {};
 
   bool halted_ = false;         // a 401: nothing but the console from here

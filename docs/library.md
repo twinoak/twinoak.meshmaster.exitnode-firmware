@@ -165,10 +165,9 @@ be caught at compile time.
 ```cpp
 struct MeshReply {
   enum class Kind : uint8_t { None, Response, Trace, Text };
-  Kind kind;  uint32_t tag;  bool viaPath;
+  Kind kind;  uint32_t tag;
   uint8_t data[kMeshReplyDataCap];  uint8_t len;   // a RESPONSE, after its four-byte tag
   char text[kMaxCliReplyLen + 1];                  // a TXT_MSG of CLI data, untrimmed
-  float snr;                                       // what you measured on the reply
   uint8_t traceFlags, traceHashes[kMeshPathCap], traceHashBytes,
           traceSnrs[kMeshPathCap], traceSnrCount;  float traceFinalSnr;
 };
@@ -181,12 +180,15 @@ for a CLI reply, a `Trace` for a trace. `data` is the repeater's reply bytes
 it is the library's job and not yours.
 
 Of this struct the library reads exactly `kind`, `data`, `len`, `text` and the
-five `trace*` fields. `tag` is for your own matching inside `awaitReply` — the
-library never reads it back. `viaPath` (the reply came back as a returned path,
-which also taught you the way out) and `snr` are **read by nothing today**: this
-board's mesh fills them and no caller looks, because the `discover` job asks
-`hasPath()` after a login and a result's SNR figures come out of the repeater's
-own reply bytes. Fill them if it is cheap; build nothing to get them.
+six `trace*` fields — `traceFinalSnr` is the SNR you measured on the trace coming
+home, and it becomes the result's last hop, this unit's own. `tag` is for your own
+matching inside `awaitReply`; the library never reads it back. **Every field is
+read by something**, since `v0.3.0`: `viaPath` and `snr`, which every mesh filled
+and nothing read, are gone (the `discover` job asks `hasPath()` after a flooded
+login, and a status's or a neighbour's SNR is the repeater's own figure out of its
+reply bytes). A mesh that assigned them stops compiling at that version, and the
+fix is to delete the two lines — the link's `via_path` and `snr_q4` are yours to
+print and have nowhere to go in the envelope.
 
 `SendResult` is MeshCore's `MSG_SEND_*` under another name: `Failed` (the packet
 could not be built or could not be handed to the radio at all), `Flood` (it went
@@ -203,6 +205,7 @@ flooded) and `Direct` (it went along the path). The library treats `Flood` and
 | `counters()` | A `MeshCounters` reference. The library reads **one** field of it: `advertsDropped`, the adverts whose data did not decode, for the `errors` report. `rx`, `tx`, `adverts` and `rxByType[16]` are for *your* console; leave them zero if you have no such counts. `tx` is worth keeping honest all the same — one per transaction and nothing else is the rail that catches a firmware sending twice |
 | `overheard()` | The heartbeat's `overheard` error counter: frames of the mesh's own chat you counted and never read. On this board it is `rxByType[GRP_TXT] + rxByType[GRP_DATA] + rxByType[TXT_MSG]`. If your mesh cannot tell you a by-type count, report what it can and say so in your own docs — a number that is too low is a lie to the server's page, and 0 says *this transport cannot see chat*, which for a link client may be the truth |
 | `loop()` | The pump. The library calls it whenever it idles — waiting for the airtime budget, waiting for a reply — so that what the radio hears is taken in while a job waits. In-process that is MeshCore's own loop; for a link client it is "read the link, dispatch its events". It must return promptly and must not block |
+| `supports(jobType)` | **What your mesh cannot do** (since `v0.3.0`). Asked for each of the thirteen core types when the heartbeat is built, and once more before a job of one of them is run. Answer `false` and the type is **not advertised** — routing requires the type advertised, so the server sends none of it here — and a job of it that arrives all the same is reported `unsupported` at no transaction, with nothing sent and `beginJob` never called. The extension's types are not asked; they are yours. **It has a default, `true`**: a mesh that does not override it carries everything, which is what every mesh was before and what this board's is. A link client answers from what its link carries — the Walter's UART link has no request for a trace, so it returns `false` for `"trace"`. `jobType` is one of `kJobTypes`' static strings; a `strcmp` is the whole of it, and it must be cheap and never block |
 
 **A job's exchanges.** A job is bracketed by `beginJob` / `endJob`, and between
 them there is one peer and at most one awaited reply.
@@ -252,6 +255,7 @@ wake's `Budget` is how you refuse such a job rather than be surprised by it (§6
 
 | What happens | What the library does |
 |---|---|
+| `supports(type)` false | the type is left out of the heartbeat's `jobTypes`; a job of it anyway is `unsupported` at no transaction, *this mesh cannot carry a 'trace' job* in the log, nothing sent, `beginJob` not called |
 | `beginJob` false | the job is `failed`, one log line, nothing sent |
 | `sendLogin`/`sendRequest`/`sendCli` → `Failed` | *the packet could not be built*: the job ends `failed` |
 | `awaitReply` false after a login | silence. Stock firmware answers a login it will not take with **silence**, and that cannot be told from a repeater that is off the air: the sequence (`agent/LoginSequence.h`) tries **twice** and reports `unreachable` — or `unauthorized`, when a blank probe login between the two tries *was* answered and only the password's try was silent. A `discover` job escalates further on its own: `forgetPath()`, a flooded login, and the path-discovery request last |
@@ -463,10 +467,13 @@ neighbour list alone is more than the 8 kB of stack the Arduino loop task has.
 `AgentLoop` is 7.6 kB, most of it the 64-entry observation ring.
 
 1. **`mm::logBegin` / `logSetSink`**, before anything else logs.
-2. **Fill `identity`** — `agentVersion`, `board`, `companionFirmware` and the
-   `RadioParameters` the radio is actually programmed with — and refresh it
-   whenever one of those changes. The library reads no setting; this struct is
-   how it knows what to say about you.
+2. **Fill `identity`** — `agentVersion`, `transport`, `board`, `companionFirmware`
+   and the `RadioParameters` the radio is actually programmed with — and refresh
+   it whenever one of those changes. The library reads no setting; this struct is
+   how it knows what to say about you. `transport` is meshmaster.dk's word for how
+   you reach your radio (EXIT-NODES §2): `onboard` is the default and the Heltec's,
+   a unit that *is* its repeater says `native`, and the library validates nothing
+   — the vocabulary is the server's.
 3. **`jobs.begin(mesh, uplink, platform, pump)`.** `pump` is a plain function
    pointer, or null: it is called in every idle loop inside a job, which is where
    all the time is. The Heltec's keeps the console, the display and the watchdog
@@ -645,38 +652,29 @@ for.
 
 ### 7.1 What you cannot do from behind these interfaces
 
-Five limits, stated plainly because each one is easier to find here than in a
-test that fails for an unrelated-looking reason. None of them is a decision
-anybody defends — they are what the one consumer this library has had needed and
-did not get, and each is a line in this pile's `FOLLOWUPS.md`:
+Two limits, stated plainly because each one is easier to find here than in a
+test that fails for an unrelated-looking reason. Neither is a decision anybody
+defends; each is what the one consumer this library has had did not need yet,
+and the line that would change it is short:
 
-- **You cannot advertise fewer than the thirteen.** The heartbeat always carries
-  all of them, plus the extension's, and routing requires the type advertised —
-  so a server may send a `trace` to a unit whose mesh cannot trace. There is no
-  filter today. If yours genuinely cannot serve one of the thirteen, say so when
-  you find it; it is a small change to the loop and nobody has needed it yet.
-- **You cannot make the runner answer `unsupported` from inside `IMesh`.**
-  `unsupported` is the runner's own word for a type nobody handles (and for a
-  trace along three-byte hashes, which it refuses before any send). A send that
-  returns `SendResult::Failed` is reported **`failed`**, with *the packet could
-  not be built* in the log; answering silence instead gets you `unreachable`
-  after the retries. Neither is a lie, but neither is `unsupported` — do not
-  build a design on getting that word out of a mesh implementation.
 - **You cannot change what one of the thirteen does.** Those handlers are the
   library's: their requests, their order, their retries, their result shapes and
   their rails. `IJobExtension` adds a fourteenth type; it does not replace a
-  first.
-- **You cannot say what your transport is.** The heartbeat's `transport` is the
-  loop's own constant **`"onboard"`** (`AgentLoop.cpp`'s `buildHeartbeat`), and
-  `HeartbeatIdentity` has no field for it — so a unit that ought to register as
-  `native`, or as anything else in meshmaster.dk's `AgentTransports`, registers
-  as `onboard` today. It is one defaulted field away and it is in this pile's
-  `FOLLOWUPS.md`; until a release carries it, expect the exit node's page to
-  call your unit onboard.
+  first. A different job type, through the extension, is the way.
 - **You cannot report a drop that happened before the ring.** The heartbeat's
-  `observationsDropped` is `ObservationRing::dropped()`, which counts what *the
-  ring* dropped when it was full. Adverts your radio or your link lost before
-  they reached `push()` have nowhere to go in the envelope.
+  `observationsDropped` is `ObservationRing::dropped()` — what *the ring* dropped
+  when it was full, and since `v0.3.0` what the kept image could not hold
+  (§5.1), which is also a drop of the ring's. Adverts your radio or your link
+  lost before they reached `push()` have nowhere to go in the envelope.
+
+Three limits that stood here at `v0.2.0` are gone at `v0.3.0`, and this is where
+a reader of the older page finds out: you **can** say what your transport is
+(`HeartbeatIdentity::transport`, §6 step 2), you **can** advertise fewer than the
+thirteen and have the runner answer `unsupported` for a type your mesh cannot
+carry (`IMesh::supports`, §3.2 — asked at the heartbeat and before the job, so
+nothing is sent for it), and `MeshReply` no longer asks you for `viaPath` and
+`snr` (§3.1). The fourth of the older list — all thirteen always advertised — was
+the same limit as the second, seen from the heartbeat.
 
 ## 8. The rails you inherit, and must keep
 
@@ -789,6 +787,7 @@ this flat:
 | `counters()` | §6.4 `MESH_COUNTERS`: `rx` ↔ `rx`, `tx` ↔ `client_tx` (one per send; the link's own `tx` counts forwards too, which an exit node on a repeater must not report as its own), `adverts` ↔ `adverts`, `advertsDropped` ↔ `adverts_dropped`. `client_tx` and the runner's transaction count must be **equal, exactly** — that equality is the one-send-per-command rail made checkable, and it is worth an assertion in every scenario |
 | `overheard()` | **nothing carries it.** §6.4 has neither an `overheard` figure nor a count by type — the one open gap, in this pile's `FOLLOWUPS.md` for the design repository. One `u32` in §6.4 closes it |
 | `loop()` | no request: read the link, dispatch its events |
+| `supports(type)` | no request: the Walter answers from what the link carries. §6.2 has no `SEND_TRACE` the UART link can complete for the unit's own radio, so `"trace"` is `false` and the unit never advertises it — which is its p4-02 *local door*, settled this way: `unsupported` at no transaction with nothing sent, not `failed` on the air. Every other type `true` |
 | `beginJob(key, hashes, hops, hashSize)` | §6.1 `JOB_BEGIN` — `pubkey` 32 bytes from the hex, then a path: `path_mode` 2 with `hash_size`/`hop_count`/`hashes` when the claim carried one, 0 when it did not. The link ends any job in progress first, as this interface requires |
 | `endJob()` | §6.1 `JOB_END` |
 | `setDirectPath()` / `forgetPath()` | §6.1 `PATH_SET`, `path_mode` 1 / 0 |
@@ -800,7 +799,7 @@ this flat:
 | `sendTrace(hashes, bytes, hashSize, tag&)` | §6.2 `SEND_TRACE`, `hash_size` 1, 2, 4 or 8. The link's `ERR_RANGE` for 3 is this interface's `Failed`, and the library refuses a three-byte path before either |
 | `awaitReply(tag, timeoutMs, pump)` | §6.2's `timeout_ms` at the send, then §6.3 `EV_MESH_REPLY` with `REPLY_GET` as the fallback for a lost event. **The one shape difference**: the link takes the timeout *at the send* and this interface takes it at the await. Pass a ceiling at the send — the longest the library ever waits, `perHopMs × 4` or `loginMs` — and run the real timer over the event here, dropping a late reply as the next send would. Worth a sentence in §6.2 (same `FOLLOWUPS.md` item) |
 | `awaitText(timeoutMs, pump)` | the same, state 4 |
-| `reply()` | §6.3's reply record: `kind` ↔ `state` 3 `Response`, 4 `Text`, 5 `Trace` (state 2, timed out, is `None` and a false return from the await), `tag`, `viaPath` ↔ `via_path`, `snr` ↔ `snr_q4 / 4`, `data`/`len` ↔ state 3's `data`, `text` ↔ state 4's `text`, the five `trace*` fields ↔ state 5's. The link carries two things `MeshReply` has no field for — `elapsed_ms` and `rssi` — and the library times its own round trip |
+| `reply()` | §6.3's reply record: `kind` ↔ `state` 3 `Response`, 4 `Text`, 5 `Trace` (state 2, timed out, is `None` and a false return from the await), `tag`, `data`/`len` ↔ state 3's `data`, `text` ↔ state 4's `text`, the six `trace*` fields ↔ state 5's. The link carries four things `MeshReply` has no field for since `v0.3.0` — `via_path`, `snr_q4`, `elapsed_ms` and `rssi` — because nothing in the envelope takes them; print them if you want them, and the library times its own round trip |
 
 **`IUplink` → an HTTPS call through the modem**, with `Authorization: Bearer` and
 `X-Agent-Version` on every one (§4), and the chain verified against a root the
@@ -857,7 +856,7 @@ awaited-reply timeout, both noted above and both items for the design
 repository rather than library changes. Anything else the agent needs that §6
 cannot carry is a specification gap for that repository too — the library is not
 where it gets worked around. On *this* library's side the open list is §7.1's
-five, and the same `FOLLOWUPS.md` holds both.
+two, and the same `FOLLOWUPS.md` holds both.
 
 ## 12. Testing yours
 
@@ -879,8 +878,10 @@ mesh is a link client has one more layer to fake — the link — with `FakeMesh
 the far side of it rather than behind `IMesh`. The scenarios still apply; the
 object under test changes.
 
-The suites to read first are `test/test_runner` (45 cases: all thirteen job
-types, one send per command, the credential wiped, the lease, the offline buffer)
-and `test/test_loop` (45: the loop, the heartbeat's bytes, the backoff, the
-reboot guard, every wake case, and what a sleep keeps — a sleep there is the loop
-and the runner destroyed and built again from the state and the image).
+The suites to read first are `test/test_runner` (46 cases: all thirteen job
+types, one send per command, the credential wiped, the lease, the offline buffer,
+a type the mesh cannot carry) and `test/test_loop` (47: the loop, the heartbeat's
+bytes and its `transport`, the advertised list less what the mesh declines, the
+backoff, the reboot guard, every wake case, and what a sleep keeps — a sleep
+there is the loop and the runner destroyed and built again from the state and
+the image).

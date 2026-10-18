@@ -428,7 +428,7 @@ int AgentMesh::searchPeersByHash(const uint8_t* hash) {
 
 void AgentMesh::getPeerSharedSecret(uint8_t* dest_secret, int) { std::memcpy(dest_secret, sharedSecret(), PUB_KEY_SIZE); }
 
-void AgentMesh::takeText(mesh::Packet* pkt, const uint8_t* data, size_t len) {
+void AgentMesh::takeText(const uint8_t* data, size_t len) {
   // A CLI reply carries the repeater's own timestamp and no tag: the first text of CLI data from
   // the peer while one is awaited is the answer, which is also how the .NET agent reads it.
   if (awaiting_ != Awaiting::Text) return;
@@ -440,10 +440,9 @@ void AgentMesh::takeText(mesh::Packet* pkt, const uint8_t* data, size_t len) {
   reply_ = MeshReply();
   reply_.kind = MeshReply::Kind::Text;
   std::memcpy(reply_.text, text, sizeof reply_.text);
-  reply_.snr = pkt->getSNR();
 }
 
-void AgentMesh::takeResponse(mesh::Packet* pkt, const uint8_t* data, size_t len, bool viaPath) {
+void AgentMesh::takeResponse(const uint8_t* data, size_t len) {
   if (len < 4) return;
   if (awaiting_ == Awaiting::Text) {
     // A RESPONSE while a CLI reply is awaited is an old one that took another route home.
@@ -461,24 +460,22 @@ void AgentMesh::takeResponse(mesh::Packet* pkt, const uint8_t* data, size_t len,
   reply_ = MeshReply();
   reply_.kind = MeshReply::Kind::Response;
   reply_.tag = tag;
-  reply_.viaPath = viaPath;
   size_t n = len - 4;
   if (n > sizeof reply_.data) n = sizeof reply_.data;
   std::memcpy(reply_.data, data + 4, n);
   reply_.len = static_cast<uint8_t>(n);
-  reply_.snr = pkt->getSNR();
 }
 
-void AgentMesh::onPeerDataRecv(mesh::Packet* pkt, uint8_t type, int, const uint8_t*, uint8_t* data, size_t len) {
+void AgentMesh::onPeerDataRecv(mesh::Packet*, uint8_t type, int, const uint8_t*, uint8_t* data, size_t len) {
   // A REQ never reaches this: onRecvPacket released it, so nothing here can compose a reply.
   if (type == PAYLOAD_TYPE_RESPONSE) {
-    takeResponse(pkt, data, len, false);
+    takeResponse(data, len);
   } else if (type == PAYLOAD_TYPE_TXT_MSG) {
-    takeText(pkt, data, len);
+    takeText(data, len);
   }
 }
 
-bool AgentMesh::onPeerPathRecv(mesh::Packet* pkt, int, const uint8_t*, uint8_t* path, uint8_t path_len,
+bool AgentMesh::onPeerPathRecv(mesh::Packet*, int, const uint8_t*, uint8_t* path, uint8_t path_len,
                                uint8_t extra_type, uint8_t* extra, uint8_t extra_len) {
   // A flooded request is answered with the way back, and the reply rides in `extra`. Take the
   // path - the next transaction of this job goes direct - and the reply with it.
@@ -491,7 +488,7 @@ bool AgentMesh::onPeerPathRecv(mesh::Packet* pkt, int, const uint8_t*, uint8_t* 
     LOG_D("mesh: the reply came back along a path of %u hop(s); the rest of this job goes direct",
           static_cast<unsigned>(count));
   }
-  if (extra_type == PAYLOAD_TYPE_RESPONSE && extra != nullptr) takeResponse(pkt, extra, extra_len, true);
+  if (extra_type == PAYLOAD_TYPE_RESPONSE && extra != nullptr) takeResponse(extra, extra_len);
   // **false**: no reciprocal path is sent. One send per command is the rail, and a repeater that
   // answered us has already learnt what it needs from the request it answered.
   return false;
@@ -511,7 +508,6 @@ void AgentMesh::onTraceRecv(mesh::Packet* pkt, uint32_t tag, uint32_t, uint8_t f
   reply_.traceSnrCount = hops > MAX_PATH_SIZE ? MAX_PATH_SIZE : hops;
   std::memcpy(reply_.traceSnrs, path_snrs, reply_.traceSnrCount);
   reply_.traceFinalSnr = pkt->getSNR();
-  reply_.snr = pkt->getSNR();
 }
 
 }  // namespace mm

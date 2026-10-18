@@ -13,10 +13,13 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <set>
 #include <sstream>
 #include <string>
 
+#include <agent/AgentLoop.h>
 #include <agent/Envelopes.h>
 #include <agent/JobEnvelopes.h>
 #include "version.h"
@@ -191,6 +194,54 @@ TEST(Heartbeat, TheFirmwareStringIsTheTwoFieldsTheHeartbeatSends) {
   const std::string composed =
       std::string("meshmaster-agent ") + meshmaster_agent_version() + " on MeshCore " + mm::meshcoreTag();
   EXPECT_EQ(composed, std::string(mm::firmwareString()));
+}
+
+// A consumer says what it is (task p1.6-23). The unit of D-45 is transport `native`, and the
+// fixture with that one word changed is what it sends; nothing else of the body moves with the
+// word. Anchored on the fixture, as the two tests above are.
+TEST(Heartbeat, AConsumerThatSaysNativeWritesTheFixtureWithThatOneWordChanged) {
+  const std::string fixture = readFixture("AgentHeartbeat.json");
+  ASSERT_FALSE(fixture.empty());
+  const std::string theirs = "\"transport\":\"onboard\"";
+  const size_t at = fixture.find(theirs);
+  ASSERT_NE(at, std::string::npos) << "the fixture no longer says onboard: " << fixture;
+  const std::string asNative = fixture.substr(0, at) + "\"transport\":\"native\"" + fixture.substr(at + theirs.size());
+
+  const mm::ErrorCounter errors[] = {{"uplink", 0}};
+  mm::Heartbeat hb = theFixturesSample(errors, 1);
+  hb.transport = "native";
+  hb.hasNextCheckInS = true;
+  hb.nextCheckInS = 3600;
+  hb.hasMaxTransactionsThisWake = true;
+  hb.maxTransactionsThisWake = 12;
+  EXPECT_EQ(asNative, heartbeatJson(hb));
+}
+
+// The word a consumer that says nothing sends is the one the contract fixtures carry - read out
+// of every fixture that has a `transport` member, so that the default is held to meshmaster.dk's
+// own bytes and not to a word typed here. The fixtures carry **one** word (`onboard`, in
+// AgentHeartbeat.json and AgentConfig.json); the rest of the server's vocabulary - `serial`,
+// `tcp`, `native` (EXIT-NODES §2, its `AgentTransports`) - is in no fixture, so the library
+// holds no list of it and validates nothing: a word the server does not know is its to refuse.
+TEST(Heartbeat, TheDefaultTransportIsTheWordTheContractFixturesCarry) {
+  std::set<std::string> words;
+  for (const auto& entry : std::filesystem::directory_iterator(FIXTURES_DIR)) {
+    if (entry.path().extension() != ".json") continue;
+    const std::string text = readFixture(entry.path().filename().string().c_str());
+    const std::string key = "\"transport\":\"";
+    for (size_t at = text.find(key); at != std::string::npos; at = text.find(key, at + 1)) {
+      const size_t from = at + key.size();
+      const size_t to = text.find('"', from);
+      if (to != std::string::npos) words.insert(text.substr(from, to - from));
+    }
+  }
+  ASSERT_FALSE(words.empty()) << "no contract fixture carries a transport member any more";
+
+  const mm::HeartbeatIdentity identity;  // as a consumer that fills nothing of it leaves it
+  EXPECT_EQ(1u, words.count(identity.transport)) << "the identity's default is not a fixture's word: " << identity.transport;
+  const mm::Heartbeat hb;
+  EXPECT_EQ(1u, words.count(hb.transport)) << "the envelope's default is not a fixture's word: " << hb.transport;
+  EXPECT_STREQ(identity.transport, hb.transport) << "the two defaults are one word";
 }
 
 TEST(Heartbeat, ABodyThatDoesNotFitIsRefusedRatherThanCut) {

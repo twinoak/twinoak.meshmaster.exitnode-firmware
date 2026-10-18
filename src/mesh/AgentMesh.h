@@ -163,8 +163,8 @@ class AgentMesh : public mesh::Mesh, public IMesh {
   // frame, kLoginPayloadClearBytes a login with a password, kDatagramClearBytes a `password` line.
   SendResult dispatch(mesh::Packet* pkt, size_t clearBytes = 0);
   bool await(Awaiting what, uint32_t tag, uint32_t timeoutMs, void (*pump)());
-  void takeResponse(mesh::Packet* pkt, const uint8_t* data, size_t len, bool viaPath);
-  void takeText(mesh::Packet* pkt, const uint8_t* data, size_t len);
+  void takeResponse(const uint8_t* data, size_t len);
+  void takeText(const uint8_t* data, size_t len);
   void logFrame(const char* direction, const mesh::Packet* pkt, bool withHex, size_t clearBytes = 0);
 
   MeshCounters counters_;
