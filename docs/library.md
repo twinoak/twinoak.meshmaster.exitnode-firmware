@@ -38,7 +38,7 @@ Concretely, these are yours:
 | the uplink (`IUplink`) | WiFi and `WiFiClientSecure` here, an LTE-M modem with its own TLS stack there |
 | the platform (`IPlatform`, `IClock`) | `millis()`, a delay, random bits, the heap, the wall clock, and the one drastic thing a board can do to itself |
 | where a log line goes | one function pointer, `mm::logSetSink` |
-| storage | the library reads no setting and writes no file. Everything it needs comes in as a value: the token is your uplink's, the identity and the radio parameters are a `HeartbeatIdentity` you fill |
+| storage | the library reads no setting and writes no file. Everything it needs comes in as a value: the token is your uplink's, the identity and the radio parameters are a `HeartbeatIdentity` you fill. The one thing it will *hand you* to store is the image a sleep keeps (`IRetained`, §5.1) — optional, and only a device that sleeps wants it |
 | the console, the display, a watchdog, sleep | yours entirely. The library's console *reports* (`jobs`, `sessions`, `server`, `errors`) write to a `TextOut` you implement if you want them |
 
 ## 2. Taking it
@@ -70,7 +70,7 @@ it is also what the fixtures' manifest and your own sync manifest should agree
 with — one version in two places is how a pin drifts.
 
 Under the ESP-IDF, `lib/agent-core/CMakeLists.txt` registers the library as a
-component: one include directory (`include`), 22 sources, and an empty
+component: one include directory (`include`), 23 sources, and an empty
 `REQUIRES` — it needs no component of yours, which is what the three interfaces
 are for. ArduinoJson is declared in `idf_component.yml` as a managed component
 (`bblanchon/arduinojson: "==7.4.3"`) and the component manager adds it to this
@@ -394,6 +394,48 @@ mm::logSetLevel(mm::LogLevel::Info);
 With no sink set a line is formatted and **dropped**: a library owns no port. Set
 it before anything logs.
 
+### 5.1 `IRetained` — what outlives a sleep (optional)
+
+`agent/IRetained.h`. A fourth interface, and the only optional one: a device
+that drives the loop with `loop()` never needs it, and the Heltec passes none.
+
+A result the server would not take, or one a wake kept for its budget, waits in
+the offline buffer — which is RAM. On a device that deep-sleeps between wakes
+the RAM goes with the sleep, so until pile 1.6 the result was lost and its job
+stayed leased until the server's lease lapsed; the adverts a wake could not post
+went the same way. `WakeState` cannot carry them — twelve kilobytes of results
+against an RTC memory that is nearly full — so this seam carries them instead,
+into whatever you have: a flash region, an NVS blob, a file. The library neither
+knows nor includes any of them.
+
+| Method | Contract |
+|---|---|
+| `capacity()` | The most bytes an image may be. Constant for the life of the store |
+| `write(image, len)` | Store `len` bytes as the one image, replacing whatever was there; true when stored whole. A torn write is not yours to detect — the image carries its length and a CRC-32, and a torn one is refused whole at the next read |
+| `read(out, cap)` | The image last stored, into `out`: how many bytes were put there, or 0 when the store holds none. Handing back more than the image is long (a whole flash region) is fine; the image says its own length |
+
+**The rule the loop keeps, in one sentence:** *kept results first, oldest first,
+then the waiting adverts with the moment each was heard, whole or not at all,
+one write a wake and none when nothing changed.* What the store cannot hold is
+dropped from RAM as well and counted in the two figures the heartbeat already
+carries, `resultsDropped` and `observationsDropped`, which the image carries
+across the sleep too — so a store that is too small is a number on the exit
+node's page, not a silent loss. Results go first because a lost result leaves a
+job leased; a lost advert is heard again.
+
+**The image may hold nothing a result does not.** Its layout is written down in
+`agent/KeptImage.h` — a 32-byte header, then result bodies exactly as
+`postJobResult` would be handed them, then adverts exactly as the ring holds
+them — and the runner's rule already keeps every credential out of a result.
+`test_loop`'s `TheImageHoldsNothingAResultDoesNot` greps the image's own bytes
+for the fixtures' sample passwords after a rotation, a guest login and a `cli`
+job. A person with your flash in hand learns what the server would have.
+
+**Wear.** At most one write a wake, and none when the image would be what the
+store already holds — in particular none when nothing is kept and the previous
+image was already empty. A unit whose wakes post everything writes nothing; one
+on a metered plan writes a few images a day. Size a flash region for that.
+
 ## 6. The lifecycle
 
 Construct, wire, drive. The objects are yours to own: the library has no globals
@@ -454,6 +496,31 @@ neighbour list alone is more than the 8 kB of stack the Arduino loop task has.
    another `version` and changes nothing. What it carries: the backoff and how
    long the present run of failures has lasted, the accepted interval, the
    airtime budget, a 401, and the counters the heartbeat reports.
+7. **What the sleep keeps** (optional, §5.1): `agent.setRetained(&store,
+   scratch, sizeof scratch)` once after `begin()`, with a store of yours and a
+   scratch the image is built in — the library allocates nothing, so the RAM is
+   yours; a full image is about 19.5 kB (`ResultBuffer::kCapacityBytes` of
+   results, 64 adverts at `kKeptAdvertLen`, and the headers), and the image is
+   never larger than the smaller of the scratch and the store's `capacity()`.
+   Then, once a boot and before the first wake, **`agent.restoreKept()`**
+   after `restore(s)`: it reads the image back into the offline buffer and the
+   ring, true when one was read. The end of every `wake()` writes the next
+   image by itself; `report.keptImageWritten` says whether this wake did, and
+   `report.resultsNotKept` / `observationsNotKept` what the store was too small
+   for. A torn, short, foreign-version or bad-checksum image is refused whole —
+   never half-read — counted in `keptImagesRefused()` (a count the next image
+   carries across the sleep as well) and logged with the reason, and the next
+   wake writes a fresh image over it.
+
+```cpp
+static uint8_t keptScratch[20480];        // yours: the image is built here
+MyRetained kept;                          // : mm::IRetained, over a flash region
+
+agent.setRetained(&kept, keptScratch, sizeof keptScratch);
+agent.restore(savedState);                // the WakeState, from retained memory
+agent.restoreKept();                      // the results and the adverts, from the store
+const mm::WakeReport r = agent.wake(intent, budget);   // ... and the image is written here
+```
 
 **One wake, in detail.**
 
@@ -501,7 +568,12 @@ result the byte cap or the uplink seconds cannot carry is kept in the offline
 buffer for the next wake rather than posted past the budget (*offline is normal*:
 a late result is still taken, and de-duplicated on the client id it was written
 with); **a backoff does not spin**, it comes back as `sleepAtLeastS`; and **the
-reboot guard does not fire**, it sets `rebootWanted` and the reason.
+reboot guard does not fire**, it sets `rebootWanted` and the reason. With a
+store (§5.1) the first of those holds **across the sleep** too: a kept result is
+in the image, the next boot reads it back, and the wake after it posts it under
+the client id it was made with. Without a store the promise holds within one
+boot, which is what it was before pile 1.6 and is the documented behaviour of a
+board that does not sleep (EXIT-NODES §5).
 
 The transaction cap is the *intent's* `maxTransactionsThisWake` and not a field
 of `Budget`, deliberately: it is stated to the server in the heartbeat and
@@ -676,6 +748,7 @@ them moves alone. Report both versions from your firmware: yours, and
 | change what the library *reads* of a repeater's reply | the companion fixtures move, and the pinned MeshCore tag in `platformio.ini`'s `[meshcore]` with them |
 | add a job type, a log line, a console report | nothing; new behaviour behind the same interfaces |
 | change `WakeState`'s layout | `WakeState::kVersion` goes up, and `restore()` refuses your stored blob rather than misreading it. You lose a backoff across one sleep, which is the right failure |
+| change the kept image's layout (§5.1) | `kKeptImageVersion` goes up, and `restoreKept()` refuses the image in your store whole, counts it, and the next wake writes a fresh one. You lose what one sleep kept, once, across the update — and the counter says so |
 
 **The changelog is [`CHANGELOG.md`](../CHANGELOG.md)** at the root of this
 repository, and it is written for exactly this page's reader: one section per
@@ -757,6 +830,19 @@ already has (`components/interfaces/`, `components/platform/`):
 | `rebootForHealth(why)` | `interfaces::Restart` (`esp_restart()`) — but in one-wake mode this is **never called**; the supervisor reads `report.rebootWanted` instead |
 | `selfReboots()` | the health record in retained storage (`interfaces::Retained`, `RetainedSlot::kHealth`), which already counts boots and keeps the last reasons |
 
+**`IRetained` → a flash region of the Walter's own** (§5.1), not a retained
+slot: its RTC SLOW memory had 36 bytes free after phase 3 (its report 05, *What
+RTC memory costs, again*), and a full image is about 19.5 kB. The three methods
+map onto a partition the size of one image or a little more: `capacity()` is the
+region's size, `write()` is an erase and a write of the image's bytes, `read()`
+is a read of the whole region (the image says its own length and carries its own
+CRC-32 — `esp_rom_crc32_le` computes the same one, should the Walter want to
+check it itself). An NVS blob does as well at a few writes a day. The scratch is
+the Walter's RAM, 20 kB at namespace scope; `restoreKept()` goes right after
+`restore()` in step 8's set-up, and the write at the end of `wake()` needs
+nothing of the Walter's. What the image never holds: the token, a password, a
+message — nothing a result does not.
+
 **And the wiring**: `AgentLoop::wake()` is step 8 of the Walter's `WakeCycle`
 (`tasks/phase-3/05-the-wake-cycle.md`, `docs/ARCHITECTURE.md` §10) — the step that
 task left as a `Backend` seam with a `NullBackend` behind it, deliberately,
@@ -781,9 +867,10 @@ behind the same three interfaces — `FakeMesh` (a stock repeater at the MeshCor
 pin, every answer cited to a fixture or to a firmware function with its line
 range), `FakeUplink` (a scripted meshmaster.dk with faults), `FakePlatform` (a
 clock that only moves when the test says, so a wake's bounds are asserted in
-milliseconds nobody waited for). They are header-only and include nothing but the
-library, GoogleTest and the standard library, and they are written to be copied
-into another tree.
+milliseconds nobody waited for), and since pile 1.6 `FakeRetained` (a store over
+a vector, whose image a test can tear, flip a bit of, or count the writes to).
+They are header-only and include nothing but the library, GoogleTest and the
+standard library, and they are written to be copied into another tree.
 
 Two things to know before you do: the two fixture directories come in as the
 defines `FIXTURES_DIR` and `COMPANION_DIR`, which you point at your own synced
@@ -794,5 +881,6 @@ object under test changes.
 
 The suites to read first are `test/test_runner` (45 cases: all thirteen job
 types, one send per command, the credential wiped, the lease, the offline buffer)
-and `test/test_loop` (31: the loop, the heartbeat's bytes, the backoff, the
-reboot guard, and every wake case).
+and `test/test_loop` (45: the loop, the heartbeat's bytes, the backoff, the
+reboot guard, every wake case, and what a sleep keeps — a sleep there is the loop
+and the runner destroyed and built again from the state and the image).

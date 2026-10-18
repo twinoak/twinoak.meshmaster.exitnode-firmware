@@ -6,6 +6,7 @@
 
 #include <agent/Backoff.h>
 #include <agent/Iso8601.h>
+#include <agent/KeptImage.h>
 #include <agent/Log.h>
 
 namespace mm {
@@ -400,7 +401,9 @@ size_t AgentLoop::buildBatch(uint32_t nowMs, char* out, size_t cap, size_t maxIt
     const HeardAdvert& a = ring_.at(i);
     ObservationItem& item = g_items[i];
     item = ObservationItem();
-    item.at = epochOf(a.heardAtMillis, nowMs);
+    // An advert restored from a kept image after a deep sleep carries the moment it was heard
+    // (task p1.6-22); every other one is stamped from the uptime clock, as ever.
+    item.at = a.heardAtEpoch != 0 ? a.heardAtEpoch : epochOf(a.heardAtMillis, nowMs);
     item.kind = "advert";
     toHex(a.publicKey, kPublicKeyLen, g_keys[i]);
     item.publicKey = g_keys[i];
@@ -757,6 +760,10 @@ WakeReport AgentLoop::wake(const WakeIntent& intent, const Budget& budget) {
   report.uplinkMs = meter_.uplinkSpentMs();
   report.resultsKept = static_cast<int>(jobs_->resultsKeptForBudget() - keptBefore);
   report.transactionsSpent = static_cast<int>(jobs_->gate().transmissions() - transactionsAtWakeStart_);
+  // What the sleep after this wake keeps: one image into the store, if there is one and it would
+  // change what the store holds (task p1.6-22). Before `observationsLeft` is read, because what
+  // the store cannot hold is dropped here and is not left in the ring either.
+  keepAcrossSleep(report);
   report.observationsLeft = static_cast<int>(ring_.size());
   report.elapsedMs = millis() - wakeStartedAtMs_;
   report.counters = counters_;
@@ -768,12 +775,13 @@ WakeReport AgentLoop::wake(const WakeIntent& intent, const Budget& budget) {
         stepOutcomeName(report.heartbeat), stepOutcomeName(report.results), stepOutcomeName(report.claim),
         stepOutcomeName(report.jobs), stepOutcomeName(report.observations));
   LOG_I("wake: %d job(s) run, %d not run, %d transaction(s), %d batch(es), %u byte(s) posted; %lu ms of %lu at "
-        "the server%s; next in %d s%s%s",
+        "the server%s; next in %d s%s%s%s",
         report.jobsRun, report.jobsNotRun, report.transactionsSpent, report.batchesPosted,
         static_cast<unsigned>(report.bytesPosted), static_cast<unsigned long>(report.uplinkMs),
         static_cast<unsigned long>(report.elapsedMs),
         report.resultsKept > 0 ? ", a result kept: budget" : "", report.acceptedIntervalS,
         report.sleepAtLeastS > 0 ? ", holding off first" : "",
+        report.keptImageWritten ? ", an image kept for the sleep" : "",
         report.why[0] == '\0' ? "" : " - nothing was sent");
   if (report.why[0] != '\0') LOG_I("wake: %s", report.why);
   return report;
@@ -822,6 +830,174 @@ bool AgentLoop::restore(const WakeState& saved) {
           static_cast<unsigned long>(saved.holdForMs / 1000u));
   }
   return true;
+}
+
+// ---- what a sleep keeps (task p1.6-22) -----------------------------------------------------------
+//
+// The offline buffer and the observation ring are RAM, and a deep sleep is the end of RAM: a
+// result a wake kept - for its budget, or because the server would not take it - was lost at the
+// sleep, and its job stayed leased until the server's lease lapsed. The WakeState cannot carry
+// twelve kilobytes of results through an RTC memory that is nearly full, so the consumer lends a
+// store and a scratch, the end of every wake writes one image of what is kept (agent/KeptImage.h:
+// results first, oldest first, then the adverts, whole or not at all, checksummed), and the boot
+// after the sleep reads it back. The image is what survives, so the buffer and the ring are made to
+// agree with it: what it cannot hold is dropped here and counted in the two figures the heartbeat
+// already carries, and a loss is a number on the exit node's page and not an accident.
+
+void AgentLoop::setRetained(IRetained* store, uint8_t* scratch, size_t scratchLen) {
+  retained_ = nullptr;
+  imageScratch_ = nullptr;
+  imageScratchLen_ = 0;
+  imageKnown_ = false;
+  keptRestored_ = false;
+  if (store == nullptr) return;
+  if (scratch == nullptr || scratchLen < kKeptImageHeaderLen || store->capacity() < kKeptImageHeaderLen) {
+    LOG_E("kept: a store of %u bytes and a scratch of %u cannot hold an image's header (%u); nothing is kept",
+          static_cast<unsigned>(store->capacity()), static_cast<unsigned>(scratch == nullptr ? 0 : scratchLen),
+          static_cast<unsigned>(kKeptImageHeaderLen));
+    return;
+  }
+  retained_ = store;
+  imageScratch_ = scratch;
+  imageScratchLen_ = scratchLen;
+}
+
+size_t AgentLoop::imageCap() const {
+  if (retained_ == nullptr) return 0;
+  const size_t cap = retained_->capacity();
+  return cap < imageScratchLen_ ? cap : imageScratchLen_;
+}
+
+uint32_t AgentLoop::emptyImageCrc() {
+  KeptImageWriter empty(imageScratch_, imageCap());
+  empty.finish(jobs_->results().dropped(), ring_.dropped(), imagesRefused_);
+  return empty.crc();
+}
+
+bool AgentLoop::restoreKept() {
+  if (retained_ == nullptr || platform_ == nullptr || jobs_ == nullptr) return false;
+  if (keptRestored_) {
+    LOG_W("kept: the image was already read this boot; it is not read twice");
+    return false;
+  }
+  keptRestored_ = true;
+  const size_t cap = imageCap();
+  const size_t got = retained_->read(imageScratch_, cap);
+  if (got == 0) {
+    // Nothing there - a first boot, an erased region. What the store "holds" is an image of
+    // nothing, so a wake that keeps nothing will not write one.
+    imageKnown_ = true;
+    lastImageCrc_ = emptyImageCrc();
+    LOG_I("kept: the store holds no image");
+    return false;
+  }
+  KeptImageReader image;
+  const char* refused = image.check(imageScratch_, got);
+  if (refused != nullptr) {
+    // Whole or not at all: nothing of a bad image reaches the buffer or the ring. The store is
+    // unknown from here, so the next wake writes a fresh image over it whatever it would hold.
+    imagesRefused_++;
+    imageKnown_ = false;
+    LOG_W("kept: the image in the store is refused whole: %s (%u byte(s) read; %lu image(s) refused in all)", refused,
+          static_cast<unsigned>(got), static_cast<unsigned long>(imagesRefused_));
+    return false;
+  }
+  ResultBuffer& results = jobs_->results();
+  if (!results.empty() || !ring_.empty()) {
+    LOG_W("kept: the buffer holds %u result(s) and the ring %u advert(s) already; what the image holds goes behind them",
+          static_cast<unsigned>(results.count()), static_cast<unsigned>(ring_.size()));
+  }
+  for (size_t i = 0; i < image.resultCount(); i++) {
+    long long jobId = 0;
+    size_t len = 0;
+    const char* body = image.result(i, jobId, len);
+    if (body != nullptr) results.push(jobId, body, len);
+  }
+  const uint32_t nowMs = millis();
+  for (size_t i = 0; i < image.advertCount(); i++) {
+    HeardAdvert a;
+    if (!image.advert(i, a)) break;
+    // The moment it was heard travels as `heardAtEpoch`; the uptime clock it was heard on is
+    // gone, so on this boot's clock it was heard "now" - which only the batch-due timer reads.
+    a.heardAtMillis = nowMs;
+    ring_.push(a);
+  }
+  results.addDropped(image.resultsDropped());
+  ring_.addDropped(image.observationsDropped());
+  imagesRefused_ += image.imagesRefused();
+  imageKnown_ = true;
+  lastImageCrc_ = image.crc();
+  LOG_I("kept: %u result(s) and %u advert(s) read back from the store (%u bytes); %lu result(s) and %lu advert(s) "
+        "were dropped before the sleep",
+        static_cast<unsigned>(image.resultCount()), static_cast<unsigned>(image.advertCount()),
+        static_cast<unsigned>(image.length()), static_cast<unsigned long>(image.resultsDropped()),
+        static_cast<unsigned long>(image.observationsDropped()));
+  return true;
+}
+
+void AgentLoop::keepAcrossSleep(WakeReport& report) {
+  if (retained_ == nullptr) return;
+  const size_t cap = imageCap();
+  KeptImageWriter image(imageScratch_, cap);
+
+  // The results first, oldest first, whole ones only, stopping at the first that does not fit:
+  // a lost result leaves a job leased, a lost advert is heard again.
+  ResultBuffer& results = jobs_->results();
+  size_t keptResults = 0;
+  for (; keptResults < results.count(); keptResults++) {
+    long long jobId = 0;
+    size_t len = 0;
+    const char* body = results.at(keptResults, jobId, len);
+    if (body == nullptr || !image.addResult(jobId, body, len)) break;
+  }
+  const size_t resultsOut = results.count() - keptResults;
+
+  // Then the adverts, with the moment each was heard: the one it came back from a sleep with, or
+  // the clock's reading of the uptime it was heard at. No clock is 0, which the batch after the
+  // next boot stamps as "now" - the same as it would have without a store.
+  const uint32_t nowMs = millis();
+  size_t keptAdverts = 0;
+  for (; keptAdverts < ring_.size(); keptAdverts++) {
+    const HeardAdvert& a = ring_.at(keptAdverts);
+    uint32_t epoch = a.heardAtEpoch;
+    if (epoch == 0 && clock_->hasTime()) epoch = epochOf(a.heardAtMillis, nowMs);
+    if (!image.addAdvert(a, epoch)) break;
+  }
+  const size_t advertsOut = ring_.size() - keptAdverts;
+
+  // What the store cannot hold is lost at the sleep, so it is dropped now and counted once, in
+  // the heartbeat's own figures, and said once.
+  if (resultsOut > 0 || advertsOut > 0) {
+    results.dropNewest(resultsOut);
+    ring_.dropNewest(advertsOut);
+    report.resultsNotKept = static_cast<int>(resultsOut);
+    report.observationsNotKept = static_cast<int>(advertsOut);
+    LOG_W("kept: %u result(s) and %u advert(s) do not fit the %u bytes of the store and are dropped "
+          "(%lu result(s), %lu advert(s) dropped in all)",
+          static_cast<unsigned>(resultsOut), static_cast<unsigned>(advertsOut), static_cast<unsigned>(cap),
+          static_cast<unsigned long>(results.dropped()), static_cast<unsigned long>(ring_.dropped()));
+  }
+
+  const size_t len = image.finish(results.dropped(), ring_.dropped(), imagesRefused_);
+  if (imageKnown_ && image.crc() == lastImageCrc_) {
+    // The store already holds this - the same results, the same adverts, the same counters - so
+    // nothing is written: a wake that posted everything and keeps nothing costs no wear at all.
+    LOG_D("kept: the store already holds this image; nothing written");
+    return;
+  }
+  if (!retained_->write(imageScratch_, len)) {
+    // What the store holds now is anybody's guess, so the next wake writes again regardless.
+    imageKnown_ = false;
+    LOG_E("kept: the store would not take an image of %u bytes; what the next boot finds is unknown",
+          static_cast<unsigned>(len));
+    return;
+  }
+  imageKnown_ = true;
+  lastImageCrc_ = image.crc();
+  report.keptImageWritten = true;
+  LOG_I("kept: %u result(s) and %u advert(s) written to the store, %u bytes of %u",
+        static_cast<unsigned>(image.resultCount()), static_cast<unsigned>(image.advertCount()),
+        static_cast<unsigned>(len), static_cast<unsigned>(cap));
 }
 
 void AgentLoop::report(TextOut& out) const {

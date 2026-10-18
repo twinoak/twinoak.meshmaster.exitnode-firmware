@@ -57,6 +57,15 @@
 // sleep (a WakeState, which the caller keeps in retained storage and hands back). Two things it
 // subtracts: a BackOff returns rather than spins, and the reboot guard does not fire - a unit
 // has its own supervisor and its own idea of what a failure costs.
+//
+// **What a sleep keeps, since task p1.6-22.** The WakeState is small on purpose and carries no
+// result and no advert, so a result a wake kept for its budget - or one the server would not
+// take - was lost with the RAM at the next deep sleep, and its job stayed leased until the
+// server's lease lapsed. A sleeping consumer may now hand the loop a store (IRetained.h) and a
+// scratch: at the end of every wake the loop writes **one image** of the kept results and the
+// ring's waiting adverts into it, only when that would change what the store holds, and
+// `restoreKept()` reads it back after the next boot. The Heltec hands none and nothing of it
+// runs there.
 
 #pragma once
 
@@ -67,6 +76,7 @@
 #include <agent/Envelopes.h>
 #include <agent/IMesh.h>
 #include <agent/IPlatform.h>
+#include <agent/IRetained.h>
 #include <agent/IUplink.h>
 #include <agent/JobRunner.h>
 #include <agent/Observations.h>
@@ -203,6 +213,14 @@ struct WakeReport {
   uint32_t uplinkMs = 0;       // what the server calls took together, which uplinkSeconds bounds
   uint32_t elapsedMs = 0;
 
+  // What this wake left in retained storage (IRetained.h, task p1.6-22), when the caller gave
+  // the loop a store: whether an image was written at all - at most one a wake, and none when
+  // the store already holds what it would say - and what the store was too small for, dropped
+  // from RAM and counted in the heartbeat's `resultsDropped` and `observationsDropped`.
+  bool keptImageWritten = false;
+  int resultsNotKept = 0;
+  int observationsNotKept = 0;
+
   bool halted = false;         // a 401: nothing more is sent until a person fixes it
   // The reboot guard **would** have fired (AgentLoop's twelve unanswered calls over ninety
   // minutes). In one-wake mode it does not: a unit has a supervisor of its own and its own idea
@@ -286,6 +304,30 @@ class AgentLoop {
   WakeState state() const;
   bool restore(const WakeState& state);
 
+  // What a sleep keeps (task p1.6-22; agent/IRetained.h, agent/KeptImage.h). Optional, and for
+  // a device that sleeps: the Heltec calls neither.
+  //
+  // `setRetained` hands the loop a store and a scratch the image is built in - the library
+  // allocates nothing, so the RAM is yours, sized to the most you want kept: a full image is
+  // ResultBuffer::kCapacityBytes plus ObservationRing::kCapacity adverts at kKeptAdvertLen and a
+  // few hundred bytes of headers, about 19.5 kB; the image is never larger than the smaller of
+  // `scratchLen` and the store's `capacity()`, and what does not fit is dropped and counted. A
+  // scratch too small for a header, or a null store, is "no store".
+  //
+  // At the end of every `wake()` the loop writes **one image** - the kept results first, oldest
+  // first, as many whole ones as fit, then the ring's waiting adverts with the moment each was
+  // heard, as many as fit after them - and only when that image is not the one the store already
+  // holds; a unit whose wakes post everything writes nothing. `restoreKept()` is the way back in:
+  // call it once a boot, after `begin()` and before the first wake, and it reads the image into
+  // the offline buffer and the ring, with the two dropped counters the image carried. True when
+  // an image was read, false when the store held none or the image was refused - a torn, short,
+  // foreign-version or bad-checksum image is refused **whole**, never half-read, counted
+  // (`keptImagesRefused()`, which the next image carries across the sleep too) and logged with
+  // the reason.
+  void setRetained(IRetained* store, uint8_t* scratch, size_t scratchLen);
+  bool restoreKept();
+  uint32_t keptImagesRefused() const { return imagesRefused_; }
+
   // One heartbeat, from inside a job (task 06). A claim is run to the end before `claimAndRun`
   // returns and a job is paced by the airtime budget, so a config.read of twenty-one transactions
   // at two a minute is eleven minutes and a region load is thirteen - during which, before this, no
@@ -351,6 +393,14 @@ class AgentLoop {
   void wakeResults(WakeReport& report);
   void wakeJobs(WakeReport& report);
   void wakeObservations(WakeReport& report);
+  // The end of a wake: the kept results and the waiting adverts into the store as one image, if
+  // there is a store and the image would differ from what it holds (task p1.6-22).
+  void keepAcrossSleep(WakeReport& report);
+  // The most bytes an image may be here: the smaller of the scratch and the store's capacity.
+  size_t imageCap() const;
+  // The checksum an image of nothing - with the counters as they stand - would have: what the
+  // store "holds" when it holds no image at all, so that a wake with nothing kept writes none.
+  uint32_t emptyImageCrc();
   // How many jobs this wake may ask the claim for: never more than kClaimMax, and never more
   // than the intent's transaction cap can hold at kTransactionsPerJobAtLeast apiece.
   int claimMax() const;
@@ -433,6 +483,21 @@ class AgentLoop {
   WakeReport* wakeReport_ = nullptr;  // the report being filled, for noteFailure's reboot line
   // The server time the last heartbeat reply carried, 0 when none has.
   uint32_t lastServerTimeUnix_ = 0;
+
+  // ---- what a sleep keeps (task p1.6-22) ------------------------------------------------------
+  // The store and the scratch the caller lent (setRetained), or null: the Heltec's are null and
+  // every branch below is skipped on it.
+  IRetained* retained_ = nullptr;
+  uint8_t* imageScratch_ = nullptr;
+  size_t imageScratchLen_ = 0;
+  // What the store holds, as far as this boot knows: the checksum of the image last read or
+  // written, so that a wake whose image would be the same writes nothing. Not known until
+  // `restoreKept()` has looked, or a write has succeeded; a write that failed makes it unknown
+  // again, and an unknown store is written at the end of the next wake whatever it would hold.
+  bool imageKnown_ = false;
+  uint32_t lastImageCrc_ = 0;
+  bool keptRestored_ = false;    // `restoreKept()` has run this boot: a second call reads nothing
+  uint32_t imagesRefused_ = 0;   // images refused whole, this boot's and the image's own count
 };
 
 }  // namespace mm

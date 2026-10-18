@@ -46,6 +46,7 @@ on the include path of every suite).
 | `support/FakeMesh.h` | **A stock repeater at the MeshCore pin.** `mm::IMesh` with one repeater behind it: a name, an ACL of keys at levels (which on stock firmware *is* the login table), an admin password, a guest password or none, the configuration `CONFIGURATION.md` lists, neighbours, a region map, a clock. It answers `sendLogin`, `sendRequest`, `sendCli`, `sendDiscovery` and `sendTrace` as that firmware does, and faults on cue: silence once, twice or always, a reply with the wrong tag, a reply past the wait, a session the repeater forgot, a login refused, a line it will not answer. Every send is recorded with the fake clock's time, which is what *one send per command*, the minimum gap and the per-minute cap are asserted against |
 | `support/FakeUplink.h` | **A scripted meshmaster.dk.** `mm::IUplink` with a config, heartbeat replies that may say work is waiting, a claim queue of jobs built from the contract fixtures through the firmware's own `parseClaimResponse`, and every result, observation batch, extend and progress call captured as the bytes the library made. Faults: unreachable, 401, 429 with `Retry-After`, 5xx, a 4xx that discards, a slow call |
 | `support/FakePlatform.h` | **A clock that only moves when the test says.** `mm::IPlatform` and `mm::IClock`: `delayMs` *is* the passage of time, so the budget's twenty-second gap is twenty thousand turns of arithmetic and a config read that is eleven minutes on the board is milliseconds here. A seeded random, so a failure is the same failure twice; a log captured rather than printed; and `rebootForHealth` that records its reason and throws, because it may not return and nothing restarts |
+| `support/FakeRetained.h` | **A store that survives a sleep** (task p1.6-22). `mm::IRetained` over a vector: a capacity the test sets, one image written whole and read back, every write and read counted — which is what *at most one image a wake, and none when nothing changed* is held against. The image can be torn short, have a bit flipped, be replaced or erased, and its bytes are readable as text, which is how an image is grepped for a password. A power cut is `clear()`; a sleep is nothing at all, because the vector is the flash and stays |
 | `support/Fixtures.h` | The two fixture sets, read from disk: a companion frame with its wrapper stripped, a contract envelope, and `followsShapeOf` — one object's members against a fixture's, in the fixture's order |
 | `support/Jobs.h` | A claimed job as the server writes one, in `ClaimedJob.json`'s shape |
 
@@ -154,6 +155,18 @@ hold, how long the present run of failures has lasted — and `restore()` re-bas
 them against the clock it finds. It carries the backoff, the consecutive
 failures, the accepted interval, the budget, a 401, and the error counters the
 heartbeat reports, and it refuses a blob of another `version`.
+
+What it does **not** carry is the offline buffer and the observation ring, and
+since task p1.6-22 a store behind `mm::IRetained` does (`docs/library.md` §5.1):
+the end of every wake writes one image of the kept results and the waiting
+adverts — results first, oldest first, whole or not at all, and only when the
+image would differ from what the store holds — and `restoreKept()` reads it back
+after the boot. The rule for a test of it is the one `test_loop`'s *What a sleep
+keeps* cases follow: **a sleep is the loop and the runner destroyed**, and the
+next boot is new ones built from `state()` and the image; `LoopTest::boot()` is
+that in one call, and `NoWakeEverLeavesAJobLeasedAndSilent` sleeps every fifth
+round so that the invariant it holds — what is owed is exactly what the buffer
+holds — is held across sleeps as well as between them.
 
 ## The two older fakes, and why they stay
 
