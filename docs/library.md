@@ -47,27 +47,90 @@ A tag `vX.Y.Z` of this repository is the pin; the version in
 `lib/agent-core/library.json`, `lib/agent-core/idf_component.yml` and
 `agent/Version.h` is the same number, and `test/test_library` fails if one of
 them moves alone. [`docs/upstream.md`](upstream.md)'s *This repository is an
-upstream too* is the page; the short form is:
+upstream too* is the page.
+
+**This repository is private, so a dependency line cannot fetch it.** The short
+form this page gave at `v0.2.0` was a `git:` source at a tag:
 
 ```yaml
-# ESP-IDF: the component manager, in your idf_component.yml
+# ESP-IDF: the component manager, in your idf_component.yml - and see below: as
+# written this needs a credential the machine doing the build has to be given
 dependencies:
   twinoak/agent-core:
     git: https://github.com/twinoak/twinoak.meshmaster.exitnode-firmware.git
     path: lib/agent-core
-    version: v0.2.0
+    version: v0.3.0
 ```
 
 ```ini
-; PlatformIO
-lib_deps = https://github.com/twinoak/twinoak.meshmaster.exitnode-firmware.git#v0.2.0
+; PlatformIO, the same line and the same problem
+lib_deps = https://github.com/twinoak/twinoak.meshmaster.exitnode-firmware.git#v0.3.0
 ```
 
-**Pin the commit the tag names, not the tag**, if your dependency manager lets
-you say either: a tag is a pointer and a pointer can be moved, and a lock file
-that records a commit is a lock file. `git rev-parse v0.2.0` is the commit, and
-it is also what the fixtures' manifest and your own sync manifest should agree
-with — one version in two places is how a pin drifts.
+Either of those is a `git clone` of a private repository at build time. On a
+developer's machine it prompts for a credential; in CI it fails, because a
+workflow's own `GITHUB_TOKEN` can read the repository it runs in and no other.
+So a consumer has to choose between two arrangements, and the first consumer
+chose the first.
+
+### 2.1 A checked copy at a tag — what the Walter did
+
+The library arrives in the consumer's own tree as a **copy at one commit**, never
+edited there, with a manifest that says which commit and what every file's
+SHA-256 is — the same arrangement a copied specification or a copied fixture
+directory has here, and for the same reason. The Walter's
+`tools/sync-agent-core.ps1` is the script, and it brings two trees across:
+
+| In the consumer's tree | From here | Why that shape |
+|---|---|---|
+| `components/agent-core/` | `lib/agent-core/`, the prefix stripped | the ESP-IDF component as it stands, its own `CMakeLists.txt` and `idf_component.yml` included and unedited |
+| `host_test/agent-core/` | `test/support/`, `test/test_runner/`, `test/test_loop/`, `tests/fixtures/contracts/`, `tests/fixtures/companion/`, `platformio.ini` — **at this repository's own paths** | so that every case of the library's own two suites runs there unmodified: `test_runner`'s `Citations` case reads `test/support/FakeMesh.h`, `platformio.ini`'s `[meshcore]` pin and `tests/fixtures/companion/` relative to a `PROJECT_DIR` it is handed, so tidying the layout would cost a case |
+
+Each tree gets a `MANIFEST.txt` whose header is the tag and the commit it was
+copied at, and whose body is a SHA-256 and a size per file. Two commands:
+
+```powershell
+.\tools\sync-agent-core.ps1 -Ref v0.3.0    # copy at that tag, write both manifests
+.\tools\sync-agent-core.ps1 -Verify        # re-hash both trees against them
+```
+
+`-Verify` needs no network and no clone of this repository, which is the point:
+it runs in CI before anything is built, so a copy somebody edited by hand is a
+red build there rather than a surprise on a board. A bump is then a session on a
+machine that *does* have the clone — two commands and a pull request — and the
+tag and the commit are in the manifest for anybody reading the tree later.
+
+**Write the commit down, not only the tag.** A tag is a pointer and a pointer
+can be moved; `git rev-parse v0.3.0` is the commit. The manifest of your copy,
+your lock file and the fixtures' own `MANIFEST.txt` should all agree with it —
+one version in two places is how a pin drifts.
+
+### 2.2 A read-only token — what fetching instead would take
+
+To make the `git:` line above work, the machine doing the build needs a
+**fine-grained personal access token with *Contents: read* on
+`twinoak/twinoak.meshmaster.exitnode-firmware` and nothing else**, handed to git
+for that one host (a `url.…insteadOf` with the token in the URL, or
+`GIT_ASKPASS`). In GitHub Actions it is a repository secret:
+
+```powershell
+gh secret set AGENT_CORE_READ_TOKEN --repo <your org>/<your repository>
+```
+
+**Where that token lives: in the secret store and nowhere else.** Not in
+`idf_component.yml`, not in `platformio.ini`, not in a lock file, not in a
+checked-in `.netrc` or `.gitconfig`, and not in a log line — a clone URL with a
+token in it is printed by every verbose git. It is an environment variable on a
+developer's machine and an Actions secret in CI, and a build that does not have
+it should say so and stop rather than half-work: the Walter's weekly watch of
+this repository takes exactly this route, and without the secret its workflow
+ends **green** at the first step with the explanation in the run summary,
+because a watch that failed red every Monday would be noise and one that
+pretended to have looked would be worse.
+
+The third way out is not a consumer's to take: if this repository is ever made
+public, the two dependency lines above work as written and §2.1 is a paragraph
+of history. Nothing else about the library changes with it.
 
 Under the ESP-IDF, `lib/agent-core/CMakeLists.txt` registers the library as a
 component: one include directory (`include`), 23 sources, and an empty
@@ -86,7 +149,7 @@ Every include is `<agent/X.h>`:
 #include <agent/IPlatform.h>
 ```
 
-**The ESP-IDF build of the component is unverified** at `v0.2.0` — there is no
+**The ESP-IDF build of the component is unverified** at `v0.3.0` — there is no
 ESP-IDF in this repository's toolchain. What has run is the CMake file parsed and
 held against the sources on disk (`tools/check-idf-component.cmake`), and every
 source compiled on a host with an IDF consumer's strictness,
@@ -699,10 +762,18 @@ Two sets, both copied and **never edited here**:
   agent API's envelopes, generated by `MeshMaster.Contracts`' own round-trip
   tests in `twinoak/meshmaster.dk` and copied byte for byte.
   `MANIFEST.txt` names the commit they came from, with a sha256 and a size per
-  file; at `v0.2.0` that commit is **`0595dc2`**, 47 files.
+  file; at `v0.3.0` that commit is **`79b1e9c`**, 69 files — and that bump is the
+  one a consumer has to read, because the **dialect** moved with it (§10, and
+  `CHANGELOG.md`'s `v0.3.0`): meshmaster.dk writes its envelopes with .NET's
+  relaxed JSON encoder now, so `+`, `>`, `&`, `'`, the backtick and every
+  assigned character outside ASCII are **themselves** where they used to be
+  `\uXXXX`. `agent/JsonWriter.h` writes that rule and
+  `test/test_json_escaping` holds it clause by clause against `JsonEscaping.json`,
+  a fixture that exists for exactly that: one string with a character per clause.
+  A second writer of these envelopes is held to the same file.
 - [`tests/fixtures/companion/`](../tests/fixtures/companion/README.md) — 46
   transcribed MeshCore frames, which is what `agent/ReplyCodec.h` is held to.
-  **It has a manifest and a commit of its own** (at `v0.2.0`, `f518ebd`): the two
+  **It has a manifest and a commit of its own** (at `v0.3.0`, still `f518ebd`): the two
   sets move for different reasons — the envelopes when the agent API changes, the
   frames when MeshCore does — and `tools/sync-fixtures.ps1 -Set contracts` or
   `-Set companion` moves one without the other.
@@ -878,7 +949,9 @@ mesh is a link client has one more layer to fake — the link — with `FakeMesh
 the far side of it rather than behind `IMesh`. The scenarios still apply; the
 object under test changes.
 
-The suites to read first are `test/test_runner` (46 cases: all thirteen job
+The suite to read first if you write your own JSON is `test/test_json_escaping`
+(12 cases: `JsonEscaping.json` byte for byte, then one case per clause of the
+escaping rule — §9). After that `test/test_runner` (46 cases: all thirteen job
 types, one send per command, the credential wiped, the lease, the offline buffer,
 a type the mesh cannot carry) and `test/test_loop` (47: the loop, the heartbeat's
 bytes and its `transport`, the advertised list less what the mesh declines, the

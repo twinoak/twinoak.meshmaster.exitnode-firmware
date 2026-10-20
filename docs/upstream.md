@@ -197,8 +197,15 @@ dependencies:
   twinoak/agent-core:
     git: https://github.com/twinoak/twinoak.meshmaster.exitnode-firmware.git
     path: lib/agent-core
-    version: v0.2.0
+    version: v0.3.0
 ```
+
+**And a line like that cannot be fetched**, because this repository is private:
+a build-time clone of it needs a credential the machine doing the build has to
+be given, and a workflow's own `GITHUB_TOKEN` is not one.
+[`docs/library.md`](library.md) §2 is the page for that — the checked copy at a
+tag the first consumer took, and the read-only token that is the alternative,
+with where such a token may and may not live.
 
 **What a consumer must be told about.** Three things, and a release that
 changes one of them says so in [`CHANGELOG.md`](../CHANGELOG.md) — which is

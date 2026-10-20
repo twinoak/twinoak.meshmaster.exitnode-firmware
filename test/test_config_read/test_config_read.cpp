@@ -1,7 +1,9 @@
 // The config read (task 04; agent/ConfigRead.h): the list and its price, the access-list
 // reply read from the transcribed fixture bytes, the region helpers, and the ConfigReadResult
-// held to the .NET fixture byte for byte - `aclRestored` included. Plus the JSON writer's
-// escaping, which that fixture is the first to exercise (`\u003E`).
+// held to the .NET fixture byte for byte - `aclRestored` included. That fixture is also where
+// the writer's escaping shows in a body the board really sends: its CLI reply starts with the
+// firmware's `> `, which was `\u003E` until task p1.6-24 and is a `>` now. The rule itself,
+// clause by clause against `JsonEscaping.json`, is test/test_json_escaping.
 
 #include <gtest/gtest.h>
 
@@ -322,7 +324,7 @@ TEST(ConfigReadResult, TheAclIsTheLastValueAndTheRawLinesFollowInOrder) {
   ASSERT_GT(len, 0u);
   EXPECT_EQ(std::string(out, len),
             "{\"values\":{\"regions\":\"*\\n  dk\\ndefault dk\",\"name\":\"Risskov\",\"acl\":\"c0ffee001122:3\"},"
-            "\"raw\":[\"acl: 23 entries, the firmware\\u0027s reply is full and may be truncated\"],\"aclRestored\":true}");
+            "\"raw\":[\"acl: 23 entries, the firmware's reply is full and may be truncated\"],\"aclRestored\":true}");
 }
 
 TEST(ConfigReadResult, TheSnapshotIsBoundedAndSaysSo) {
@@ -380,15 +382,15 @@ TEST(ConfigReadResult, AThirteenthRawLineIsCountedNotLost) {
   EXPECT_EQ(s.rawDropped, 0);
 }
 
-// The silent-ACL line: the .NET agent's sentence, em dash and section sign included, which the
-// writer escapes as System.Text.Json does.
+// The silent-ACL line: the .NET agent's sentence, em dash and section sign included. Both cost
+// six bytes each on the wire until p1.6-24; under the relaxed rule they are their own UTF-8.
 TEST(ConfigReadResult, TheSilentAclLineIsTheDotNetSentence) {
   const std::string line = mm::kAclSilentLine;
   EXPECT_EQ(line.find("acl: no reply \xE2\x80\x94 an ACL of 24 entries or more"), 0u);
   EXPECT_NE(line.find("(spec/EXIT-NODES.md \xC2\xA7" "4.3)"), std::string::npos);
   EXPECT_EQ(json(mm::kAclSilentLine),
-            "\"acl: no reply \\u2014 an ACL of 24 entries or more, or a firmware without the request, is not answered "
-            "(spec/EXIT-NODES.md \\u00A74.3)\"");
+            "\"acl: no reply \xE2\x80\x94 an ACL of 24 entries or more, or a firmware without the "
+            "request, is not answered (spec/EXIT-NODES.md \xC2\xA7" "4.3)\"");
 }
 
 // ------------------------------------------------------------------ the full list (task p1.3-12)
@@ -538,12 +540,15 @@ TEST(ConfigReadFullList, AReadAtTheCapOfThirtyTwoKeysIsWrittenWhole) {
   EXPECT_STREQ(doc["board"].as<const char*>(), "Heltec v3");
   EXPECT_TRUE(doc["aclRestored"].as<bool>());
 
-  // The escaping is still System.Text.Json's, which is what the fixture holds both ends to.
+  // The escaping is still System.Text.Json's, which is what the fixture holds both ends to - the
+  // relaxed encoder's since p1.6-24, so the angle brackets and the ampersand of a name a stranger
+  // set are themselves, and the two of clause 1 are the only escapes a config read has in it.
   const std::string text(out, len);
   EXPECT_NE(text.find("\\\"the tall one\\\""), std::string::npos) << "a quote is a short escape";
   EXPECT_NE(text.find("c:\\\\site\\\\notes.txt"), std::string::npos);
-  EXPECT_NE(text.find("\\u003CThomas\\u003E"), std::string::npos);
-  EXPECT_NE(text.find("\\u0026"), std::string::npos);
+  EXPECT_NE(text.find("<Thomas>"), std::string::npos) << "clause 5: an angle bracket is itself";
+  EXPECT_NE(text.find(" & "), std::string::npos);
+  EXPECT_EQ(text.find("\\u"), std::string::npos) << "and nothing else of this read is escaped";
 }
 
 // The same read into a buffer that cannot hold it: the raw lines go first and then the trailing
@@ -591,24 +596,6 @@ TEST(ConfigReadFullList, ABufferTooSmallCostsRawLinesAndThenValuesNeverTheRead) 
   JsonDocument doc2;
   ASSERT_FALSE(deserializeJson(doc2, small, tiny)) << std::string(small, tiny);
   EXPECT_EQ(doc2["raw"].as<JsonArrayConst>().size(), 1u) << "the cut note, and nothing else";
-}
-
-// ------------------------------------------------------------------ the writer's escaping
-
-// JavaScriptEncoder.Default: the HTML-sensitive characters and every non-ASCII code point as
-// \uXXXX with uppercase hex, the five short controls in their short forms, the rest \u00XX.
-TEST(JsonWriterEscaping, TheBytesAreSystemTextJsonsForTheSameValue) {
-  EXPECT_EQ(json("> unknown command"), "\"\\u003E unknown command\"");
-  EXPECT_EQ(json("<set>"), "\"\\u003Cset\\u003E\"");
-  EXPECT_EQ(json("a & b + c ' d ` e"), "\"a \\u0026 b \\u002B c \\u0027 d \\u0060 e\"");
-  EXPECT_EQ(json("line\nnext\ttab\r\b\f"), "\"line\\nnext\\ttab\\r\\b\\f\"");
-  EXPECT_EQ(json("\x01\x1f\x7f"), "\"\\u0001\\u001F\\u007F\"");
-  EXPECT_EQ(json("quote \" slash \\ solidus /"), "\"quote \\\" slash \\\\ solidus /\"");
-  EXPECT_EQ(json("Risskov \xC3\x86"), "\"Risskov \\u00C6\"");             // U+00C6
-  EXPECT_EQ(json("\xE2\x80\x94"), "\"\\u2014\"");                         // U+2014
-  EXPECT_EQ(json("\xF0\x9F\x93\xA1"), "\"\\uD83D\\uDCE1\"");             // U+1F4E1, a surrogate pair
-  EXPECT_EQ(json("cut \xC3"), "\"cut \\uFFFD\"");                          // a lead byte with nothing after it
-  EXPECT_EQ(json("Grenaa Chimney #1"), "\"Grenaa Chimney #1\"");
 }
 
 }  // namespace

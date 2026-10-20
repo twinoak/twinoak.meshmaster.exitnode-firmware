@@ -1,8 +1,13 @@
 // The contract is the .NET agent's (tasks/phase-1/02): what this firmware POSTs to
 // /agent/v1/heartbeat and /agent/v1/observations is held against
-// tests/fixtures/contracts/AgentHeartbeat.json and ObservationBatch.json **byte for byte**, for
-// the inputs MeshMaster.Contracts' own round-trip tests wrote those fixtures from. A difference
-// is a bug in the firmware, not a second dialect.
+// tests/fixtures/contracts/AgentHeartbeat.json, AgentHeartbeatNoWake.json and
+// ObservationBatch.json **byte for byte**, for the inputs MeshMaster.Contracts' own round-trip
+// tests wrote those fixtures from. A difference is a bug in the firmware, not a second dialect.
+//
+// Two heartbeat fixtures, because the record has two shapes an exit node really sends: the one
+// that proposes a check-in interval and a wake cap, and the one that proposes neither, which is
+// what this board sends. The second is a file of meshmaster.dk's since its task p4.15-131;
+// before it, this suite held that shape by cutting the first file's bytes (task p1.6-24).
 //
 // ObservationBatch had no fixture until meshmaster.dk's task p4.3-71 wrote one, and this test
 // held the batch to the record in src/MeshMaster.Contracts/Envelopes.cs instead. The file is
@@ -101,24 +106,33 @@ TEST(Heartbeat, TheSameInputMakesTheDotNetFixtureByteForByte) {
 
 // The Heltec proposes nothing: it runs `AgentLoop::loop()` with WiFi up and is back in thirty
 // seconds, so neither field is written and its heartbeat is byte for byte what it was before
-// meshmaster.dk's task 120 - which is that task's own promise ("an agent that sends neither is
-// byte-for-byte as before") held from this end. The expectation is the fixture with its last two
-// members cut off, so it stays anchored to the fixture rather than to a line typed out here: if
-// the record's order ever changes, both tests fail and neither quietly passes.
-TEST(Heartbeat, AnAgentThatProposesNothingWritesTheFixtureWithoutTheTwoWakeFields) {
-  const std::string fixture = readFixture("AgentHeartbeat.json");
-  ASSERT_FALSE(fixture.empty());
-  const size_t at = fixture.find(",\"nextCheckInS\":");
-  ASSERT_NE(at, std::string::npos) << "the fixture no longer carries nextCheckInS: " << fixture;
-  ASSERT_NE(fixture.find("\"maxTransactionsThisWake\":", at), std::string::npos)
-      << "nextCheckInS without maxTransactionsThisWake after it: " << fixture;
-  const std::string withoutThem = fixture.substr(0, at) + "}";
+// meshmaster.dk's task p4.14-120 - which is that task's own promise ("an agent that sends
+// neither is byte-for-byte as before") held from this end. Until task p1.6-24 the expectation
+// was `AgentHeartbeat.json` **cut** at `,\"nextCheckInS\":`, which was anchored to the record's
+// field order and would have said nothing if that order moved; meshmaster.dk's task p4.15-131
+// wrote the absent shape as a file of its own, so the expectation is now a whole fixture and
+// no test here cuts one.
+TEST(Heartbeat, AnAgentThatProposesNothingWritesTheOtherHeartbeatFixture) {
+  const std::string noWake = readFixture("AgentHeartbeatNoWake.json");
+  ASSERT_FALSE(noWake.empty())
+      << "tests/fixtures/contracts/AgentHeartbeatNoWake.json is missing - run tools/sync-fixtures.ps1";
 
   const mm::ErrorCounter errors[] = {{"uplink", 0}};
   const mm::Heartbeat hb = theFixturesSample(errors, 1);
   EXPECT_FALSE(hb.hasNextCheckInS) << "the default is to propose nothing";
   EXPECT_FALSE(hb.hasMaxTransactionsThisWake);
-  EXPECT_EQ(withoutThem, heartbeatJson(hb));
+  EXPECT_EQ(noWake, heartbeatJson(hb));
+
+  // And the two files are the one sample: the same heartbeat, with and without the two wake
+  // fields. Held here so that a change to either in meshmaster.dk fails this test rather than
+  // quietly leaving the two tests measuring two different agents.
+  const std::string withWake = readFixture("AgentHeartbeat.json");
+  ASSERT_FALSE(withWake.empty());
+  ASSERT_FALSE(noWake.empty());
+  EXPECT_EQ(noWake.substr(0, noWake.size() - 1), withWake.substr(0, noWake.size() - 1))
+      << "the two heartbeat fixtures are no longer the same sample";
+  EXPECT_EQ(withWake.substr(noWake.size() - 1), ",\"nextCheckInS\":3600,\"maxTransactionsThisWake\":12}")
+      << "the two wake fields are not what AgentHeartbeat.json adds to it";
 }
 
 // One without the other: both are optional members on their own, and a proposal with no cap is
