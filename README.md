@@ -89,7 +89,22 @@ is the Walter of a repeater-v2 unit, whose platform is the ESP-IDF and whose
 mesh is a RAK on a serial link — which is why there are three interfaces and
 not one.
 
-**Where things stand at `v0.2.0`.** The tree moved and the behaviour did not.
+**Where things stand at `v0.3.0`.** Pile 1.6 is the library as its first
+consumer found it: it builds in a `gnu++` dialect and at `-O2` on GCC 13 now
+(20), a wake spends no byte and no second outside its budget at the job step
+(21), a device that sleeps can keep one image of results and adverts across the
+sleep (22, `agent/IRetained.h`), and the interface can say what a firmware *is*
+and what its mesh cannot carry (23). **The Heltec does none of those things**:
+it does not sleep, it passes no store, its mesh carries everything and its
+heartbeat still says `onboard`. What did change for it is one thing, and it is
+on the wire: meshmaster.dk moved its envelopes to .NET's relaxed JSON encoder,
+so a `+`, a `>` and a Danish letter travel as themselves instead of as
+`\uXXXX` (24). A CLI reply that starts `> ` is five bytes shorter, and a repeater
+called Grenå costs four fewer in every result that names it. Against `v0.2.0`
+the V3 image is **336 bytes more RAM and 1 892 bytes more flash** (the V4, 336
+and 1 884), every byte of it named in `tasks/phase-1.6/reports/`.
+
+**Where things stood at `v0.2.0`.** The tree moved and the behaviour did not.
 The Heltec does exactly what it did at `v0.1.4`: every native test that existed
 before this pile passes with **no assertion changed**, and against that release
 the V3 image is **208 bytes more RAM and 8.4 kB less flash** (the V4, 208 and

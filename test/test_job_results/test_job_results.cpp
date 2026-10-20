@@ -512,10 +512,11 @@ TEST(ControlResults, ASilenceLeavesTheReplyOutAndSaysSo) {
   EXPECT_EQ(std::string(out, len),
             "{\"setTo\":\"2026-09-23T14:05:06Z\",\"confirmed\":false,\"reply\":\"(ERR: clock cannot go backwards)\"}");
   // The admin echo never reaches the result as it came: `password now: <set>`, whose angle
-  // brackets System.Text.Json's default encoder writes as < and > (task 04's writer).
+  // brackets travel as themselves since p1.6-24 - the default encoder wrote them \u003C and
+  // \u003E, which cost this one reply ten bytes of a result.
   len = mm::writePasswordSetResult("adminPassword", true, true, mm::kPasswordSetAdminReplyRedacted, out, sizeof out);
   EXPECT_EQ(std::string(out, len),
-            "{\"field\":\"adminPassword\",\"confirmed\":true,\"sent\":true,\"reply\":\"password now: \\u003Cset\\u003E\"}");
+            "{\"field\":\"adminPassword\",\"confirmed\":true,\"sent\":true,\"reply\":\"password now: <set>\"}");
   len = mm::writePasswordSetResult("adminPassword", false, true, nullptr, out, sizeof out);
   EXPECT_EQ(std::string(out, len), "{\"field\":\"adminPassword\",\"confirmed\":false,\"sent\":true}");
   len = mm::writePasswordSetResult("", false, false, nullptr, out, sizeof out);

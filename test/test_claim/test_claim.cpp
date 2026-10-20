@@ -668,18 +668,24 @@ TEST(Claim, TheCredentialFixtureIsAShapeAndEveryFieldOfItIsRead) {
   ASSERT_EQ(count, 1);
   const mm::ClaimedJob& job = jobs[0];
 
-  // The three passwords, each in its own buffer. The sample's values are longer than the fifteen
-  // characters BaseChatMesh::sendLogin keeps, so what lands is the cut prefix and the cut flag -
-  // the same thing a real claim with a long password gets (Credentials.h).
+  // The three passwords, each in its own buffer, whole: the sample's values are fifteen
+  // characters and fewer since meshmaster.dk's task p4.15-131, which is all a repeater keeps
+  // (`RepeaterPassword.MaxLength` there, `char password[16]` in its firmware), so nothing of a
+  // claim the server can really send is cut. **The cut path has its own long passwords** and
+  // not this fixture: `sixteen-chars-xx` above and in test_credentials, because a sample that
+  // was cut was an example of the lock-out p4.15-131 closed rather than of the shape - and this
+  // end still cuts one that arrives and says so (Credentials.h, LoginSequence.cpp's noteCut).
   EXPECT_TRUE(job.credential.hasGuestPassword);
-  EXPECT_STREQ(job.credential.guestPassword, "guest-password-");
-  EXPECT_TRUE(job.credential.guestPasswordCut);
+  EXPECT_STREQ(job.credential.guestPassword, "guest-pw-sample");
+  EXPECT_FALSE(job.credential.guestPasswordCut);
   EXPECT_TRUE(job.credential.hasAdminPassword);
-  EXPECT_STREQ(job.credential.adminPassword, "admin-password-");
-  EXPECT_TRUE(job.credential.adminPasswordCut);
+  EXPECT_STREQ(job.credential.adminPassword, "admin-pw-sample");
+  EXPECT_FALSE(job.credential.adminPasswordCut);
   EXPECT_TRUE(job.credential.hasNewPassword);
-  EXPECT_STREQ(job.credential.newPassword, "new-password-sa");
-  EXPECT_TRUE(job.credential.newPasswordCut);
+  EXPECT_STREQ(job.credential.newPassword, "new-pw-sample");
+  EXPECT_FALSE(job.credential.newPasswordCut);
+  EXPECT_EQ(std::strlen(job.credential.guestPassword), mm::kMaxPasswordLen)
+      << "the longest of the three is exactly what a repeater keeps";
 
   // The granted level and the candidate word beside them.
   EXPECT_TRUE(job.hasAclLevel);

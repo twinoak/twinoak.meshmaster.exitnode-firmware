@@ -1729,12 +1729,17 @@ TEST_F(LoopTest, EveryKindOfBadImageIsRefusedWholeAndCounted) {
 
 TEST_F(LoopTest, TheImageHoldsNothingAResultDoesNot) {
   // The rail, on the image's own bytes: a rotation, a guest login, a `cli` line and two logins
-  // with the contract fixtures' sample passwords all pass through the runner, every result is
+  // with passwords longer than a repeater keeps all pass through the runner, every result is
   // kept for the budget, and the image that would go to a flash somebody can read holds none of
   // the five secrets - because a result holds none, and the image holds nothing a result does not.
   const std::string admin = "hunter2";                       // MeshMaster.Agent.Tests' CredentialTests
   const std::string rotated = "Rotated-Admin-9";             // and its rotation
-  const std::string guestSample = "guest-password-sample";   // the contract fixtures' three samples
+  // Three the test builds itself, each longer than the fifteen bytes a repeater keeps. They
+  // were `JobCredential.json`'s samples until meshmaster.dk's task p4.15-131 shortened them to
+  // fifteen - the server refuses to store a longer one now - but this end still cuts one that
+  // arrives and says so, and the rail is that neither the whole secret nor the cut prefix
+  // reaches the image. So they are typed here, where their length is the point.
+  const std::string guestSample = "guest-password-sample";
   const std::string adminSample = "admin-password-sample";
   const std::string newSample = "new-password-sample";
   mesh.setAdminPassword(admin);
@@ -1799,9 +1804,9 @@ TEST_F(LoopTest, TheImageHoldsNothingAResultDoesNot) {
     EXPECT_NE(image.find("\"clientId\":\"" + std::to_string(id) + "-"), std::string::npos) << "job " << id << " is not in the image";
   }
   // The rotation's echo, redacted: `password now: <set>`, with the angle brackets as the writer
-  // escapes them - a backslash, then u003C and u003E, the strict encoder's uppercase hex
-  // (agent/JsonWriter.h, until task p1.6-24 moves the dialect).
-  EXPECT_NE(image.find("password now: " + std::string(1, 0x5C) + "u003Cset" + std::string(1, 0x5C) + "u003E"), std::string::npos)
+  // writes them since task p1.6-24 - themselves, the relaxed encoder's clause 5
+  // (agent/JsonWriter.h; they were \u003C and \u003E before it).
+  EXPECT_NE(image.find("password now: <set>"), std::string::npos)
       << "the rotation's echo is in it, redacted: " << image.substr(image.find("16033-"), 600);
   EXPECT_NE(image.find("lock-out"), std::string::npos) << "the refused rotation's reason is in it";
   for (const std::string& secret : {admin, rotated, guestSample, adminSample, newSample}) {
