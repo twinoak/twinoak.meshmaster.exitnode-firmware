@@ -173,14 +173,14 @@ The one wake behaves as reported within one boot; across a deep sleep it does no
 leaks — those two matter. The Walter's p4-01 then built the library as an ESP-IDF component with
 no edit and found two upstream issues, listed here. The items *left by* 15 and 17 above stand.
 
-- [ ] **[1.6] A wake's byte cap and uplink seconds do not bound the job step.** `JobRunner::post()`
+- [x] **[1.6] A wake's byte cap and uplink seconds do not bound the job step.** `JobRunner::post()`
   starts with the unbounded `flushResults()` (`JobRunner.cpp:1374–1377`, `1405–1409`), and
   `runClaimed` and `reportNotRun` post through it: a result `wakeResults` kept back as `NoBudget` is
   flushed with the whole offline buffer by the claim's first job, counted in neither
   `report.bytesPosted` nor `uplinkSpentMs_`. `AByteCapPostsAsManyBatchesAsItFits…` exercises only
   observations. Pass the wake's `bytesLeft` into `post()`, time the job-step posts into the uplink
   seconds, and test a kept result plus a claimed job under a cap.
-- [ ] **[1.6] [walter] The offline result buffer and the observation ring do not survive a deep
+- [x] **[1.6] [walter] The offline result buffer and the observation ring do not survive a deep
   sleep.** `WakeState` (`AgentLoop.h:213–227`) carries backoff, hold, interval, budget, `halted` and
   counters, not `results_` or `ring_`. A result whose post failed is lost on a unit that sleeps, and
   its job stays leased until the server's lease lapses — "no job left leased and silent" holds only
@@ -188,15 +188,15 @@ no edit and found two upstream issues, listed here. The items *left by* 15 and 1
   reuse one `AgentLoop` without `restore()`. Expose both buffers for retained storage or a journal,
   or say in `docs/library.md` §6 that they are RAM and the consumer keeps them (or loses them) on
   purpose. The Walter's RTC memory is nearly full (its phase-3 review): decide with that in view.
-- [ ] **[1.6] A parameter named `unix` in `ConfigReply.cpp:41,48`.** GCC predefines `unix` as 1 in
+- [x] **[1.6] A parameter named `unix` in `ConfigReply.cpp:41,48`.** GCC predefines `unix` as 1 in
   every `gnu++` dialect on a Linux host: fifteen errors (Walter p4-01 report, *Reported upstream* §1,
   with the diff). The host check compiles only `-std=c++17` and xtensa has no such predefine, so
   nothing here sees it. Rename to `epoch`; add a `gnu++17` pass to `tools/check-library-host.py`.
-- [ ] **[1.6] ArduinoJson 7.4.3 raises `-Wmaybe-uninitialized` under GCC 13 at `-O2`**
+- [x] **[1.6] ArduinoJson 7.4.3 raises `-Wmaybe-uninitialized` under GCC 13 at `-O2`**
   (`ObjectImpl.hpp:36`, via `ConfigReply.cpp` and `JobEnvelopes.cpp`; Walter report §2). The host
   check never builds at `-O2`, and `library.json`'s `-Werror` reaches every PlatformIO consumer. Add
   an `-O2` pass; exempt the warning per file or move ArduinoJson.
-- [ ] **[1.6] The heartbeat's `transport` is hard-coded** (`hb.transport = "onboard"`,
+- [x] **[1.6] The heartbeat's `transport` is hard-coded** (`hb.transport = "onboard"`,
   `AgentLoop.cpp:177`; `HeartbeatIdentity` has no field); the Walter needs `native`. One interface
   task with 19's other limitations — no path from `IMesh` to `unsupported`, all thirteen types
   always advertised, `MeshReply::viaPath`/`snr` never read — one CHANGELOG entry, `v0.3.0`.
