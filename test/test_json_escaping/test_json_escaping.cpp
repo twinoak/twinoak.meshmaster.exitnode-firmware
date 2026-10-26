@@ -8,17 +8,27 @@
 // `JsonEscaping.json` - a test-only record nothing sends, in the fixtures for this purpose -
 // carries one character per clause.
 //
-// So this file is two things: that fixture, written by this writer and compared byte for byte,
-// and a test per clause, so that a failure names the clause that moved instead of printing two
-// long strings. The one clause this writer does not carry whole is 7's unassigned code points,
-// which need Unicode's own table; the last test holds what the header promises instead - that a
-// reader makes the same string of our bytes and of .NET's.
+// So this file is three things: that fixture, written by this writer and compared byte for byte;
+// a test per clause, so that a failure names the clause that moved instead of printing two long
+// strings; and - since task p1.7-25 - two seeded fuzz tests over clause 8, which is the clause
+// that is not only a dialect but a rail. .NET's input is a UTF-16 string and the only thing its
+// encoder has to replace is a lone surrogate; this writer's input is **bytes** from a stranger's
+// advert or a repeater's console, and a document that is not UTF-8 is one System.Text.Json
+// refuses - which on this end means a result retried at the head of the ordered queue for ever.
+// The two fuzz tests say that nothing it writes is ill-formed UTF-8 and that nothing well-formed
+// is changed, over input nobody typed.
+//
+// The one clause this writer does not carry whole is 7's unassigned code points, which need
+// Unicode's own table; the test after the fuzz tests holds what the header promises instead -
+// that a reader makes the same string of our bytes and of .NET's.
 
 #include <gtest/gtest.h>
 
 #include <ArduinoJson.h>
 
+#include <cstdint>
 #include <fstream>
+#include <random>
 #include <sstream>
 #include <string>
 
@@ -47,6 +57,95 @@ std::string json(const char* text) {
   w.string(text);
   EXPECT_FALSE(w.overflowed());
   return std::string(out, w.length());
+}
+
+// The same through the explicit-length overload, which is the one a cut name and a cut reply go
+// through (`string(text, len)`): the bytes after `len` are not read at all, so a sequence the
+// buffer cuts is cut here and not by a NUL.
+std::string jsonOf(const char* text, size_t len) {
+  char out[1024];
+  mm::JsonWriter w(out, sizeof out);
+  w.string(text, len);
+  EXPECT_FALSE(w.overflowed());
+  return std::string(out, w.length());
+}
+
+// Is this well-formed UTF-8? **Table 3-7 of the standard**, written out here rather than shared
+// with `JsonWriter.h`: the point of the fuzz tests at the end of this file is that two
+// implementations of the same table agree, and a checker that called the writer's decoder would
+// agree with it by construction.
+bool wellFormedUtf8(const std::string& bytes) {
+  size_t i = 0;
+  while (i < bytes.size()) {
+    const unsigned char c = static_cast<unsigned char>(bytes[i]);
+    size_t need = 0;
+    unsigned char lo = 0x80;
+    unsigned char hi = 0xBF;
+    if (c < 0x80) {
+      i++;
+      continue;
+    }
+    if (c >= 0xC2 && c <= 0xDF) {
+      need = 2;
+    } else if (c == 0xE0) {
+      need = 3;
+      lo = 0xA0;
+    } else if ((c >= 0xE1 && c <= 0xEC) || c == 0xEE || c == 0xEF) {
+      need = 3;
+    } else if (c == 0xED) {
+      need = 3;
+      hi = 0x9F;
+    } else if (c == 0xF0) {
+      need = 4;
+      lo = 0x90;
+    } else if (c >= 0xF1 && c <= 0xF3) {
+      need = 4;
+    } else if (c == 0xF4) {
+      need = 4;
+      hi = 0x8F;
+    } else {
+      return false;  // 0x80-0xC1 and 0xF5-0xFF begin nothing
+    }
+    if (i + need > bytes.size()) return false;
+    for (size_t k = 1; k < need; k++) {
+      const unsigned char cc = static_cast<unsigned char>(bytes[i + k]);
+      if (cc < (k == 1 ? lo : 0x80) || cc > (k == 1 ? hi : 0xBF)) return false;
+    }
+    i += need;
+  }
+  return true;
+}
+
+// One code point as UTF-8, for the generator of well-formed input. Not the writer's code either.
+void appendUtf8(std::string& out, uint32_t cp) {
+  if (cp < 0x80) {
+    out.push_back(static_cast<char>(cp));
+  } else if (cp < 0x800) {
+    out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+    out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+  } else if (cp < 0x10000) {
+    out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+    out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+    out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+  } else {
+    out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+    out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+    out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+    out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+  }
+}
+
+// What a failing fuzz case prints, so that it can be typed straight into a test above.
+std::string hex(const std::string& bytes) {
+  static const char* const kDigits = "0123456789ABCDEF";
+  std::string out;
+  for (const char c : bytes) {
+    const unsigned char b = static_cast<unsigned char>(c);
+    out.push_back(kDigits[b >> 4]);
+    out.push_back(kDigits[b & 0x0F]);
+    out.push_back(' ');
+  }
+  return out;
 }
 
 // The decoded value of JsonEscaping.json's one member, byte for byte: every clause's character,
@@ -154,12 +253,136 @@ TEST(JsonEscaping, Clause7WhatIsStillEscapedAboveAscii) {
   EXPECT_EQ("\"\xEF\xBF\xBD\"", json("\xEF\xBF\xBD"));  // U+FFFD
 }
 
+// The clause task p1.7-25 is about. .NET's own input is a UTF-16 string, so the only thing the
+// encoder ever has to replace is a lone surrogate; this writer's input is **bytes**, which is a
+// wider door, and until this task an overlong form, a code point above U+10FFFF and the lead
+// bytes F5-FF went through it as themselves - so a repeater whose name carried them made a
+// result System.Text.Json refuses, and a refused result is retried at the head of the ordered
+// queue. One U+FFFD per **maximal subpart** (Unicode 3.9, and what .NET makes of the same
+// bytes): the longest prefix that could still have become a character, and then the byte that
+// broke it is read as a byte of its own.
 TEST(JsonEscaping, Clause8ASurrogateOrAByteThatIsNotUtf8IsTheReplacementCharacter) {
   EXPECT_EQ("\"cut \\uFFFD\"", json("cut \xC3"));         // a lead byte with nothing after it
   EXPECT_EQ("\"\\uFFFD(zz\"", json("\xC3\x28zz"));        // a continuation byte that is not one
   EXPECT_EQ("\"\\uFFFDzz\"", json("\x80zz"));             // a lone continuation byte
-  EXPECT_EQ("\"\\uFFFD\"", json("\xED\xA0\x80"));         // U+D800, encoded as if it were a character
-  EXPECT_EQ("\"\\uFFFD\"", json("\xED\xBF\xBF"));         // U+DFFF, the same
+
+  // An overlong form: no sequence that begins C0 or C1 can be well-formed, so the lead byte is
+  // its own maximal subpart and the continuation byte after it is another.
+  EXPECT_EQ("\"\\uFFFD\\uFFFD\"", json("\xC0\x80"));              // U+0000, overlong
+  EXPECT_EQ("\"\\uFFFD\\uFFFD\"", json("\xC0\xAF"));              // `/`, overlong
+  EXPECT_EQ("\"\\uFFFD\\uFFFD\\uFFFD\"", json("\xE0\x83\x85"));   // U+00C5, overlong three bytes
+  EXPECT_EQ("\"\\uFFFD\\uFFFD\\uFFFD\\uFFFD\"", json("\xF0\x80\x83\x85"));  // and overlong four
+
+  // Above U+10FFFF: F4 may be followed by 80-8F and no more, and F5-FF begin nothing at all.
+  EXPECT_EQ("\"\\uFFFD\\uFFFD\\uFFFD\\uFFFD\"", json("\xF4\x90\x80\x80"));  // U+110000
+  EXPECT_EQ("\"\\uFFFD\\uFFFD\\uFFFD\\uFFFD\"", json("\xF5\x80\x80\x80"));  // a lead byte of nothing
+
+  // A surrogate encoded as if it were a character: ED may be followed by 80-9F and no more.
+  EXPECT_EQ("\"\\uFFFD\\uFFFD\\uFFFD\"", json("\xED\xA0\x80"));  // U+D800
+  EXPECT_EQ("\"\\uFFFD\\uFFFD\\uFFFD\"", json("\xED\xBF\xBF"));  // U+DFFF, the same
+
+  // The maximal subpart itself: `E2 82` could still have been the euro sign, so the two bytes
+  // are **one** U+FFFD, and the `A` that broke it is an `A`.
+  EXPECT_EQ("\"\\uFFFDA\"", json("\xE2\x82\x41"));
+  // The same over three bytes of an emoji: `F0 9F 98` could still have become one, so it is one
+  // U+FFFD however long the subpart was, and never one per byte.
+  EXPECT_EQ("\"\\uFFFDA\"", json("\xF0\x9F\x98\x41"));
+
+  // And a sequence the **buffer** cuts, which is what a name cut to kMaxObservationNameLen or a
+  // reply cut to its cap looks like: the bytes that are there are one maximal subpart.
+  EXPECT_EQ("\"a\\uFFFD\"", jsonOf("a\xE2\x82\xAC", 3));      // two bytes of a euro sign
+  EXPECT_EQ("\"a\\uFFFD\"", jsonOf("a\xE2\x82\xAC", 2));      // one byte of it
+  EXPECT_EQ("\"a\xE2\x82\xAC\"", jsonOf("a\xE2\x82\xAC", 4));  // and the whole of it
+  EXPECT_EQ("\"\\uFFFD\"", jsonOf("\xF0\x9F\x98\x80", 3));    // three bytes of an emoji
+}
+
+// ---- and nothing the writer makes of anything is ill-formed UTF-8 -----------------------------
+
+// The rail clause 8 exists for, held over input nobody typed: **no output of this writer is
+// ill-formed UTF-8 and none of it is unparseable**, whatever bytes arrive. The checker is
+// `wellFormedUtf8` above - written from Table 3-7 and not from the writer's decoder, so a
+// mistake shared between the two cannot hide here - and the parse is ArduinoJson's, which is the
+// reader on this end; what the server runs is System.Text.Json, which refuses a document that is
+// not UTF-8 and is the reason this matters.
+//
+// Seeded, so a failure is reproducible and CI and this machine run the same four thousand cases.
+TEST(JsonEscaping, NothingThisWriterMakesOfAnyBytesIsIllFormedUtf8) {
+  std::mt19937 random(20251026u);
+  std::uniform_int_distribution<int> anyByte(1, 255);  // a NUL ends a C string; the writer stops there
+  std::uniform_int_distribution<int> continuation(0x80, 0xBF);
+  std::uniform_int_distribution<int> pieces(0, 6);
+  std::uniform_int_distribution<int> shape(0, 3);
+  std::uniform_int_distribution<int> tailLength(1, 3);
+  std::uniform_int_distribution<uint32_t> codePoint(1, 0x10FFFF);
+  // Uniform noise is almost all lone bytes, and the bug this test exists for needed a **shape**:
+  // a lead byte with a plausible tail after it, which an overlong form and a code point past
+  // U+10FFFF both are. These are the lead bytes no well-formed sequence can begin with or whose
+  // second byte is narrower than 80-BF, so a random tail reaches the overlong forms, the
+  // surrogates and the range above U+10FFFF often rather than once in a hundred runs.
+  static const int kLeads[] = {0x80, 0xC0, 0xC1, 0xE0, 0xED, 0xF0, 0xF4, 0xF5, 0xFE, 0xFF};
+  std::uniform_int_distribution<size_t> lead(0, sizeof kLeads / sizeof kLeads[0] - 1);
+
+  for (int n = 0; n < 4000; n++) {
+    std::string input;
+    const int count = pieces(random);
+    for (int p = 0; p < count; p++) {
+      switch (shape(random)) {
+        case 0:
+          input.push_back(static_cast<char>(anyByte(random)));
+          break;
+        case 1: {  // a lead byte that begins no well-formed sequence, and some of a tail
+          input.push_back(static_cast<char>(kLeads[lead(random)]));
+          const int tail = tailLength(random);
+          for (int t = 0; t < tail; t++) input.push_back(static_cast<char>(continuation(random)));
+          break;
+        }
+        case 2: {  // and a well-formed character, so that the two kinds are mixed
+          uint32_t cp = codePoint(random);
+          while (cp >= 0xD800 && cp <= 0xDFFF) cp = codePoint(random);
+          appendUtf8(input, cp);
+          break;
+        }
+        default:
+          input.push_back(static_cast<char>(continuation(random)));
+          break;
+      }
+    }
+    const std::string out = jsonOf(input.data(), input.size());
+    ASSERT_EQ(out.front(), '"') << hex(input);
+    ASSERT_EQ(out.back(), '"') << hex(input);
+    ASSERT_TRUE(wellFormedUtf8(out)) << "ill-formed UTF-8 out of " << hex(input) << ": " << hex(out);
+    for (const char c : out) {
+      ASSERT_GE(static_cast<unsigned char>(c), 0x20u) << "an unescaped control out of " << hex(input);
+    }
+    const std::string doc = "{\"text\":" + out + "}";
+    JsonDocument parsed;
+    ASSERT_FALSE(deserializeJson(parsed, doc.data(), doc.size())) << hex(input) << " -> " << doc;
+  }
+}
+
+// The other half of the same rail: input that **is** well-formed UTF-8 comes back as itself. A
+// writer could satisfy the test above by replacing everything; this one says it replaces nothing
+// it does not have to. The code points are drawn from the whole of Unicode but the surrogates,
+// so clauses 3 to 7 are all exercised and ArduinoJson unescapes whichever one applied.
+TEST(JsonEscaping, EveryWellFormedStringComesBackAsItself) {
+  std::mt19937 random(20251027u);
+  std::uniform_int_distribution<uint32_t> codePoint(1, 0x10FFFF);
+  std::uniform_int_distribution<int> length(1, 8);
+
+  for (int n = 0; n < 1000; n++) {
+    std::string input;
+    const int len = length(random);
+    for (int i = 0; i < len; i++) {
+      uint32_t cp = codePoint(random);
+      while (cp >= 0xD800 && cp <= 0xDFFF) cp = codePoint(random);
+      appendUtf8(input, cp);
+    }
+    ASSERT_TRUE(wellFormedUtf8(input)) << "the generator made ill-formed input: " << hex(input);
+    const std::string doc = "{\"text\":" + jsonOf(input.data(), input.size()) + "}";
+    JsonDocument parsed;
+    ASSERT_FALSE(deserializeJson(parsed, doc.data(), doc.size())) << hex(input) << " -> " << doc;
+    EXPECT_EQ(input, std::string(parsed["text"].as<const char*>())) << hex(input) << " -> " << doc;
+  }
 }
 
 // ---- the one clause this writer does not carry whole ------------------------------------------

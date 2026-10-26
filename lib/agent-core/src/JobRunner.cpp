@@ -1275,6 +1275,16 @@ Outcome JobRunner::runReboot(const ClaimedJob& job, Context& ctx, size_t& dataLe
 
 // ------------------------------------------------------------------ the runner
 
+// One question, asked in two places: by runJob() below, before a job of one of the thirteen
+// reaches the air, and by a caller that prices a claimed job before it runs it. An extension's
+// own type is never asked - IJobExtension.h: a type that is none of the thirteen is the
+// extension's to run or decline - and a runner with no mesh declines nothing.
+bool JobRunner::meshDeclines(const ClaimedJob& job) const {
+  if (mesh_ == nullptr) return false;
+  const bool offered = extension_ != nullptr && !isKnownJobType(job.type);
+  return !offered && !mesh_->supports(job.type);
+}
+
 Outcome JobRunner::runJob(const ClaimedJob& job, Context& ctx, size_t& dataLen) {
   dataLen = 0;
   // The lease first, before anything is decided about the job (task 06). A claim's jobs are run
@@ -1301,8 +1311,10 @@ Outcome JobRunner::runJob(const ClaimedJob& job, Context& ctx, size_t& dataLen) 
   // cannot carry is not advertised, so the server routes none of it here - but a job claimed
   // before a heartbeat said so, or one bound to this agent, can still arrive, and it is
   // `unsupported` at no transaction with nothing sent, as a type nobody handles is. Asked
-  // before beginJob(), so the mesh is never given a job it has already declined.
-  if (!offered && !mesh_->supports(job.type)) {
+  // before beginJob(), so the mesh is never given a job it has already declined - and asked
+  // through meshDeclines(), which is the same question a caller that prices a job asks before
+  // it prices one (AgentLoop::wakeJobs, task p1.7-25).
+  if (meshDeclines(job)) {
     g_log.add("this mesh cannot carry a '%s' job, so it is not advertised and nothing was sent", job.type);
     return Outcome::Unsupported;
   }

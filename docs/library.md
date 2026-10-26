@@ -268,7 +268,7 @@ flooded) and `Direct` (it went along the path). The library treats `Flood` and
 | `counters()` | A `MeshCounters` reference. The library reads **one** field of it: `advertsDropped`, the adverts whose data did not decode, for the `errors` report. `rx`, `tx`, `adverts` and `rxByType[16]` are for *your* console; leave them zero if you have no such counts. `tx` is worth keeping honest all the same — one per transaction and nothing else is the rail that catches a firmware sending twice |
 | `overheard()` | The heartbeat's `overheard` error counter: frames of the mesh's own chat you counted and never read. On this board it is `rxByType[GRP_TXT] + rxByType[GRP_DATA] + rxByType[TXT_MSG]`. If your mesh cannot tell you a by-type count, report what it can and say so in your own docs — a number that is too low is a lie to the server's page, and 0 says *this transport cannot see chat*, which for a link client may be the truth |
 | `loop()` | The pump. The library calls it whenever it idles — waiting for the airtime budget, waiting for a reply — so that what the radio hears is taken in while a job waits. In-process that is MeshCore's own loop; for a link client it is "read the link, dispatch its events". It must return promptly and must not block |
-| `supports(jobType)` | **What your mesh cannot do** (since `v0.3.0`). Asked for each of the thirteen core types when the heartbeat is built, and once more before a job of one of them is run. Answer `false` and the type is **not advertised** — routing requires the type advertised, so the server sends none of it here — and a job of it that arrives all the same is reported `unsupported` at no transaction, with nothing sent and `beginJob` never called. The extension's types are not asked; they are yours. **It has a default, `true`**: a mesh that does not override it carries everything, which is what every mesh was before and what this board's is. A link client answers from what its link carries — the Walter's UART link has no request for a trace, so it returns `false` for `"trace"`. `jobType` is one of `kJobTypes`' static strings; a `strcmp` is the whole of it, and it must be cheap and never block |
+| `supports(jobType)` | **What your mesh cannot do** (since `v0.3.0`). Asked for each of the thirteen core types when the heartbeat is built, and once more before a job of one of them is run - and since `0.3.1` by `JobRunner::meshDeclines()`, which is that second question as a method, so that a caller which **prices** a claimed job before running it (`wake()`) asks it before it prices one: a type you decline costs no transaction, and pricing it first made a bound job of it `failed`, *wake budget*. Answer `false` and the type is **not advertised** — routing requires the type advertised, so the server sends none of it here — and a job of it that arrives all the same is reported `unsupported` at no transaction, with nothing sent and `beginJob` never called. The extension's types are not asked; they are yours. **It has a default, `true`**: a mesh that does not override it carries everything, which is what every mesh was before and what this board's is. A link client answers from what its link carries — the Walter's UART link has no request for a trace, so it returns `false` for `"trace"`. `jobType` is one of `kJobTypes`' static strings; a `strcmp` is the whole of it, and it must be cheap and never block |
 
 **A job's exchanges.** A job is bracketed by `beginJob` / `endJob`, and between
 them there is one peer and at most one awaited reply.
@@ -489,6 +489,17 @@ carries, `resultsDropped` and `observationsDropped`, which the image carries
 across the sleep too — so a store that is too small is a number on the exit
 node's page, not a silent loss. Results go first because a lost result leaves a
 job leased; a lost advert is heard again.
+
+**And an advert nothing can date is dropped the same way** (since `0.3.1`). An
+advert is kept with the moment it was heard; a unit whose clock has not got the
+time yet — no RTC, no heartbeat answered, which is exactly the wake that keeps
+adverts — has no such moment to write: `millis()` dies with the sleep and the
+sleep's length is unknown. Those adverts are dropped at the write and counted in
+`observationsDropped` rather than written with no time and stamped by the next
+`restoreKept()` with the moment of the restore, which is wrong by the whole
+outage. `WakeReport::observationsNotKept` counts both kinds and the log line says
+which it was. If your unit has an RTC, or takes the server's time before it ever
+sleeps, this never happens.
 
 **The image may hold nothing a result does not.** Its layout is written down in
 `agent/KeptImage.h` — a 32-byte header, then result bodies exactly as
@@ -726,9 +737,10 @@ and the line that would change it is short:
   first. A different job type, through the extension, is the way.
 - **You cannot report a drop that happened before the ring.** The heartbeat's
   `observationsDropped` is `ObservationRing::dropped()` — what *the ring* dropped
-  when it was full, and since `v0.3.0` what the kept image could not hold
-  (§5.1), which is also a drop of the ring's. Adverts your radio or your link
-  lost before they reached `push()` have nowhere to go in the envelope.
+  when it was full, since `v0.3.0` what the kept image could not hold and since
+  `0.3.1` what no clock could date (§5.1), each of which is also a drop of the
+  ring's. Adverts your radio or your link lost before they reached `push()` have
+  nowhere to go in the envelope.
 
 Three limits that stood here at `v0.2.0` are gone at `v0.3.0`, and this is where
 a reader of the older page finds out: you **can** say what your transport is
@@ -770,7 +782,16 @@ Two sets, both copied and **never edited here**:
   `\uXXXX`. `agent/JsonWriter.h` writes that rule and
   `test/test_json_escaping` holds it clause by clause against `JsonEscaping.json`,
   a fixture that exists for exactly that: one string with a character per clause.
-  A second writer of these envelopes is held to the same file.
+  A second writer of these envelopes is held to the same file. **The commit has
+  not moved at `0.3.1`**, and neither has any fixture's bytes; what moved is
+  clause 8, which the rule states for .NET's own input — a UTF-16 string, whose
+  only ill-formed value is a lone surrogate — and which a writer reading **bytes**
+  has to state more widely: an overlong form, a surrogate encoded as a character,
+  a code point above U+10FFFF and the lead bytes F5–FF are ill-formed UTF-8, and
+  each maximal subpart of such a sequence is one `\uFFFD` (Unicode 3.9, and what
+  .NET makes of the same bytes). If your writer copies a character's source bytes
+  through, do this: a document that is not UTF-8 is one System.Text.Json refuses,
+  and a result the server refuses is retried at the head of your ordered queue.
 - [`tests/fixtures/companion/`](../tests/fixtures/companion/README.md) — 46
   transcribed MeshCore frames, which is what `agent/ReplyCodec.h` is held to.
   **It has a manifest and a commit of its own** (at `v0.3.0`, still `f518ebd`): the two

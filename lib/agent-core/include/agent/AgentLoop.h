@@ -218,6 +218,11 @@ struct WakeReport {
   // the loop a store: whether an image was written at all - at most one a wake, and none when
   // the store already holds what it would say - and what the store was too small for, dropped
   // from RAM and counted in the heartbeat's `resultsDropped` and `observationsDropped`.
+  //
+  // `observationsNotKept` also counts the adverts **nothing could date** (task p1.7-25): heard
+  // on a boot whose clock never got the time, so neither an epoch nor an age survives the sleep,
+  // and the alternative to dropping them is an observation stamped with the moment of the next
+  // restore. The log line says which of the two it was.
   bool keptImageWritten = false;
   int resultsNotKept = 0;
   int observationsNotKept = 0;
