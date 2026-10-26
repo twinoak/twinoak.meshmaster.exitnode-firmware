@@ -20,6 +20,67 @@ this repository changed and why is in `tasks/phase-*/reports/`.
 A task that moves one of the four things above adds its line here in the same
 pull request, as `docs/` moves with code.
 
+## v0.3.1 — the strings are UTF-8
+
+Pile 1.7, task 25 (`tasks/phase-1.7/`): three defects the review of pile 1.6
+found, each in this library and each with a test that failed first.
+**`agent-core` 0.3.1** in the three manifests; the contract fixtures **still** at
+meshmaster.dk `79b1e9c` (69 files) and the companion frame fixtures still at
+`f518ebd` (46); MeshCore `companion-v1.17.1`, `d9296435`, unmoved;
+`kMeshReplyDataCap` 184 and `kMeshPathCap` 64, unmoved. The four questions:
+
+- **Did a method move?** No. `JobRunner::meshDeclines(job)` is new and
+  **additive** - a `const` predicate that answers the question `runClaimed()`
+  already asked itself - and nothing was removed or changed shape. Nothing of
+  `IMesh`, `IUplink`, `IPlatform`, `IClock`, `IJobExtension`, `JobContext`,
+  `ResultWriter` or `TextOut` moved.
+- **Did a `MeshReply` constant move?** No.
+- **Did the fixtures' manifest commit move?** No - **and the wire moved all the
+  same**, which is why this section exists. It moved for strings that were
+  **ill-formed UTF-8 before, and for those only**: `JsonWriter::string()` is now
+  the decoder between a stranger's bytes and the wire. Since `v0.3.0` clause 5
+  copies a character's own source bytes through, and the decoder behind it
+  accepted an overlong form, a surrogate encoded as a character, a code point
+  above U+10FFFF and the lead bytes F5-FF - so a repeater whose name carried
+  such bytes (`E0 83 85` for an `Å`) sent a result **System.Text.Json
+  refuses**, and a result the server refuses is kept and retried at the head of
+  the ordered queue, blocking the results behind it until the buffer evicts it.
+  The rule is Table 3-7 of the standard now, and each **maximal subpart** of an
+  ill-formed sequence is one `\uFFFD` (Unicode 3.9, and what .NET makes of the
+  same bytes): a cut `E2 82 41` is one `\uFFFD` and an `A`. Nothing a
+  well-formed string makes of this writer changed, `JsonEscaping.json` still
+  matches byte for byte, and `test/test_json_escaping` carries a case per
+  ill-formed form plus two seeded fuzz tests - **no output of this writer is
+  ill-formed UTF-8, whatever the input was**. If your own writer copies source
+  bytes through, this is the paragraph to read twice.
+- **The version and the pin:** `agent-core` 0.3.1; MeshCore `d9296435`.
+
+What a consumer changes: **nothing, to compile**. What a consumer that
+deep-sleeps should know, in two lines:
+
+- **An advert nothing can date is dropped at the write and counted.** A wake
+  that keeps adverts is the wake whose heartbeat failed; on a unit with no RTC
+  that is also a wake with no clock, and an advert heard on it has no moment to
+  write - `millis()` dies with the sleep and the sleep's length is unknown.
+  `keepAcrossSleep()` used to store epoch 0 and `restoreKept()` then stamped the
+  advert with the moment of the restore, wrong by the whole outage. Both ends
+  now drop such an advert and count it in `observationsDropped` (the read end
+  too, for an image a build before this one left behind), and
+  `WakeReport::observationsNotKept` counts it beside what the store was too
+  small for. The log line says which it was.
+- **A type your mesh declines is declined before it is priced.** `wake()` prices
+  each claimed job against the wake's transaction cap; it now asks
+  `jobs_->meshDeclines(job)` first. A type you answer `false` for costs no
+  transaction, so there was no budget for it to be too large for - and a job of
+  it **bound** to your agent came back `failed`, *wake budget*, where `loop()`
+  answered `unsupported` for the same job. It is `unsupported` at no transaction
+  in both now.
+
+**There is no `v0.3.1` tag yet, and there may never be one:** pile 1.7 tags
+`v0.4.0` when its task 28 has merged (`tasks/phase-1.7/README.md`), and a tag is
+a person pushing it either way. A consumer that wants the UTF-8 fix before that
+takes this library at the commit, as `docs/library.md` §2.1 describes.
+
 ## v0.3.0 — a wake that keeps its budget, a sleep that keeps its results, and a new wire dialect
 
 Pile 1.6, tasks 20–24 (`tasks/phase-1.6/`): opened by task 22, filled by 23,

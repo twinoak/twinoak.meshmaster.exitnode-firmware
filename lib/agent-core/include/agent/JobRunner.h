@@ -245,6 +245,15 @@ class JobRunner {
   void reportNotRun(int i, const char* why);
   void endClaim();
 
+  // Will this job be **declined** rather than run, because the mesh cannot carry its type
+  // (IMesh::supports, task p1.6-23)? `runClaimed` asks this itself, before anything goes on the
+  // air, and answers `unsupported` at no transaction with nothing sent. A caller that prices a
+  // job before running it asks it **first** (task p1.7-25): a type this unit will never carry
+  // costs no transaction, so pricing it is pricing a job that was never going to be run, and a
+  // bound `trace` in a tight wake came back `failed`, *wake budget*, instead of `unsupported`.
+  // The extension's own types are not asked; they are the extension's to decline.
+  bool meshDeclines(const ClaimedJob& job) const;
+
   // The offline buffer (task 06): results the server did not take are kept and posted later,
   // oldest first, with the timestamps and the client ids they were made with. Called by the
   // agent loop after every heartbeat the server answered - "the offline buffer is posted first,

@@ -306,13 +306,17 @@ TEST(Seams, TheMeshIsAskedWhatItCannotCarryAtTheHeartbeatAndBeforeAJobAndTheHelt
   const size_t to = runner.find("class JobRunner::ExtensionJob", from);
   ASSERT_NE(from, std::string::npos);
   const std::string body = runner.substr(from, to - from);
-  const size_t asked = body.find("if (!offered && !mesh_->supports(job.type)) {");
+  const size_t asked = body.find("if (meshDeclines(job)) {");
   const size_t begun = body.find("mesh_->beginJob(");
   ASSERT_NE(asked, std::string::npos) << "the runner asks the mesh for one of the thirteen";
   ASSERT_NE(begun, std::string::npos);
   EXPECT_LT(asked, begun) << "asked before the job is begun on the mesh, so nothing is sent for a type it declined";
   EXPECT_NE(body.find("return Outcome::Unsupported;", asked), std::string::npos);
   EXPECT_LT(body.find("return Outcome::Unsupported;", asked), begun) << "and the answer is unsupported";
+  // And the question itself is one function, so that a caller which prices a job before running
+  // it asks the same thing the runner does (task p1.7-25).
+  EXPECT_NE(runner.find("return !offered && !mesh_->supports(job.type);"), std::string::npos)
+      << "meshDeclines() is where the question lives";
 
   const std::string board = readFile(root / "src/mesh/AgentMesh.h");
   EXPECT_EQ(board.find("supports("), std::string::npos)
@@ -324,6 +328,25 @@ TEST(Seams, TheMeshIsAskedWhatItCannotCarryAtTheHeartbeatAndBeforeAJobAndTheHelt
   const std::string fake = readFile(root / "test/support/FakeMesh.h");
   EXPECT_EQ(fake.find("viaPath"), std::string::npos);
   EXPECT_EQ(fake.find("reply.snr"), std::string::npos);
+}
+
+// A wake that **prices** each claimed job before it runs it asks that same question first (task
+// p1.7-25). A type the mesh declines spends no transaction, so there is no budget for it to be
+// too large for; priced first, a bound `trace` on a mesh with no trace came back `failed`,
+// *wake budget*, where `loop()` answered `unsupported` for the same job.
+TEST(Seams, AWakeAsksTheMeshWhetherItCarriesAJobBeforeItPricesIt) {
+  const fs::path root(PROJECT_DIR);
+  const std::string loop = readFile(root / "lib/agent-core/src/AgentLoop.cpp");
+  const size_t from = loop.find("void AgentLoop::wakeJobs(WakeReport& report) {");
+  ASSERT_NE(from, std::string::npos);
+  const size_t to = loop.find("\n}", from);
+  ASSERT_NE(to, std::string::npos);
+  const std::string body = loop.substr(from, to - from);
+  const size_t asked = body.find("if (jobs_->meshDeclines(job)) {");
+  const size_t priced = body.find("transactionsOf(job);");
+  ASSERT_NE(asked, std::string::npos) << "the wake asks the runner's own question";
+  ASSERT_NE(priced, std::string::npos);
+  EXPECT_LT(asked, priced) << "asked before the job is priced";
 }
 
 // ---- the interfaces on a host -------------------------------------------------------------------
