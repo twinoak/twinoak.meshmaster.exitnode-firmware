@@ -42,10 +42,14 @@ std::string setReply(const mm::KeyDef& key) {
 
 // ---- the keys -------------------------------------------------------------------------------
 
-TEST(Keys, TheTableHasTheTwelveKeysTheTasksAskFor) {
-  const char* expected[] = {"wifi.ssid", "wifi.pass", "meshmaster.url", "meshmaster.token",
-                            "radio.freq", "radio.bw", "radio.sf",       "radio.cr",
-                            "radio.tx",   "log.level", "log.frames",    "display.timeout"};
+TEST(Keys, TheTableHasTheTwentyEightKeysTheTasksAskFor) {
+  // The twelve of phase 1, and the sixteen of the observer (task p1.7-26), in `get`'s order.
+  const char* expected[] = {"wifi.ssid",      "wifi.pass",      "meshmaster.url", "meshmaster.token", "radio.freq",
+                            "radio.bw",       "radio.sf",       "radio.cr",       "radio.tx",         "log.level",
+                            "log.frames",     "display.timeout", "mqtt.origin",   "mqtt.iata",        "mqtt.owner",
+                            "mqtt.email",     "mqtt1.preset",   "mqtt1.server",   "mqtt1.audience",   "mqtt1.topic",
+                            "mqtt1.username", "mqtt1.password", "mqtt2.preset",   "mqtt2.server",     "mqtt2.audience",
+                            "mqtt2.topic",    "mqtt2.username", "mqtt2.password"};
   ASSERT_EQ(kKeyCount, static_cast<int>(sizeof expected / sizeof expected[0]));
   for (int i = 0; i < kKeyCount; i++) {
     EXPECT_STREQ(expected[i], kKeys[i].name);
@@ -60,14 +64,45 @@ TEST(Keys, NvsNamesFitTheFifteenCharacterLimitAndAreUnique) {
   }
 }
 
-TEST(Keys, ExactlyTheTwoSecretsAreSecret) {
+TEST(Keys, ExactlyTheFourSecretsAreSecret) {
   int secrets = 0;
   for (const mm::KeyDef& k : kKeys) {
     if (mm::isSecret(k)) secrets++;
   }
-  EXPECT_EQ(2, secrets);
+  EXPECT_EQ(4, secrets);
   EXPECT_TRUE(mm::isSecret(*mm::findKey("wifi.pass")));
   EXPECT_TRUE(mm::isSecret(*mm::findKey("meshmaster.token")));
+  EXPECT_TRUE(mm::isSecret(*mm::findKey("mqtt1.password")));
+  EXPECT_TRUE(mm::isSecret(*mm::findKey("mqtt2.password")));
+}
+
+TEST(Keys, WifiPwdIsAnotherNameForWifiPass) {
+  // The observer firmware's name for the passphrase (task p1.7-26): the same key, so the same
+  // redaction - and `get wifi.pwd` says what `get wifi.pass` says.
+  EXPECT_EQ(mm::findKey("wifi.pass"), mm::findKey("wifi.pwd"));
+  const ParseResult r = parseLine("set wifi.pwd correct horse battery");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_STREQ("wifi.pass", r.command.key->name);
+  EXPECT_STREQ("correct horse battery", r.command.value);
+  EXPECT_EQ("ok wifi.pass", setReply(*r.command.key));
+  EXPECT_EQ("wifi.pass set", describe(*parseLine("get wifi.pwd").command.key, "x"));
+  EXPECT_EQ(nullptr, mm::findKey("wifi.password")) << "only the observer firmware's spelling";
+}
+
+TEST(Keys, TimezoneAndBridgeSourceAreAnsweredNotStored) {
+  for (const char* line : {"set timezone CEST", "set bridge.source rx", "get timezone", "set timezone", "get bridge.source"}) {
+    const ParseResult r = parseLine(line);
+    EXPECT_TRUE(r.ok) << line << ": " << r.error;
+    EXPECT_EQ(Verb::Note, r.command.verb) << line;
+    ASSERT_NE(nullptr, r.command.note) << line;
+    EXPECT_EQ(nullptr, r.command.key) << line;
+  }
+  EXPECT_STREQ("timezone: nothing to set; this firmware keeps UTC from the server or SNTP, and what it publishes is stamped in UTC",
+               parseLine("set timezone CEST").command.note);
+  EXPECT_STREQ("bridge.source: nothing to set; an exit node publishes what it receives (rx) and forwards nothing",
+               parseLine("set bridge.source rx").command.note);
+  EXPECT_EQ(Verb::Presets, parseLine("get mqtt.presets").command.verb);
+  EXPECT_FALSE(parseLine("set mqtt.presets x").ok) << "the list is read, never set";
 }
 
 TEST(Keys, EveryKeyAcceptsAValidValueAndSetIsAcceptedForIt) {
@@ -88,6 +123,22 @@ TEST(Keys, EveryKeyAcceptsAValidValueAndSetIsAcceptedForIt) {
       {"log.level", "debug"},
       {"log.frames", "on"},
       {"display.timeout", "300"},
+      {"mqtt.origin", "Window at Grenaa"},
+      {"mqtt.iata", "AAR"},
+      {"mqtt.owner", "0123456789ABCDEF0123456789abcdef0123456789ABCDEF0123456789abcdef"},
+      {"mqtt.email", "thomas@example.dk"},
+      {"mqtt1.preset", "meshview"},
+      {"mqtt1.server", "wss://mqtt.meshview.dk:443/mqtt"},
+      {"mqtt1.audience", "mqtt.meshview.dk"},
+      {"mqtt1.topic", "meshcore/{iata}/{device}/{type}"},
+      {"mqtt1.username", "observer"},
+      {"mqtt1.password", "correct horse battery"},
+      {"mqtt2.preset", "meshmapper"},
+      {"mqtt2.server", "mqtts://broker.example.org:8883"},
+      {"mqtt2.audience", "broker.example.org"},
+      {"mqtt2.topic", "mine/{device}/{type}"},
+      {"mqtt2.username", "observer"},
+      {"mqtt2.password", "correct horse battery"},
   };
   ASSERT_EQ(kKeyCount, static_cast<int>(sizeof samples / sizeof samples[0]));
   for (const Sample& s : samples) {
@@ -231,6 +282,60 @@ TEST(Refusals, TheWifiValuesAreBounded) {
 TEST(Refusals, LogKeysTakeTheirWordsOnly) {
   EXPECT_STREQ("log.level: error | warn | info | debug", parseLine("set log.level verbose").error);
   EXPECT_STREQ("log.frames: on | off", parseLine("set log.frames yes").error);
+}
+
+TEST(Refusals, TheObserverKeysHoldTheObserverFirmwaresShapes) {
+  // mqtt.iata: three letters, any case typed, uppercase stored (task p1.7-26).
+  EXPECT_STREQ("mqtt.iata: three letters, e.g. AAR", parseLine("set mqtt.iata AARH").error);
+  EXPECT_STREQ("mqtt.iata: three letters, e.g. AAR", parseLine("set mqtt.iata A1R").error);
+  EXPECT_STREQ("AAR", parseLine("set mqtt.iata aar").command.value);
+  EXPECT_STREQ("CPH", parseLine("set mqtt.iata Cph").command.value);
+  // mqtt.owner: 64 hex digits.
+  EXPECT_STREQ("mqtt.owner: a public key is 64 hex digits", parseLine("set mqtt.owner 0123").error);
+  EXPECT_STREQ("mqtt.owner: a public key is 64 hex digits",
+               parseLine("set mqtt.owner 0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEG").error);
+  // mqtt.email: one @, no spaces.
+  EXPECT_STREQ("mqtt.email: name@host, at most 63 characters", parseLine("set mqtt.email thomas").error);
+  EXPECT_STREQ("mqtt.email: name@host, at most 63 characters", parseLine("set mqtt.email thomas@ example.dk").error);
+  EXPECT_TRUE(parseLine("set mqtt.email thomas@example.dk").ok);
+  // mqttN.preset: the table's names and the two words, case-sensitive.
+  EXPECT_STREQ("mqtt1.preset: none | meshview | meshmapper | custom (get mqtt.presets)", parseLine("set mqtt1.preset analyzer-us").error);
+  EXPECT_STREQ("mqtt2.preset: none | meshview | meshmapper | custom (get mqtt.presets)", parseLine("set mqtt2.preset MeshView").error);
+  EXPECT_TRUE(parseLine("set mqtt1.preset none").ok);
+  EXPECT_TRUE(parseLine("set mqtt2.preset custom").ok);
+  // mqttN.server: TLS only.
+  EXPECT_STREQ("mqtt1.server: the scheme must be wss:// or mqtts:// (TLS is verified; ws:// and mqtt:// are not taken)",
+               parseLine("set mqtt1.server ws://192.168.1.50:9001/mqtt").error);
+  EXPECT_STREQ("mqtt1.server: the scheme must be wss:// or mqtts:// (TLS is verified; ws:// and mqtt:// are not taken)",
+               parseLine("set mqtt1.server mqtt://mqtt.tennmesh.com:1883").error);
+  EXPECT_STREQ("mqtt1.server: wss://host[:port][/path] or mqtts://host[:port], at most 63 characters",
+               parseLine("set mqtt1.server wss://").error);
+  EXPECT_STREQ("mqtt1.server: '?' is not allowed in a URL here", parseLine("set mqtt1.server wss://a.dk/?x").error);
+  EXPECT_TRUE(parseLine("set mqtt1.server wss://mqtt.meshview.dk:443/mqtt").ok);
+  EXPECT_TRUE(parseLine("set mqtt1.server mqtts://meshrank.net:8883").ok);
+  // mqttN.audience: a host name.
+  EXPECT_STREQ("mqtt1.audience: a host name, letters, digits, . and -, at most 63 characters",
+               parseLine("set mqtt1.audience wss://mqtt.meshview.dk").error);
+  EXPECT_STREQ("mqtt1.audience: a host name, letters, digits, . and -, at most 63 characters", parseLine("set mqtt1.audience .dk").error);
+  // mqttN.topic: no wildcard, no space.
+  EXPECT_STREQ("mqtt1.topic: a topic template of printable characters, no space, + or #, at most 95 characters",
+               parseLine("set mqtt1.topic meshcore/+/{device}/#").error);
+  EXPECT_STREQ("mqtt1.topic: a topic template of printable characters, no space, + or #, at most 95 characters",
+               parseLine("set mqtt1.topic meshcore/{iata} x").error);
+  EXPECT_TRUE(parseLine("set mqtt1.topic meshcore/{iata}/{device}/{type}").ok);
+  // The sizes are the observer firmware's buffers less the NUL.
+  EXPECT_STREQ("mqtt.origin: 1..31 characters", parseLine(("set mqtt.origin " + std::string(32, 'a')).c_str()).error);
+  EXPECT_STREQ("mqtt1.username: 1..31 characters", parseLine(("set mqtt1.username " + std::string(32, 'a')).c_str()).error);
+  EXPECT_STREQ("mqtt1.password: 1..63 characters", parseLine(("set mqtt1.password " + std::string(64, 'a')).c_str()).error);
+}
+
+TEST(Redaction, ASlotPasswordIsNeverInWhatGetPrints) {
+  const mm::KeyDef& key = *mm::findKey("mqtt2.password");
+  EXPECT_EQ("mqtt2.password set", describe(key, "correct horse battery"));
+  EXPECT_EQ("mqtt2.password unset", describe(key, nullptr));
+  EXPECT_EQ("ok mqtt2.password", setReply(key));
+  EXPECT_EQ("mqtt1.preset unset (none)", describe(*mm::findKey("mqtt1.preset"), ""));
+  EXPECT_EQ("mqtt.iata AAR", describe(*mm::findKey("mqtt.iata"), "AAR"));
 }
 
 // ---- the other line shapes ------------------------------------------------------------------

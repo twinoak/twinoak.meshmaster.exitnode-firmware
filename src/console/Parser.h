@@ -21,6 +21,13 @@
 //   wifi                     scan, and the link's state
 //   reboot
 //   erase confirm            forget every setting (the identity stays); "confirm" is the word
+//   get mqtt.presets         the broker presets a slot can take (task p1.7-26)
+//
+// Since task p1.7-26 the lines of the observer firmware's Danish guide are understood as well:
+// `set wifi.pwd ...` is `set wifi.pass ...` (Keys.cpp, findKey), and `set timezone ...` and
+// `set bridge.source ...` - two settings this firmware has nothing to store for - are answered
+// with one line each saying what it does instead (Keys.cpp, explainKey), as a Note rather than
+// a refusal, so the guide typed in order ends in a valid configuration with no `error:` in it.
 
 #pragma once
 
@@ -47,12 +54,15 @@ enum class Verb : unsigned char {
   Wifi,
   Reboot,
   Erase,   // only ever produced with the confirmation word present
+  Note,    // a line accepted and answered with one line of explanation: `set timezone ...`
+  Presets, // `get mqtt.presets`
 };
 
 struct Command {
   Verb verb = Verb::Empty;
   const KeyDef* key = nullptr;    // Set and Get
-  char value[kMaxValueLen + 1] = {0};  // Set
+  char value[kMaxValueLen + 1] = {0};  // Set, after normalizeValue (Keys.h)
+  const char* note = nullptr;     // Note: the line to print
 };
 
 // The longest line the console accepts, without its line ending.

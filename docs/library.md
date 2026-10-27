@@ -40,6 +40,7 @@ Concretely, these are yours:
 | where a log line goes | one function pointer, `mm::logSetSink` |
 | storage | the library reads no setting and writes no file. Everything it needs comes in as a value: the token is your uplink's, the identity and the radio parameters are a `HeartbeatIdentity` you fill. The one thing it will *hand you* to store is the image a sleep keeps (`IRetained`, §5.1) — optional, and only a device that sleeps wants it |
 | the console, the display, a watchdog, sleep | yours entirely. The library's console *reports* (`jobs`, `sessions`, `server`, `errors`) write to a `TextOut` you implement if you want them |
+| the observer (`src/observer/`, pile 1.7) | the Heltec's and not the library's: the dialect of the community's MQTT observers, signed in with the node's own key, over the frames *this* radio hears. The Walter has no use for it — its radio is a RAK across a UART, and what it carries to meshmaster.dk goes through `IUplink`, not to a broker — so it is a module of this firmware beside the library, host-tested on its own (`test/test_observer`), and nothing of it is reached from `<agent/...>` |
 
 ## 2. Taking it
 

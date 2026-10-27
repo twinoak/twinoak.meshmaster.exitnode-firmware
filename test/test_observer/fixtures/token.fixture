@@ -1,0 +1,28 @@
+# token - the sign-in token's header and claims, and their base64url forms
+#
+# Written by hand from the observer firmware's source, agessaman/MeshCore observer-firmware @ d664d89df66bdacc1319900a2e2d152fa31b9dc9, src/helpers/JWTHelper.cpp:
+#   header       :144-157  {"alg":"Ed25519","typ":"JWT"}, then base64url
+#   claims       :159-202  publicKey (64 UPPERCASE hex, :43-48), aud, iat, exp = iat + lifetime (when a lifetime is given),
+#                owner (when set; uppercased by MQTTBridge.cpp:2968-2975), client (when set; "meshcore/<firmware_version>",
+#                MQTTBridge.cpp:2977-2978), email (when set) - in that order, then base64url
+#   base64url    :115-142  mbedtls base64 with + and / swapped for - and _ and the = padding removed; the strings below
+#                are Python's base64.urlsafe_b64encode of the same bytes with the padding stripped
+#   signature    :68-96    ed25519_sign over "<header>.<claims>", as 128 UPPERCASE hex - a signature cannot be written
+#                here by hand; the test makes it with MeshCore's ed25519 from a fixed seed and verifies it with the public key
+#   username     MQTTBridge.cpp:2961-2965  "v1_" + the public key as UPPERCASE hex
+#   lifetime     MQTTConnectionPolicy.h:17,159-169; MQTTBridge.cpp:2919-2927  86400 for slot 1; 86400 - min(86400/20, 300) = 86100 for slot 2
+#   renewal      MQTTConnectionPolicy.h:171-191  86400/10 capped at 300: made again 300 s before exp
+# The claims here are a slot-1 meshview token with every optional claim set (the owner typed in lowercase, to show it is
+# uppercased), and a slot-2 meshmapper token with none.
+publicKeyHex=7F3A9C02E1B44D9A0F6C2B7D8E9A1C3F5D7B9E0A2C4E6F8A0B1C2D3E4F5A6B7C
+owner=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+client=meshcore/meshmaster-agent 0.0.0-dev on MeshCore companion-v1.17.1
+email=thomas@example.dk
+iat=1793016000
+header={"alg":"Ed25519","typ":"JWT"}
+headerB64=eyJhbGciOiJFZDI1NTE5IiwidHlwIjoiSldUIn0
+claims1={"publicKey":"7F3A9C02E1B44D9A0F6C2B7D8E9A1C3F5D7B9E0A2C4E6F8A0B1C2D3E4F5A6B7C","aud":"mqtt.meshview.dk","iat":1793016000,"exp":1793102400,"owner":"0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF","client":"meshcore/meshmaster-agent 0.0.0-dev on MeshCore companion-v1.17.1","email":"thomas@example.dk"}
+claims1B64=eyJwdWJsaWNLZXkiOiI3RjNBOUMwMkUxQjQ0RDlBMEY2QzJCN0Q4RTlBMUMzRjVEN0I5RTBBMkM0RTZGOEEwQjFDMkQzRTRGNUE2QjdDIiwiYXVkIjoibXF0dC5tZXNodmlldy5kayIsImlhdCI6MTc5MzAxNjAwMCwiZXhwIjoxNzkzMTAyNDAwLCJvd25lciI6IjAxMjM0NTY3ODlBQkNERUYwMTIzNDU2Nzg5QUJDREVGMDEyMzQ1Njc4OUFCQ0RFRjAxMjM0NTY3ODlBQkNERUYiLCJjbGllbnQiOiJtZXNoY29yZS9tZXNobWFzdGVyLWFnZW50IDAuMC4wLWRldiBvbiBNZXNoQ29yZSBjb21wYW5pb24tdjEuMTcuMSIsImVtYWlsIjoidGhvbWFzQGV4YW1wbGUuZGsifQ
+claims2={"publicKey":"7F3A9C02E1B44D9A0F6C2B7D8E9A1C3F5D7B9E0A2C4E6F8A0B1C2D3E4F5A6B7C","aud":"mqtt.meshmapper.net","iat":1793016000,"exp":1793102100}
+claims2B64=eyJwdWJsaWNLZXkiOiI3RjNBOUMwMkUxQjQ0RDlBMEY2QzJCN0Q4RTlBMUMzRjVEN0I5RTBBMkM0RTZGOEEwQjFDMkQzRTRGNUE2QjdDIiwiYXVkIjoibXF0dC5tZXNobWFwcGVyLm5ldCIsImlhdCI6MTc5MzAxNjAwMCwiZXhwIjoxNzkzMTAyMTAwfQ
+username=v1_7F3A9C02E1B44D9A0F6C2B7D8E9A1C3F5D7B9E0A2C4E6F8A0B1C2D3E4F5A6B7C

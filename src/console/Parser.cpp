@@ -115,8 +115,16 @@ ParseResult parseLine(const char* line) {
     for (const char* p = rest; *p; p++) {
       if (isSpace(*p)) return refuse("get takes one key: get <key>");
     }
+    if (std::strcmp(rest, "mqtt.presets") == 0) return accept(Verb::Presets);
     const KeyDef* key = findKey(rest);
-    if (key == nullptr) return refuse("unknown key: %s (try 'help')", rest);
+    if (key == nullptr) {
+      if (const char* note = explainKey(rest)) {
+        ParseResult r = accept(Verb::Note);
+        r.command.note = note;
+        return r;
+      }
+      return refuse("unknown key: %s (try 'help')", rest);
+    }
     ParseResult r = accept(Verb::Get);
     r.command.key = key;
     return r;
@@ -131,7 +139,16 @@ ParseResult parseLine(const char* line) {
       while (*value && isSpace(*value)) value++;
     }
     const KeyDef* key = findKey(keyName);
-    if (key == nullptr) return refuse("unknown key: %s (try 'help')", keyName);
+    if (key == nullptr) {
+      // `set timezone CEST`, `set bridge.source rx`: the observer guide's lines this firmware has
+      // nothing to store for are accepted and answered, value or no value.
+      if (const char* note = explainKey(keyName)) {
+        ParseResult r = accept(Verb::Note);
+        r.command.note = note;
+        return r;
+      }
+      return refuse("unknown key: %s (try 'help')", keyName);
+    }
     if (*value == '\0') return refuse("set %s needs a value: set %s <value>", key->name, key->name);
     const size_t valueLen = std::strlen(value);
     if (valueLen > kMaxValueLen) return refuse("%s: the value is too long", key->name);
@@ -145,6 +162,7 @@ ParseResult parseLine(const char* line) {
     }
     std::memcpy(r.command.value, value, valueLen);
     r.command.value[valueLen] = '\0';
+    normalizeValue(*key, r.command.value);
     return r;
   }
   return refuse("unknown command: %s (try 'help')", verb);

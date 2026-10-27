@@ -112,10 +112,36 @@ void AgentMesh::remember(const HeardAdvert& advert) {
   if (recentCount_ < kRecent) recentCount_++;
 }
 
-void AgentMesh::logRx(mesh::Packet* pkt, int, float) {
+void AgentMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
+  // The bytes as the radio received them, kept for the observer until logRx says the dispatcher
+  // accepted the frame (RxFrame in AgentMesh.h). Nothing of them is printed: the frame log is
+  // logFrame's and prints a job's frames only.
+  rawStashed_ = false;
+  if (tap_ == nullptr || raw == nullptr || len <= 0 || len > static_cast<int>(sizeof rawStash_)) return;
+  std::memcpy(rawStash_, raw, static_cast<size_t>(len));
+  rawStashLen_ = len;
+  rawStashSnr_ = snr;
+  rawStashRssi_ = rssi;
+  rawStashed_ = true;
+}
+
+void AgentMesh::logRx(mesh::Packet* pkt, int, float score) {
   // The one moment the radio's "last RSSI" still belongs to this packet: a flood frame can wait
   // in the inbound queue for up to a second before onRecvPacket sees it (Dispatcher::checkRecv).
   noteRssi(pkt, _radio->getLastRSSI());
+
+  // And the one moment the stashed bytes and this packet are known to be the same frame.
+  if (tap_ != nullptr && rawStashed_) {
+    RxFrame frame;
+    frame.raw = rawStash_;
+    frame.len = rawStashLen_;
+    frame.snr = rawStashSnr_;
+    frame.rssi = rawStashRssi_;
+    frame.score = score;
+    pkt->calculatePacketHash(frame.hash);
+    tap_->onRxFrame(frame);
+  }
+  rawStashed_ = false;
 }
 
 mesh::DispatcherAction AgentMesh::onRecvPacket(mesh::Packet* pkt) {

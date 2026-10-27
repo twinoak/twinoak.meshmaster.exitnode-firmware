@@ -1,0 +1,40 @@
+# status-online-stats - the status message, every stat known
+#
+# Written by hand from the observer firmware's source, agessaman/MeshCore observer-firmware @ d664d89df66bdacc1319900a2e2d152fa31b9dc9.
+#   status, timestamp, origin, origin_id, model, firmware_version, radio, client_version, repeat, stats
+#                MQTTPayloadBuilder.cpp:206-216 in that order; repeat only when given (:214-216)
+#   model        examples/simple_repeater/MyMesh.cpp:1232  MainBoard::getManufacturerName(): "Heltec V3" (variants/heltec_v3/HeltecV3Board.h:68-70 at the pin)
+#   radio        MQTTBridge.cpp:4061-4062  "%.6f,%.1f,%d,%d" of NodePrefs freq (float), bw (float), sf, cr: 869.618 as a float is 869.617981
+#   client_version  MQTTBridge.cpp:5117-5123  "meshcore/" + firmware_version
+#   repeat       MQTTBridge.cpp:4104  "off" when forwarding is disabled, which for an exit node it always is
+#   stats        MQTTPayloadBuilder.cpp:218-254  the object only when a value is known; each field only when known
+#                (>= 0; noise_floor > -999; connect_failures and slots_breaker > 0), in the source's order
+# Every stat the observer firmware publishes for a board with a battery reading, a dispatcher and a radio (MQTTBridge.cpp:4068-4095);
+# mqtt_connect_failures and mqtt_slots_breaker are 0 and therefore left out (:248-253); mqtt_outage_secs is -1 (none timed) and left out (:245-247).
+origin=MeshMaster-7F3A
+originId=7F3A9C02E1B44D9A0F6C2B7D8E9A1C3F5D7B9E0A2C4E6F8A0B1C2D3E4F5A6B7C
+epoch=1793016000
+micros=123456
+model=Heltec V3
+firmwareVersion=meshmaster-agent 0.0.0-dev on MeshCore companion-v1.17.1
+freq=869.618
+bw=62.5
+sf=8
+cr=8
+batteryMv=4100
+uptimeSecs=3600
+packetsSent=3
+packetsReceived=128
+errors=0
+queueLen=0
+noiseFloor=-112
+txAirSecs=1
+rxAirSecs=340
+recvErrors=2
+internalHeap=160104
+heapLargest=90112
+mqttSlotsUp=2
+mqttSlotsTotal=2
+mqttConnectFailures=0
+mqttSlotsBreaker=0
+expected={"status":"online","timestamp":"2026-10-26T12:00:00.123456+00:00","origin":"MeshMaster-7F3A","origin_id":"7F3A9C02E1B44D9A0F6C2B7D8E9A1C3F5D7B9E0A2C4E6F8A0B1C2D3E4F5A6B7C","model":"Heltec V3","firmware_version":"meshmaster-agent 0.0.0-dev on MeshCore companion-v1.17.1","radio":"869.617981,62.5,8,8","client_version":"meshcore/meshmaster-agent 0.0.0-dev on MeshCore companion-v1.17.1","repeat":"off","stats":{"battery_mv":4100,"uptime_secs":3600,"packets_sent":3,"packets_received":128,"errors":0,"queue_len":0,"noise_floor":-112,"tx_air_secs":1,"rx_air_secs":340,"recv_errors":2,"internal_heap":160104,"heap_largest":90112,"mqtt_slots_up":2,"mqtt_slots_total":2}}

@@ -53,6 +53,7 @@
 #include "mesh/AgentMesh.h"
 #include "net/Clock.h"
 #include "net/WifiLink.h"
+#include "observer/Observer.h"
 #include "platform/Esp32Platform.h"
 #include "settings/Store.h"
 #include "ui/DisplayLines.h"
@@ -75,6 +76,7 @@ mm::AgentLoop agent;
 mm::HeartbeatIdentity identity;  // what the heartbeat says about this board; refreshed on `set radio.*`
 mm::Console console;
 mm::Oled oled;
+mm::Observer observer;  // the observer dialect over this board's frames (task p1.7-26); nothing sent until 27
 
 ArduinoMillis ms_clock;
 StdRNG fast_rng;
@@ -207,6 +209,9 @@ void printStatus(Stream& out) {
   out.printf("heartbeat %s\r\n", line);
   jobs.describe(line, sizeof line);
   out.printf("jobs      %s\r\n", line);
+
+  observer.describe(line, sizeof line);
+  out.printf("observer  %s\r\n", line);
 
   const mm::AgentClient::Outcome& o = server.last();
   out.printf("heap      free %lu, min ever %lu, largest block %lu", static_cast<unsigned long>(ESP.getFreeHeap()),
@@ -376,12 +381,15 @@ void onSettingChanged(const mm::KeyDef& key) {
     applyLogSettings();
   } else if (std::strncmp(key.name, "display.", 8) == 0) {
     applyDisplaySettings();
+  } else if (std::strncmp(key.name, "mqtt", 4) == 0) {
+    observer.reconfigure();  // mqtt.* and mqttN.*: the observer re-reads every one of its keys
   }
 }
 
 void onErased() {
   applyLogSettings();
   applyDisplaySettings();
+  observer.reconfigure();
   server.reconfigure();
   agent.reconfigure();
   wifi.reconfigure();
@@ -484,6 +492,12 @@ void setup() {
   jobs.begin(the_mesh, server, platform, &pumpDuringAJob);
   agent.begin(server, platform, the_mesh, jobs, identity);
   agent.setIdentity(public_key_hex[0] != 0 ? public_key_hex : nullptr);
+  // The observer: off until a slot is configured, and then the dialect over every frame the
+  // radio hears (src/observer/Observer.h). The tap is set only with an identity, because a
+  // message without an origin_id is nothing a broker could file.
+  observer.begin(settings, identity_ok ? &the_mesh.self_id : nullptr, identity_ok ? public_key_hex : nullptr,
+                 board.getManufacturerName(), &clockForLog);
+  if (identity_ok) the_mesh.setRxTap(&observer);
   if (!server.configured()) LOG_I("server: not configured; set meshmaster.token (meshmaster.url is https://meshmaster.dk unless set)");
   if (display_ok) {
     applyDisplaySettings();  // `display.timeout`, before the first frame starts its clock
