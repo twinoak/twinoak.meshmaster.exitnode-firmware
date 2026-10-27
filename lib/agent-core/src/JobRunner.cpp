@@ -222,6 +222,31 @@ JobRunner::LoginResult JobRunner::loginOnce(const ClaimedJob& job, Context& ctx,
   return LoginResult::Ok;
 }
 
+// Where a failed job failed, as the result reports it (meshmaster.dk's task p4.17-136): the two
+// words of `JobFailedAt` over the stage the job reached, and nothing at all for the three cases
+// the server reads without one.
+//
+//   ok                      the field is for a failure
+//   CredentialClass::None   a trace logs in to nobody, so there is no step to name
+//   Stage::None             nothing was asked of the repeater: a type this mesh declines, a
+//                           claim whose lease had run out, a class with no material. Naming a
+//                           login that never went out would tell the owner's page that a stored
+//                           password is suspect on the strength of a packet nobody sent
+//
+// What is left is the distinction the field exists for: `unreachable` after a login nobody
+// answered is a password worth doubting, and `unreachable` after a request lost twice on an
+// answered login is not.
+const char* JobRunner::failedAtOf(const ClaimedJob& job, const Context& ctx, Outcome outcome) {
+  if (outcome == Outcome::Ok) return nullptr;
+  if (job.credentialClass == CredentialClass::None) return nullptr;
+  switch (ctx.stage) {
+    case Context::Stage::Login: return kFailedAtLogin;
+    case Context::Stage::Request: return kFailedAtRequest;
+    case Context::Stage::None: break;
+  }
+  return nullptr;
+}
+
 // The login sequence's exchange over this runner (agent/LoginSequence.h): a login with the job's
 // material is loginOnce(), the blank login between the tries is probeReachable(), and the log is
 // the job's. The sequence decides what a silence means; this puts each login on the air once.
@@ -255,6 +280,10 @@ class JobRunner::LoginOnTheAir : public LoginExchange {
 Outcome JobRunner::ensureSession(const ClaimedJob& job, Context& ctx) {
   if (job.credentialClass == CredentialClass::None) return Outcome::Ok;  // a trace asks nobody
 
+  // From here the job is at its login, whichever way it gets one: a failure before anything is
+  // requested is a failure at the login, and the result says so (task p1.7-28). A session reused
+  // counts - a login was answered, earlier, and that is what this job stands on.
+  ctx.stage = Context::Stage::Login;
   const uint32_t now = millis();
   if (const RepeaterSession* live = sessions_.get(job.repeaterKey, job.credentialClass, now)) {
     ctx.hasSession = true;
@@ -335,6 +364,10 @@ Outcome JobRunner::exchange(const ClaimedJob& job, Context& ctx, const char* wha
                             bool escape) {
   const int attempts = retry ? 2 : 1;
   for (int attempt = 1; attempt <= attempts; attempt++) {
+    // Set per attempt and not once: the re-login below puts the stage back to Login, so a job
+    // that lost its session mid-request and could not get another reports `login`, and one that
+    // got another and then lost the second try reports `request` (task p1.7-28).
+    ctx.stage = Context::Stage::Request;
     if (!spend(job, ctx, escape)) return Outcome::Timeout;
     const uint32_t started = millis();
     uint32_t tag = 0;
@@ -1551,6 +1584,9 @@ void JobRunner::runClaimed(int i) {
   }
   size_t dataLen = 0;
   Outcome outcome = runJob(job, ctx, dataLen);
+  // Read here and not at the report below: the ACL restore puts a CLI line of its own on the
+  // air after this, and the job's own last step is what the result names (task p1.7-28).
+  const char* failedAt = failedAtOf(job, ctx, outcome);
 
   // The session's last command (task p4.1-60): an admin session on a repeater where this exit
   // node holds a grant puts its own entry back to the granted level before the job is over,
@@ -1605,8 +1641,10 @@ void JobRunner::runClaimed(int i) {
   report.transactions = ctx.transactions;
   report.data = dataLen > 0 ? g_data : nullptr;
   report.log = g_log.text();
+  report.failedAt = failedAt;
 
-  LOG_I("jobs: job %lld: %s after %d transaction(s)", job.id, outcomeName(outcome), ctx.transactions);
+  LOG_I("jobs: job %lld: %s after %d transaction(s)%s%s", job.id, outcomeName(outcome), ctx.transactions,
+        failedAt == nullptr ? "" : ", failed at the ", failedAt == nullptr ? "" : failedAt);
   const size_t len = writeJobResult(report, g_body, kBodyCap);
   bool posted = false;
   if (len == 0) {
@@ -1644,6 +1682,8 @@ void JobRunner::reportNotRun(int i, const char* why) {
   report.finishedAt = at;
   report.transactions = 0;
   report.log = g_log.text();
+  // No `failedAt`: nothing was sent, so no login was tried and no request either, and the log
+  // says what the wake could not fit (task p1.7-28).
 
   LOG_W("jobs: job %lld %s was not run: %s", job.id, job.type, why == nullptr ? "not run" : why);
   const size_t len = writeJobResult(report, g_body, kBodyCap);

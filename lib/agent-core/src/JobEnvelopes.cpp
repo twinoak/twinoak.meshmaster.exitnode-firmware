@@ -375,6 +375,9 @@ bool parseClaimResponse(char* json, size_t len, ClaimedJob* jobs, int max, int& 
   return true;
 }
 
+const char kFailedAtLogin[] = "login";
+const char kFailedAtRequest[] = "request";
+
 size_t writeJobResult(const JobReport& r, char* out, size_t cap) {
   JsonWriter w(out, cap);
   char when[24];
@@ -418,6 +421,10 @@ size_t writeJobResult(const JobReport& r, char* out, size_t cap) {
     w.key("log");
     const size_t n = std::strlen(r.log);
     w.string(n > kMaxJobLogChars ? r.log + (n - kMaxJobLogChars) : r.log, kMaxJobLogChars);
+  }
+  if (r.failedAt != nullptr) {
+    w.key("failedAt");
+    w.string(r.failedAt);
   }
   w.endObject();
   return w.overflowed() ? 0 : w.length();

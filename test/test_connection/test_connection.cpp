@@ -794,6 +794,33 @@ TEST(Settings, TheConsoleLineNamesTheSlotTheStateTheCountsAndTheLastError) {
   EXPECT_STREQ("slot 2 none: off (preset is none)", line);
 }
 
+// The seven words a slot's state can be. They are a **contract** since task p1.7-28: the
+// heartbeat carries each slot's state and meshmaster.dk spells the same seven in
+// `AgentObserverStates` (its D-46, its task p4.17-140, and the fixtures' own README), which is
+// why the enum's names and the words differ in one place - `WaitingForLink` is
+// `waiting-for-wifi`, because WiFi is what the owner of a board can see. The server keeps a word
+// it has not heard of rather than refusing it, so renaming one here would not break a heartbeat;
+// it would quietly change what the exit node's Observer card says, which is worse. This test is
+// the fence: a state renamed on this board fails here until meshmaster.dk has heard of it.
+TEST(Settings, TheSevenStateWordsAreTheOnesMeshMasterSpells) {
+  EXPECT_STREQ("off", slotStateName(SlotState::Off));
+  EXPECT_STREQ("waiting-for-wifi", slotStateName(SlotState::WaitingForLink));
+  EXPECT_STREQ("waiting-for-clock", slotStateName(SlotState::WaitingForClock));
+  EXPECT_STREQ("waiting-for-heap", slotStateName(SlotState::WaitingForHeap));
+  EXPECT_STREQ("connecting", slotStateName(SlotState::Connecting));
+  EXPECT_STREQ("connected", slotStateName(SlotState::Connected));
+  EXPECT_STREQ("backing-off", slotStateName(SlotState::BackingOff));
+  // And every one of them is one word of the bound the server puts on the member (32 characters,
+  // `AgentObserverRules.StateLength`), with no space in it: a state is a word and not a sentence.
+  for (const SlotState state : {SlotState::Off, SlotState::WaitingForLink, SlotState::WaitingForClock,
+                                SlotState::WaitingForHeap, SlotState::Connecting, SlotState::Connected,
+                                SlotState::BackingOff}) {
+    const std::string word = slotStateName(state);
+    EXPECT_LE(word.size(), 32u) << word;
+    EXPECT_EQ(std::string::npos, word.find(' ')) << word;
+  }
+}
+
 // ---- the log --------------------------------------------------------------------------------------
 
 TEST(Log, AfterARunTheRingHoldsCountsAndReasonsAndNeverATokenAPasswordOrAPayload) {

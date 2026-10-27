@@ -742,6 +742,118 @@ TEST_F(LoopTest, TheHeltecsHeartbeatCarriesNeitherOfTheTwoWakeFields) {
   EXPECT_EQ(server.heartbeats()[0].find("maxTransactionsThisWake"), std::string::npos) << server.heartbeats()[0];
 }
 
+// ---------------------------------------------------------------------------------------------
+// The observer in the heartbeat (task p1.7-28; meshmaster.dk's D-46 and its task p4.17-140)
+//
+// The loop knows nothing about brokers, topics or keys: a consumer that publishes every packet
+// it hears to the community's MQTT maps hands it an `IHeartbeatObserver`, and the loop asks that
+// at every heartbeat and writes whatever it says. These tests are the seam, not the dialect -
+// the bytes are test/test_envelopes', the board's own answer is src/observer/Observer.cpp's.
+
+// A provider as thin as the interface allows: it answers what the test told it to, and counts
+// how often it was asked. The strings are its own, which is the contract (the loop copies none).
+class FakeObserverProvider : public mm::IHeartbeatObserver {
+ public:
+  bool describeObserver(mm::HeartbeatObserver& out) override {
+    asked++;
+    if (!on) return false;
+    slots[0].slot = 1;
+    slots[0].preset = "meshview";
+    slots[0].host = "wss://mqtt.meshview.dk:443/mqtt";
+    slots[0].state = state;
+    slots[0].since = since;
+    slots[0].published = published;
+    slots[0].dropped = 0;
+    slots[1].slot = 2;
+    slots[1].state = "off";
+    out.iata = "AAR";
+    out.hasSlots = true;
+    out.slots = slots;
+    out.slotCount = 2;
+    return true;
+  }
+
+  bool on = true;
+  int asked = 0;
+  const char* state = "connected";
+  uint32_t since = 0;
+  long long published = 0;
+  mm::HeartbeatObserverSlot slots[2];
+};
+
+TEST_F(LoopTest, AHeartbeatWithNoObserverProviderIsTheHeartbeatItAlwaysWas) {
+  linkUp();
+  ASSERT_TRUE(untilACall());  // config
+  ASSERT_TRUE(untilACall());  // heartbeat
+  ASSERT_EQ(server.heartbeats().size(), 1u);
+  const std::string hb = server.heartbeats()[0];
+  EXPECT_EQ(hb.find("observer"), std::string::npos) << hb;
+  EXPECT_TRUE(fake::followsShapeOf(hb, fake::contract("AgentHeartbeatNoWake"))) << hb;
+}
+
+TEST_F(LoopTest, AProvidersObjectGoesIntoTheHeartbeatAndIsAskedAgainAtEachOne) {
+  FakeObserverProvider provider;
+  provider.state = "connected";
+  provider.since = kNow - 118;
+  provider.published = 1420;
+  loop.setHeartbeatObserver(&provider);
+
+  linkUp();
+  ASSERT_TRUE(untilACall());  // config
+  ASSERT_TRUE(untilACall());  // heartbeat
+  ASSERT_EQ(server.heartbeats().size(), 1u);
+  const std::string hb = server.heartbeats()[0];
+  EXPECT_EQ(provider.asked, 1) << "asked once per heartbeat, and only at a heartbeat";
+  EXPECT_TRUE(fake::followsShapeOf(hb, fake::contract("AgentHeartbeatObserver"))) << hb;
+  const std::string observer = memberOf(hb, "observer");
+  EXPECT_NE(observer.find("\"iata\":\"AAR\""), std::string::npos) << observer;
+  EXPECT_NE(observer.find("\"slot\":1"), std::string::npos) << observer;
+  EXPECT_NE(observer.find("\"state\":\"connected\""), std::string::npos) << observer;
+  EXPECT_NE(observer.find("\"published\":1420"), std::string::npos) << observer;
+  EXPECT_NE(observer.find("\"state\":\"off\""), std::string::npos) << "the second slot, empty";
+
+  // The next heartbeat asks again and takes the answer as it is then: a slot that has gone to
+  // backing-off is a slot the exit node's page shows backing off within one poll interval.
+  provider.state = "backing-off";
+  provider.published = 1431;
+  while (server.heartbeats().size() < 2 && untilACall()) {
+  }
+  ASSERT_EQ(server.heartbeats().size(), 2u);
+  EXPECT_EQ(provider.asked, 2) << "once per heartbeat, and nothing else of the loop asks";
+  const std::string again = memberOf(server.heartbeats()[1], "observer");
+  EXPECT_NE(again.find("\"state\":\"backing-off\""), std::string::npos) << again;
+  EXPECT_NE(again.find("\"published\":1431"), std::string::npos) << again;
+}
+
+// A provider that answers false is the observer having been turned off between two heartbeats -
+// `set mqtt1.preset none` on the console - and the member is left out exactly as it is for a
+// consumer that never had one. Nothing else of the body moves with it.
+TEST_F(LoopTest, AProviderThatSaysNoLeavesTheMemberOutAndMovesNothingElse) {
+  FakeObserverProvider provider;
+  loop.setHeartbeatObserver(&provider);
+  linkUp();
+  ASSERT_TRUE(untilACall());  // config
+  ASSERT_TRUE(untilACall());  // heartbeat
+  ASSERT_EQ(server.heartbeats().size(), 1u);
+  const std::string with = server.heartbeats()[0];
+  EXPECT_NE(with.find("\"observer\""), std::string::npos) << with;
+
+  provider.on = false;
+  while (server.heartbeats().size() < 2 && untilACall()) {
+  }
+  ASSERT_EQ(server.heartbeats().size(), 2u);
+  const std::string without = server.heartbeats()[1];
+  EXPECT_EQ(without.find("observer"), std::string::npos) << without;
+  // And nothing else of the body moved: the same members in the same order, less the one. The
+  // values cannot be compared - `at` is a later second and the counters are a later reading -
+  // but a field that appeared or moved with the observer would show up here.
+  std::vector<std::string> members = fake::keysOf(with);
+  ASSERT_FALSE(members.empty());
+  EXPECT_EQ(members.back(), "observer") << "the observer is the record's last member";
+  members.pop_back();
+  EXPECT_EQ(members, fake::keysOf(without));
+}
+
 TEST_F(LoopTest, AWakeAsksForNoMoreJobsThanItsCapCanRunAndLeavesTheRestOnTheServer) {
   // Three traces waiting and a cap of two transactions: a trace is one transaction and no login
   // (EXIT-NODES §7), but the claim is sized before any type is known, so the cap buys one job at

@@ -5,7 +5,12 @@ on USB power at a window joins WiFi, registers with
 [meshmaster.dk](https://github.com/twinoak/meshmaster.dk), heartbeats, reports
 the adverts it hears, and runs the jobs the server hands it — status,
 telemetry, neighbours, trace, then logins and the writes — with no Raspberry Pi
-and no companion cable. It speaks the agent protocol
+and no companion cable. **It can also be an observer**, publishing every packet
+it hears to the community's MQTT maps — meshview.dk, meshmapper.net — in the
+dialect their own firmware speaks and signed in with its own key: that is
+**off until you turn it on**, it is set up on this console and nowhere else, and
+the MeshMaster uplink always comes first
+([`docs/observer.md`](docs/observer.md)). It speaks the agent protocol
 ([EXIT-NODES §6](https://github.com/twinoak/meshmaster.dk/blob/fbf4625a0352663e1c26bd6877e45e6c555d4f7c/spec/EXIT-NODES.md#6-agent--server-protocol),
 [API §3](https://github.com/twinoak/meshmaster.dk/blob/fbf4625a0352663e1c26bd6877e45e6c555d4f7c/spec/API.md#3-agent-api-agentv1))
 exactly as the .NET agent does, from the same `MeshMaster.Contracts` shapes, and
@@ -388,6 +393,17 @@ else:
   counters that never leave the board beside them, and `reboots` says why each
   restart happened.
 
+And, **only if you turned the observer on**, an **Observer** card: the region it
+publishes under and one row per slot — *slot 1 · meshview — connected since 4
+minutes ago*, the broker, *1420 published, 3 dropped*, and the slot's last error
+when there is one — with an **Observer** column of *connected over configured*
+(`2/2`) in the list. MeshMaster shows that state and **configures none of it**,
+and it neither relays nor stores a single published packet: what a slot sent is
+between this board and that broker
+([D-46](https://github.com/twinoak/meshmaster.dk/blob/master/spec/DECISIONS.md),
+[`docs/observer.md`](docs/observer.md)). The card is drawn only for an exit node
+that has reported an observer, and it disappears a day after one is switched off.
+
 And **Unknown nodes** fills up. Every advert the radio hears becomes one
 observation — the public key, the path and hop count it arrived by, the SNR and
 RSSI, and the name, position and role the advert carried — posted in batches of
@@ -489,6 +505,16 @@ reading.
   showed a five-hop path of them. A path learned from a reply keeps the width
   it was learned at. Thomas, 3 October 2026, for all MeshCore work
   ([D-33](https://github.com/twinoak/meshmaster.dk/blob/master/spec/DECISIONS.md#3-new-decisions)).
+- **The observer publishes, and tells MeshMaster only its state.** The raw
+  bytes the radio heard go to the brokers this board's owner configured and to
+  nobody else; nothing in this firmware decodes them, logs them or shows them.
+  What travels to meshmaster.dk is the **state** of each slot — the preset, the
+  broker, a state word, since when, published, dropped, the last error — and
+  not a packet, not a byte of one, not the radio's numbers for one and not a
+  count of them per key. It is off until an `mqtt1.preset` is set here, it is
+  configured here and never from MeshMaster, and a slot gives way rather than
+  letting the MeshMaster uplink fail for want of memory
+  ([`docs/observer.md`](docs/observer.md), *Privacy, in one place*).
 - **The contract is the .NET agent's.** Every envelope is checked against
   `MeshMaster.Contracts`' fixtures, copied byte for byte into
   [`tests/fixtures/contracts/`](tests/fixtures/contracts/README.md), and every

@@ -543,6 +543,11 @@ void setup() {
   observer.begin(settings, identity_ok ? &the_mesh.self_id : nullptr, identity_ok ? public_key_hex : nullptr,
                  board.getManufacturerName(), &clockForLog, mqttClients, observerEnv);
   if (identity_ok) the_mesh.setRxTap(&observer);
+  // And the observer's state in the heartbeat (task p1.7-28): the loop asks this object at every
+  // heartbeat and writes what it says, which is nothing at all while the observer is off. The
+  // library knows nothing of brokers; MeshMaster shows the state and configures none of it
+  // (meshmaster.dk D-46).
+  agent.setHeartbeatObserver(&observer);
   if (!server.configured()) LOG_I("server: not configured; set meshmaster.token (meshmaster.url is https://meshmaster.dk unless set)");
   if (display_ok) {
     applyDisplaySettings();  // `display.timeout`, before the first frame starts its clock

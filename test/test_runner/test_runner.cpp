@@ -200,6 +200,10 @@ class RunnerTest : public ::testing::Test {
   }
 
   std::string outcomeOf(const std::string& body) const { return memberOf(body, "outcome"); }
+  // Where a failed job failed (task p1.7-28), or "" when the result carries no such member -
+  // which is what `memberOf` gives for an absent one, and an absent one is the point of half the
+  // tests below.
+  std::string failedAtOf(const std::string& body) const { return memberOf(body, "failedAt"); }
   std::string dataOf(const std::string& body) const { return memberOf(body, "data"); }
   std::string logOf(const std::string& body) const { return memberOf(body, "log"); }
   int transactionsOf(const std::string& body) const { return std::atoi(memberOf(body, "transactions").c_str()); }
@@ -985,6 +989,138 @@ TEST_F(RunnerTest, ASilenceRightAfterAnAnsweredBlankLoginIsReportedAsTheRefusalI
   EXPECT_EQ(transactionsOf(body), 3) << "two tries and the blank login between them";
   EXPECT_EQ(dataOf(body), "{\"reason\":\"silentAfterReachable\",\"probeAnsweredAs\":\"read-only\"}");
   EXPECT_NE(logOf(body).find("answered a blank login at read-only"), std::string::npos) << body;
+}
+
+// ---------------------------------------------------------------------------------------------
+// `failedAt`: where a failed job failed (task p1.7-28; meshmaster.dk's task p4.17-136)
+//
+// `unreachable` is two different things - a login nobody answered, which on stock firmware is
+// also a wrong password, and a request lost twice after a login that *was* answered - and the
+// page that says *the stored guest password is probably wrong* must say it for the first alone.
+// So every failed result names its step, and a result that asked the repeater for nothing names
+// none: a trace logs in to nobody, and a job that never went on the air has no step to name.
+// One test per credential class, which is what decides whether there is a login at all.
+
+// `none`, the trace's class: it logs in to nobody, so there is no step to name however it ends.
+TEST_F(RunnerTest, ATraceCarriesNoFailedAtHoweverItEnds) {
+  const std::string ok = run(fake::Job(12420, "trace").atClass("none").leasedUntil(kLease));
+  EXPECT_EQ(outcomeOf(ok), "ok");
+  EXPECT_EQ(failedAtOf(ok), "") << ok;
+
+  mesh.beSilentAlways();
+  const std::string lost = run(fake::Job(12421, "trace").atClass("none").leasedUntil(kLease));
+  EXPECT_EQ(outcomeOf(lost), "unreachable");
+  EXPECT_EQ(mesh.logins(), 0) << "a trace asks nobody for a session (§7)";
+  EXPECT_EQ(failedAtOf(lost), "") << "a job with no login has no step to name: " << lost;
+}
+
+// `guest`: the case the field exists for. Two silent logins, nothing after them - and the server
+// may tell the owner that the stored guest password is the thing to look at.
+TEST_F(RunnerTest, AGuestLoginNobodyAnsweredIsFailedAtTheLogin) {
+  mesh.setGuestPassword("the-guest-one");
+  mesh.beSilentAlways();
+  const std::string body = run(fake::Job(12422, "status")
+                                   .atClass("guest")
+                                   .leasedUntil(kLease)
+                                   .withGuestPassword("the-guest-one")
+                                   .withPayload("{\"version\":false}"));
+
+  EXPECT_EQ(outcomeOf(body), "unreachable");
+  EXPECT_EQ(mesh.logins(), 2) << "the two tries of the login sequence";
+  EXPECT_EQ(failedAtOf(body), "login") << body;
+  // And it is the failed fixture's shape: the one field an `ok` result never carries, last.
+  EXPECT_TRUE(fake::followsShapeOf(body, fake::contract("JobResultReportFailed"))) << body;
+}
+
+// `acl`, the class of this exit node's own key: a login the repeater *refused* is an answer, and
+// it is still a failure at the login - the field says where, not why.
+TEST_F(RunnerTest, AnAclLoginTheRepeaterRefusedIsFailedAtTheLogin) {
+  mesh.grant(self(), mm::kPermReadOnly);
+  mesh.refuseTheNextLogin(1);
+  const std::string body =
+      run(fake::Job(12423, "status").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
+
+  EXPECT_EQ(outcomeOf(body), "unauthorized");
+  EXPECT_EQ(mesh.logins(), 1) << "a refusal is an answer: the sequence stops at it";
+  EXPECT_EQ(failedAtOf(body), "login") << body;
+}
+
+// `admin`: the login was answered and the line after it was not. Nothing about any password.
+TEST_F(RunnerTest, AnAdminRequestLostAfterAnAnsweredLoginIsFailedAtTheRequest) {
+  mesh.silenceLine("set tx 20");  // the repeater is on the air and this line is never answered
+  const std::string body = run(fake::Job(12424, "cli")
+                                   .atClass("admin")
+                                   .leasedUntil(kLease)
+                                   .withAdminPassword("adm1n-pass")
+                                   .withPayload("{\"command\":\"set tx 20\"}"));
+
+  EXPECT_EQ(outcomeOf(body), "unreachable");
+  EXPECT_EQ(mesh.logins(), 1) << "the login was answered";
+  EXPECT_EQ(mesh.cliLines(), 1) << "a CLI line is sent once and never retried";
+  EXPECT_EQ(failedAtOf(body), "request") << body;
+}
+
+// And the one that is both, in that order: a reused session, a request that got no answer, a
+// login again that got none either. The job ended at a login, so that is what it names - which
+// is why the stage is set at every attempt and not once at the start of the request.
+TEST_F(RunnerTest, ARequestThatCouldNotLogInAgainIsFailedAtTheLoginAfterAll) {
+  mesh.grant(self(), mm::kPermReadOnly);
+  run(fake::Job(12425, "status")
+          .atClass("acl")
+          .leasedUntil(kLease)
+          .withAclLevel(mm::kPermReadOnly)
+          .withPayload("{\"version\":false}"));
+  ASSERT_EQ(mesh.logins(), 1);
+
+  mesh.beSilentAlways();  // the repeater goes off the air under the second job
+  const std::string body = run(fake::Job(12426, "status")
+                                   .atClass("acl")
+                                   .leasedUntil(kLease)
+                                   .withAclLevel(mm::kPermReadOnly)
+                                   .withPayload("{\"version\":false}"));
+
+  EXPECT_EQ(outcomeOf(body), "unreachable");
+  EXPECT_NE(logOf(body).find("no reply on a reused session: logging in again once"), std::string::npos) << body;
+  EXPECT_EQ(failedAtOf(body), "login") << body;
+}
+
+// A job that never went on the air names no step, whatever its class: there was no login to go
+// unanswered, and `failedAt: login` on it would point an owner at a password for a packet nobody
+// sent. The lease that had already run out is the case with a class that is not `none`.
+TEST_F(RunnerTest, AJobThatSentNothingCarriesNoFailedAt) {
+  const std::string body =
+      run(fake::Job(12427, "status").atClass("acl").leasedUntil(kNow - 1).withAclLevel(mm::kPermReadOnly));
+
+  EXPECT_EQ(outcomeOf(body), "timeout");
+  EXPECT_EQ(mesh.sendCount(), 0);
+  EXPECT_EQ(failedAtOf(body), "") << body;
+  EXPECT_TRUE(fake::followsShapeOf(body, fake::contract("JobResultReport"))) << body;
+}
+
+// An `ok` result never carries it - the fixtures' own README says so, which is why
+// JobResultReport.json is the ok result it always was and the failed one is a file of its own.
+TEST_F(RunnerTest, AnOkResultCarriesNoFailedAt) {
+  mesh.setGuestPassword("the-guest-one");
+  const std::string body = run(fake::Job(12428, "status")
+                                   .atClass("guest")
+                                   .leasedUntil(kLease)
+                                   .withGuestPassword("the-guest-one")
+                                   .withPayload("{\"version\":false}"));
+
+  EXPECT_EQ(outcomeOf(body), "ok");
+  EXPECT_EQ(failedAtOf(body), "") << body;
+  EXPECT_TRUE(fake::followsShapeOf(body, fake::contract("JobResultReport"))) << body;
+}
+
+// The two words are the server's `JobFailedAt`, read out of the fixture rather than typed here:
+// a rename in meshmaster.dk moves that file and fails this.
+TEST(FailedAt, TheTwoWordsAreTheOnesTheFixtureCarries) {
+  const std::string failed = fake::contract("JobResultReportFailed");
+  EXPECT_NE(failed.find(std::string("\"failedAt\":\"") + mm::kFailedAtLogin + "\""), std::string::npos) << failed;
+  EXPECT_STREQ("login", mm::kFailedAtLogin);
+  EXPECT_STREQ("request", mm::kFailedAtRequest);
+  // And the ok fixture has neither word: the member is the one an ok result never carries.
+  EXPECT_EQ(fake::contract("JobResultReport").find("failedAt"), std::string::npos);
 }
 
 TEST_F(RunnerTest, AnUnknownTypeIsUnsupportedAtNoTransaction) {
