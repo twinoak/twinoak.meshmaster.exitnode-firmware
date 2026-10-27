@@ -3,7 +3,9 @@
 //
 //   ID: 46F6     12:03:14      who this is, and what time it is
 //   WiFi: yes Online: yes      whether the link and the server are there
-//   Heartbeat: 12:03:14        when meshmaster.dk last heard from this board
+//   Heartbeat: 12:03:14        when meshmaster.dk last heard from this board - and, once an
+//   HB 12:03:14  MQTT 2/2      observer slot is configured (task p1.7-27), how many of its broker
+//                              connections are up, against the right edge
 //   Job 1234 acl.set           what it is doing, and why it is not when it is not
 //
 // Host-portable: no Arduino, no MeshCore, no board. `main.cpp`'s `fillOled` is the one place
@@ -52,6 +54,11 @@ struct DisplayState {
   // Line three.
   bool everHeartbeated = false;
   uint32_t lastHeartbeatAtEpoch = 0;
+  // The observer's broker slots (Observer::slotsConfigured / slotsConnected): with none
+  // configured the line is the heartbeat alone, as before task p1.7-27; with one or two it is
+  // "HB <clock>" at the left and "MQTT <up>/<configured>" against the right edge.
+  int observerSlotsConfigured = 0;
+  int observerSlotsConnected = 0;
 
   // Line four: the job that is open, else the newest one that ran, else why neither.
   bool jobOpen = false;
