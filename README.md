@@ -132,6 +132,24 @@ board image altogether.
 
 ## Flashing it
 
+**The usual way: a release, with the MeshCore web flasher.** Open
+<https://flasher.meshcore.co.uk> in Chrome or Edge, choose **Custom firmware**,
+and pick the release's file for the board:
+
+- a board **out of the box, or coming from other firmware**: the
+  `-merged.bin`. The flasher writes it at `0x0` **after erasing the whole
+  flash** (it warns you), so the board comes up with a new key and no settings;
+- an **upgrade** of a board already running this firmware: the plain `.bin`,
+  which the flasher writes at `0x10000` and which keeps the WiFi, the token and
+  the key. **Never upgrade with the `-merged.bin` there**: the erase takes the
+  key, and the exit node then needs a new token and its associations made again.
+
+The release notes say the same with each version's file names, and the
+console lines to set it up (below). What follows is the same for a developer,
+with PlatformIO or `esptool` — and **with those tools a merged image erases
+nothing outside the span it writes**, which is why the paragraphs below say it
+keeps the settings.
+
 From a build on this machine, with the board on USB (`-e heltec_v4` for a V4):
 
 ```bash

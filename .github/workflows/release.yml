@@ -18,9 +18,10 @@
 # table puts NVS above the application, where a merged image cannot reach it (boards/README.md,
 # task p1.2-11). The one exception is the first merged flash over a board provisioned under
 # v0.1.1 or earlier, whose table kept NVS at 0x9000 inside the span a merged image fills with
-# 0xFF: that flash forgets the settings and not the identity. The notes say so in one text that
-# is true for the release that ships the table and for every release after it, print the one
-# esptool line per board, and name the MeshCore tag the build used.
+# 0xFF: that flash forgets the settings and not the identity. The notes are for a person with
+# the MeshCore web flasher (its *Custom firmware* writes a -merged.bin at 0x0 after erasing the
+# whole flash, and any other .bin at 0x10000): which file is a first install and which is an
+# upgrade, the console lines that set up WiFi, the token and the observer, and the MeshCore tag.
 #
 # The version the board reports is the tag: -D MESHMASTER_AGENT_VERSION="X.Y.Z+<sha7>", which
 # src/version.cpp turns into the string F-01's `status` command and the heartbeat's agentVersion
@@ -217,45 +218,67 @@ jobs:
               echo "**This is a dry run.** The images are the workflow's artifacts and nothing is published."
             fi
             echo
-            echo "## Flashing a board"
+            echo "## Flashing"
             echo
-            echo "**A board out of the box, or one coming from other firmware, takes the merged image**"
-            echo "at \`0x0\`: it carries the bootloader and the partition table with it. Hold the user button"
-            echo "while plugging in if the port does not appear, and \`pip install esptool\` if you have none:"
+            echo "With the MeshCore web flasher, <https://flasher.meshcore.co.uk>, in Chrome or Edge:"
+            echo "choose **Custom firmware** and the file for your board."
             echo
+            echo "| Board | First install: a new board, or one running other firmware | Upgrade: a board already running this firmware |"
+            echo "|---|---|---|"
             for f in meshmaster-agent-*-"$v"-merged.bin; do
               board="${f#meshmaster-agent-}"; board="${board%-"$v"-merged.bin}"
               case "$board" in
-                heltec_v3|heltec_v4*) chip=esp32s3 ;;
-                *) chip=esp32 ;;
+                heltec_v3) label="Heltec V3" ;;
+                heltec_v4) label="Heltec V4" ;;
+                *) label="$board" ;;
               esac
-              echo "\`\`\`"
-              echo "# $board"
-              echo "esptool.py --chip $chip --port <PORT> --baud 921600 write_flash 0x0 $f"
-              echo "\`\`\`"
+              echo "| $label | \`$f\` | \`meshmaster-agent-$board-$v.bin\` |"
             done
-            echo
-            echo "**\`meshmaster-agent-<board>-$v.bin\` beside it is the application image alone**, the upgrade"
-            echo "for a board already running this firmware, at \`0x10000\`. \`SHA256SUMS\` covers both."
-            echo
-            echo "**Either image keeps a provisioned board's settings and its identity**, with one exception."
-            echo "This firmware's partition table keeps NVS - the WiFi credentials, the server URL, the token -"
-            echo "above the application, where a merged image, which ends where the application ends, cannot"
-            echo "reach it; the identity in SPIFFS is at the same offset as in every earlier release."
-            echo "**The exception is a board provisioned under v0.1.1 or earlier**, whose table kept NVS at"
-            echo "\`0x9000\`, inside the span a merged image fills with \`0xFF\`: the **first** merged flash of this"
-            echo "or any later release onto such a board forgets the settings and not the identity. The board"
-            echo "comes up unprovisioned with the same key: set the WiFi again and a **new** token - *Generate a"
-            echo "new token* on the exit node's page, then \`set meshmaster.token\` - and it is itself again,"
-            echo "associations and all, not a fresh registration. An upgrade with the application image keeps"
-            echo "such a board's old table and its settings, and postpones that to its next merged flash. After"
-            echo "that one flash, no image reaches the settings again."
-            echo
-            echo "## Provisioning"
-            echo
-            echo "Over the USB serial console at 115200 baud: \`set\` the WiFi credentials and the"
-            echo "agent token, then \`save\`. See \`docs/\` in this repository; the token comes from"
-            echo "the exit node's registration page on meshmaster.dk."
+            cat <<'EOF'
+
+          - **First install: the `-merged.bin`.** The flasher erases the whole board before it writes
+            it, and says so. The board comes up with a new key and no settings: set it up below.
+          - **Upgrade: the plain `.bin`.** It replaces the firmware and keeps the WiFi, the token and
+            the board's key. **Never upgrade with the `-merged.bin`**: the erase takes the key with it,
+            and the exit node then needs a new token and its associations made again, because the
+            repeaters know it by that key.
+
+          `SHA256SUMS` lists every file.
+
+          ## Setting it up
+
+          On the serial console at 115200 baud: the flasher's **Console**, or any terminal. Each `set`
+          is stored at once; nothing needs a `save` or a reboot.
+
+          **WiFi and MeshMaster**
+
+          ```
+          set wifi.ssid <network name>
+          set wifi.pass <WiFi password>
+          set meshmaster.token <token>
+          status
+          ```
+
+          The token is on meshmaster.dk: *Exit nodes → New* for a new exit node, or *Generate a new
+          token* on an existing exit node's page. `status` shows the WiFi, the time and the server's
+          last answer; if the token is wrong, the display says `token revoked/wrong`.
+
+          **The observer** (optional): every packet the board hears, published to MeshView.dk and
+          MeshMapper.net, signed in with the board's own key. It is off until a slot is set.
+
+          ```
+          set mqtt.iata AAR
+          set mqtt.owner <your own node's public key>
+          set mqtt1.preset meshview
+          set mqtt2.preset meshmapper
+          get mqtt.status
+          ```
+
+          `mqtt.iata` is your region: `AAL`, `AAR`, `BLL`, `ODE`, `CPH` or `RNN`. `mqtt.owner` is
+          optional. The Danish observer guide's lines (`set mqtt1.preset custom`, …) work as typed too.
+
+          Every command and setting: `docs/console.md` and `docs/observer.md` in the repository.
+          EOF
           } > NOTES.md
           cat NOTES.md
 
