@@ -303,7 +303,7 @@ TEST(Library, TheRunnerAndTheLoopAreCompiledAndLinkedOnTheHost) {
   EXPECT_TRUE(loop != nullptr);
 
   // And the library's own version, from its manifest, is a string the firmware can print.
-  EXPECT_STREQ("0.3.1", AGENT_CORE_VERSION);
+  EXPECT_STREQ("0.4.0", AGENT_CORE_VERSION);
 }
 
 // ---- the manifests ---------------------------------------------------------------------------

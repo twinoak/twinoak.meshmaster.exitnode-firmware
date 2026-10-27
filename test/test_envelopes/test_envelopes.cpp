@@ -4,10 +4,13 @@
 // ObservationBatch.json **byte for byte**, for the inputs MeshMaster.Contracts' own round-trip
 // tests wrote those fixtures from. A difference is a bug in the firmware, not a second dialect.
 //
-// Two heartbeat fixtures, because the record has two shapes an exit node really sends: the one
-// that proposes a check-in interval and a wake cap, and the one that proposes neither, which is
-// what this board sends. The second is a file of meshmaster.dk's since its task p4.15-131;
-// before it, this suite held that shape by cutting the first file's bytes (task p1.6-24).
+// Three heartbeat fixtures, because the record has three shapes an exit node really sends: the
+// one that proposes a check-in interval and a wake cap, the one that proposes neither - which is
+// what this board sends - and, since meshmaster.dk's task p4.17-140 and this repository's task
+// p1.7-28, the one that also carries the `observer` object, which is what this board sends once
+// a slot of the community's MQTT maps is configured on its console (D-46). The second is a file
+// of meshmaster.dk's since its task p4.15-131; before it, this suite held that shape by cutting
+// the first file's bytes (task p1.6-24).
 //
 // ObservationBatch had no fixture until meshmaster.dk's task p4.3-71 wrote one, and this test
 // held the batch to the record in src/MeshMaster.Contracts/Envelopes.cs instead. The file is
@@ -17,6 +20,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -154,6 +158,170 @@ TEST(Heartbeat, EitherOfTheTwoWakeFieldsGoesOnItsOwn) {
   EXPECT_EQ(cap.find("nextCheckInS"), std::string::npos) << cap;
 }
 
+// ---- the observer (task p1.7-28; meshmaster.dk's D-46 and its task p4.17-140) -----------------
+
+// The two slots of the fixture's own sample, as the provider of an exit node that is also an
+// observer fills them: slot 1 connected, slot 2 backing off with the broker's reason.
+const char kSlot2LastError[] = "the broker refused the sign-in";
+
+std::array<mm::HeartbeatObserverSlot, 2> theFixturesSlots() {
+  std::array<mm::HeartbeatObserverSlot, 2> slots{};
+  slots[0].slot = 1;
+  slots[0].preset = "meshview";
+  slots[0].host = "wss://mqtt.meshview.dk:443/mqtt";
+  slots[0].state = "connected";
+  slots[0].since = 1790171882u;  // 2026-09-23T13:58:02Z
+  slots[0].published = 1420;
+  slots[0].dropped = 3;
+  slots[1].slot = 2;
+  slots[1].preset = "meshmapper";
+  slots[1].host = "wss://mqtt.meshmapper.net:443/mqtt";
+  slots[1].state = "backing-off";
+  slots[1].since = 1790171981u;  // 2026-09-23T13:59:41Z
+  slots[1].published = 980;
+  slots[1].dropped = 17;
+  slots[1].lastError = kSlot2LastError;
+  return slots;
+}
+
+TEST(Observer, TheSameInputMakesTheDotNetFixtureByteForByte) {
+  const std::string fixture = readFixture("AgentHeartbeatObserver.json");
+  ASSERT_FALSE(fixture.empty())
+      << "tests/fixtures/contracts/AgentHeartbeatObserver.json is missing - run tools/sync-fixtures.ps1";
+
+  const std::array<mm::HeartbeatObserverSlot, 2> slots = theFixturesSlots();
+  mm::HeartbeatObserver observer;
+  observer.iata = "AAR";
+  observer.hasSlots = true;
+  observer.slots = slots.data();
+  observer.slotCount = static_cast<int>(slots.size());
+
+  const mm::ErrorCounter errors[] = {{"uplink", 0}};
+  mm::Heartbeat hb = theFixturesSample(errors, 1);
+  hb.hasNextCheckInS = true;
+  hb.nextCheckInS = 3600;
+  hb.hasMaxTransactionsThisWake = true;
+  hb.maxTransactionsThisWake = 12;
+  hb.observer = &observer;
+
+  EXPECT_EQ(fixture, heartbeatJson(hb));
+
+  // And the fixtures are one sample: the observer file is AgentHeartbeat.json with the object
+  // appended, which is what the fixtures' own README says the nested pairs are. Held here so
+  // that a change to either in meshmaster.dk fails this test rather than quietly leaving the
+  // two tests measuring two different agents.
+  const std::string withWake = readFixture("AgentHeartbeat.json");
+  ASSERT_FALSE(withWake.empty());
+  EXPECT_EQ(withWake.substr(0, withWake.size() - 1), fixture.substr(0, withWake.size() - 1))
+      << "AgentHeartbeatObserver.json is no longer AgentHeartbeat.json plus the observer";
+
+  // The object on its own and the second of its slots are files of their own, and the heartbeat
+  // holds both verbatim: the slot is inside the observer and the observer is inside the
+  // heartbeat (tests/fixtures/contracts/README.md).
+  const std::string object = readFixture("AgentObserver.json");
+  const std::string slot = readFixture("AgentObserverSlot.json");
+  ASSERT_FALSE(object.empty());
+  ASSERT_FALSE(slot.empty());
+  EXPECT_NE(std::string::npos, fixture.find(object)) << "the heartbeat does not hold AgentObserver.json";
+  EXPECT_NE(std::string::npos, object.find(slot)) << "AgentObserver.json does not hold AgentObserverSlot.json";
+}
+
+// The one that matters for every exit node that is not an observer, which is all of them until
+// an owner types a preset: **no provider, no member, and the body does not move by a byte**.
+TEST(Observer, AnAgentWithNoObserverWritesTheHeartbeatItWroteBefore) {
+  const std::string noWake = readFixture("AgentHeartbeatNoWake.json");
+  ASSERT_FALSE(noWake.empty());
+
+  const mm::ErrorCounter errors[] = {{"uplink", 0}};
+  const mm::Heartbeat hb = theFixturesSample(errors, 1);
+  EXPECT_EQ(nullptr, hb.observer) << "the default is to carry no observer";
+  const std::string json = heartbeatJson(hb);
+  EXPECT_EQ(noWake, json);
+  EXPECT_EQ(std::string::npos, json.find("observer"));
+}
+
+// A slot that is off names neither preset nor broker and has no clock behind it, so four of the
+// eight members are absent - and `published` and `dropped` are not, because the record's are a
+// non-nullable `long` and System.Text.Json writes a zero.
+TEST(Observer, ASlotThatIsOffCarriesItsStateAndItsTwoCountsAndNothingElse) {
+  mm::HeartbeatObserverSlot slots[1];
+  slots[0].slot = 2;
+  slots[0].state = "off";
+  mm::HeartbeatObserver observer;
+  observer.hasSlots = true;
+  observer.slots = slots;
+  observer.slotCount = 1;
+
+  mm::Heartbeat hb;
+  hb.agentVersion = "v";
+  hb.at = 0;
+  hb.hasJobTypes = false;
+  hb.hasBudget = false;
+  hb.observer = &observer;
+  const std::string json = heartbeatJson(hb);
+  EXPECT_NE(std::string::npos,
+            json.find("\"observer\":{\"slots\":[{\"slot\":2,\"state\":\"off\",\"published\":0,\"dropped\":0}]}}"))
+      << json;
+  EXPECT_EQ(std::string::npos, json.find("preset"));
+  EXPECT_EQ(std::string::npos, json.find("host"));
+  EXPECT_EQ(std::string::npos, json.find("since"));
+  EXPECT_EQ(std::string::npos, json.find("lastError"));
+  EXPECT_EQ(std::string::npos, json.find("iata"));
+}
+
+// `slots` absent is not `slots: []`, the distinction every optional list in this file keeps: a
+// region and no slot array is a legal object, and so is an empty array.
+TEST(Observer, AnEmptySlotListIsNotTheSameAsNoSlotList) {
+  mm::HeartbeatObserver observer;
+  observer.iata = "CPH";
+  mm::Heartbeat hb;
+  hb.agentVersion = "v";
+  hb.at = 0;
+  hb.hasJobTypes = false;
+  hb.hasBudget = false;
+  hb.observer = &observer;
+  EXPECT_NE(std::string::npos, heartbeatJson(hb).find("\"observer\":{\"iata\":\"CPH\"}}"));
+
+  observer.hasSlots = true;
+  observer.slotCount = 0;
+  EXPECT_NE(std::string::npos, heartbeatJson(hb).find("\"observer\":{\"iata\":\"CPH\",\"slots\":[]}}"));
+}
+
+// A broker's refusal is text from somebody else's server, and it goes through the same escaper
+// every other string of this writer does - the rail of task p1.7-25, held on the newest field.
+TEST(Observer, ABrokersReasonIsEscapedAndNeverBreaksTheBody) {
+  mm::HeartbeatObserverSlot slots[1];
+  slots[0].slot = 1;
+  slots[0].state = "backing-off";
+  slots[0].lastError = "it said \"no\"\t\xff";
+  mm::HeartbeatObserver observer;
+  observer.hasSlots = true;
+  observer.slots = slots;
+  observer.slotCount = 1;
+  mm::Heartbeat hb;
+  hb.agentVersion = "v";
+  hb.at = 0;
+  hb.hasJobTypes = false;
+  hb.hasBudget = false;
+  hb.observer = &observer;
+  EXPECT_NE(std::string::npos, heartbeatJson(hb).find("\"lastError\":\"it said \\\"no\\\"\\t\\uFFFD\""));
+}
+
+// The observer's own slot states, as this firmware spells them and as the server's
+// `AgentObserverStates` holds them. The contract is the fixture; this is the other half of it -
+// the two state words that file carries, so that a state renamed on this board without a word
+// to meshmaster.dk fails here rather than on a page.
+TEST(Observer, TheFixturesStateWordsAreTheOnesThisFirmwareWrites) {
+  const std::string fixture = readFixture("AgentHeartbeatObserver.json");
+  ASSERT_FALSE(fixture.empty());
+  for (const char* state : {"connected", "backing-off"}) {
+    EXPECT_NE(std::string::npos, fixture.find(std::string("\"state\":\"") + state + "\""))
+        << "the fixture no longer carries the state word " << state;
+  }
+  const mm::HeartbeatObserverSlot slot;
+  EXPECT_STREQ("off", slot.state) << "the default is the word a slot that is not configured carries";
+}
+
 TEST(Heartbeat, WhatThisFirmwareActuallySendsHasNoJobTypesAndFourCounters) {
   const mm::ErrorCounter errors[] = {
       {"overheard", 41}, {"wifiReconnects", 2}, {"httpFailures", 0}, {"observationsDropped", 7}};
@@ -233,10 +401,12 @@ TEST(Heartbeat, AConsumerThatSaysNativeWritesTheFixtureWithThatOneWordChanged) {
 
 // The word a consumer that says nothing sends is the one the contract fixtures carry - read out
 // of every fixture that has a `transport` member, so that the default is held to meshmaster.dk's
-// own bytes and not to a word typed here. The fixtures carry **one** word (`onboard`, in
-// AgentHeartbeat.json and AgentConfig.json); the rest of the server's vocabulary - `serial`,
-// `tcp`, `native` (EXIT-NODES §2, its `AgentTransports`) - is in no fixture, so the library
-// holds no list of it and validates nothing: a word the server does not know is its to refuse.
+// own bytes and not to a word typed here. Two words are in those files since the sync of task
+// p1.7-28: `onboard` (AgentHeartbeat.json, AgentConfig.json) and `native`
+// (AgentHeartbeatNoKey.json, the Walter's unit-with-no-radio-identity sample). The whole of the
+// server's vocabulary is a file of its own now - AgentTransportList.json, `transports`, which
+// this test does not read because it is a list and not a message - and the library still holds
+// no copy of it and validates nothing: a word the server does not know is its to refuse.
 TEST(Heartbeat, TheDefaultTransportIsTheWordTheContractFixturesCarry) {
   std::set<std::string> words;
   for (const auto& entry : std::filesystem::directory_iterator(FIXTURES_DIR)) {

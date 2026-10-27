@@ -327,7 +327,20 @@ class JobRunner {
     // The restore (task p4.1-60): sent once per job, by the handler that needs its verdict in
     // the result (config.read) or by the runner after the handler.
     bool aclRestoreDone = false;
+    // **How far this job got**, for the result's `failedAt` (task p1.7-28; meshmaster.dk's task
+    // p4.17-136). `None` is a job that asked the repeater for nothing - a `trace`, a type this
+    // mesh declines, a lease that had already run out - and such a result carries no `failedAt`
+    // at all. `Login` is a login on the air or a session reused to stand in for one; `Request`
+    // is a request or a CLI line after one, set at the top of every attempt, so a request that
+    // had to log in again mid-way and failed at *that* reads `Login` again. Where a job stopped
+    // is where it failed.
+    enum class Stage : uint8_t { None, Login, Request };
+    Stage stage = Stage::None;
   };
+
+  // The word a result carries for where it failed, or nullptr: the rule above, with success and
+  // a job that logs in to nobody (CredentialClass::None - a trace) carrying none.
+  static const char* failedAtOf(const ClaimedJob& job, const Context& ctx, Outcome outcome);
 
   // What one login came to: agent/LoginSequence.h's reading, which is this runner's. `Refused`
   // is a reply that was not a login-ok, and a login answered below the class it was for (task

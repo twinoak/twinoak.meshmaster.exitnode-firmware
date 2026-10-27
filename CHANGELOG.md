@@ -20,6 +20,82 @@ this repository changed and why is in `tasks/phase-*/reports/`.
 A task that moves one of the four things above adds its line here in the same
 pull request, as `docs/` moves with code.
 
+## v0.4.0 — the observer in the heartbeat, and where a failed job failed
+
+Pile 1.7, task 28 (`tasks/phase-1.7/`), which closes the pile. Two optional
+fields of the agent protocol, one interface addition and nothing else:
+**`agent-core` 0.4.0** in the three manifests; the contract fixtures moved to
+meshmaster.dk **`67c2a4c`** (75 files, from `79b1e9c`'s 69) and the companion
+frame fixtures still at `f518ebd` (46); MeshCore `companion-v1.17.1`,
+`d9296435`, unmoved; `kMeshReplyDataCap` 184 and `kMeshPathCap` 64, unmoved.
+The four questions:
+
+- **Did a method move?** `AgentLoop::setHeartbeatObserver(IHeartbeatObserver*)`
+  is new and **additive**: a consumer that never calls it sends the heartbeat it
+  sent before, byte for byte. `JobReport` gained a member, `failedAt`, which
+  defaults to `nullptr` and is left out when it is - so a consumer that fills
+  the struct field by field compiles and writes what it wrote. Nothing of
+  `IMesh`, `IUplink`, `IPlatform`, `IClock`, `IJobExtension`, `JobContext`,
+  `ResultWriter` or `TextOut` moved, and nothing was removed.
+- **Did a `MeshReply` constant move?** No.
+- **Did the fixtures' manifest commit move?** **Yes** - `79b1e9c` →
+  `67c2a4c`. **The wire moved by addition and by addition only**: six files
+  appeared and **not one existing fixture's bytes changed**, which is worth
+  saying plainly because this is the question that breaks a consumer silently.
+  The six are `AgentHeartbeatObserver.json`, `AgentObserver.json` and
+  `AgentObserverSlot.json` (the observer, below), `JobResultReportFailed.json`
+  (`failedAt`, below), `AgentHeartbeatNoKey.json` (a unit whose radio has no
+  identity yet - the Walter's sample, nothing of this firmware's) and
+  `AgentTransportList.json` (the server's four transport words as a list). So
+  the two new members are the whole of the change, both are optional, and a
+  consumer that writes neither is on the wire it was on.
+- **The version and the pin:** `agent-core` 0.4.0; MeshCore `d9296435`.
+
+What a consumer changes: **nothing, if it has no observer**. The two additions,
+in two lines each:
+
+- **The observer in the heartbeat** (meshmaster.dk's D-46). An exit node may
+  also be an *observer*, publishing every packet its radio hears to the
+  community's MQTT brokers; MeshMaster shows the **state** of that and
+  configures none of it. The heartbeat's new `observer` member carries the
+  region and, per slot, the preset, the broker, a state word, since when, how
+  many messages were published, how many were dropped and the last error. This
+  library **does not know what an observer is** - not a broker, not a topic, not
+  a key, not a packet - and is not going to: a consumer that has one implements
+  `IHeartbeatObserver` (one method, `describeObserver`) and hands it to
+  `AgentLoop::setHeartbeatObserver`, and the loop asks it at every heartbeat and
+  writes what it says. Giving none, or answering `false`, leaves the member out
+  altogether. The strings and the slot array are yours and are not copied: they
+  have to outlive the call that posts the heartbeat, as `HeartbeatIdentity`'s
+  do. The server bounds each field (preset 32, host 64, state 32, lastError 120
+  characters, six slots) and **refuses an over-long one by name while still
+  taking the rest of the heartbeat**, because a bad observer object must not
+  take an exit node off the air; this library bounds nothing, so a provider that
+  sends more than that loses the object and keeps its exit node. The state words
+  are a contract: `off`, `waiting-for-wifi`, `waiting-for-clock`,
+  `waiting-for-heap`, `connecting`, `connected`, `backing-off`.
+- **`failedAt` on a failed result** (meshmaster.dk's task p4.17-136).
+  `unreachable` was two things - a login nobody answered, which on stock
+  firmware is also a wrong password, and a request lost twice after a login that
+  *was* answered - and the page that says *the stored guest password is probably
+  wrong* must say it for the first alone. `JobReport::failedAt` is `login`,
+  `request` or `nullptr`, and `JobRunner` fills it for every job it runs: the
+  step the job last reached. It is **absent** on an `ok` result, on a
+  `CredentialClass::None` job (a trace logs in to nobody) and on a job that put
+  nothing on the air at all - a type your mesh declines, a lease that had
+  already run out, a wake with no room for it - because naming a login that
+  never went out would point an owner at a password on the strength of a packet
+  nobody sent. A result without the field is read by the server exactly as
+  before, so an older consumer is unaffected. If you write `JobReport` yourself
+  rather than letting `JobRunner` do it, this is the field to decide about.
+
+One number of **this firmware's** moved with it, for a consumer who sizes
+buffers from this repository's: the heartbeat body buffer in
+`src/agent/AgentClient.cpp` is **2 048 bytes**, not 1 024. Two slots at the
+bounds the server accepts are about 700 bytes of `observer` on top of the ~720
+this board's own fields come to, and a heartbeat that does not fit is an exit
+node that is offline.
+
 ## v0.3.1 — the strings are UTF-8
 
 Pile 1.7, task 25 (`tasks/phase-1.7/`): three defects the review of pile 1.6

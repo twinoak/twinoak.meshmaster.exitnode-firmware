@@ -157,6 +157,35 @@ size_t Observer::formatStatus(const char* status, char* out, size_t cap) {
   return observer::formatStatus(f, out, cap);
 }
 
+bool Observer::describeObserver(HeartbeatObserver& out) {
+  // Off is off: no object at all, and the heartbeat is byte for byte the one a board that was
+  // never an observer sends (task p1.7-28; AgentHeartbeatNoWake.json in test/test_envelopes).
+  // `enabled_` is the console's own answer - at least one slot resolved and a region code to
+  // build its topic from - and `get mqtt.status` is where its `why_` is read when it is false.
+  if (!enabled_) return false;
+  for (int s = 0; s < observer::kSlots; s++) {
+    const observer::SlotView v = link_.view(s);
+    HeartbeatObserverSlot& hb = hbSlots_[s];
+    hb = HeartbeatObserverSlot();
+    hb.slot = s + 1;  // as the console numbers them, and as AgentObserverSlot.Slot is read
+    // A slot that is off names no preset and no broker: the two fields are left out, which is
+    // the record's own "absent" (AgentObserverSlot.Preset, .Host) and what the exit node's page
+    // reads as *no broker*.
+    hb.preset = v.configured ? v.name : nullptr;
+    hb.host = v.host != nullptr && v.host[0] != '\0' ? v.host : nullptr;
+    hb.state = observer::slotStateName(v.state);
+    hb.since = v.sinceEpoch;  // 0 while the board has no clock: the field is left out
+    hb.published = v.stats.published;
+    hb.dropped = v.stats.dropped;
+    hb.lastError = v.lastError != nullptr && v.lastError[0] != '\0' ? v.lastError : nullptr;
+  }
+  out.iata = iata_[0] != '\0' ? iata_ : nullptr;
+  out.hasSlots = true;
+  out.slots = hbSlots_;
+  out.slotCount = observer::kSlots;
+  return true;
+}
+
 void Observer::describe(char* out, size_t cap) const {
   if (out == nullptr || cap == 0) return;
   char slots[128];

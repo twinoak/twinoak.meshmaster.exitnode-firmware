@@ -308,7 +308,13 @@ bool AgentClient::fetchConfig() {
 }
 
 bool AgentClient::postHeartbeat(const Heartbeat& hb, HeartbeatReply& reply) {
-  static char requestJson[1024];
+  // Two kilobytes since task p1.7-28, where one was enough: the heartbeat of a node that is also
+  // an observer carries the `observer` object, and two slots of it at the bounds the server
+  // accepts (a 63-character custom broker, a 95-character last error apiece) are about 700 bytes
+  // on top of the ~720 this board's own fields come to. A heartbeat that does not fit is a
+  // heartbeat that does not go, and an exit node whose heartbeat does not go is offline - so the
+  // buffer is sized for the longest thing this firmware can produce and not for the common case.
+  static char requestJson[2048];
   const size_t len = writeHeartbeat(hb, requestJson, sizeof requestJson);
   if (len == 0) {
     lastCall_ = Call();

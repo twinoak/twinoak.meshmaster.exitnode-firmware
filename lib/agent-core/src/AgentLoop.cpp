@@ -215,6 +215,15 @@ void AgentLoop::buildHeartbeat(Heartbeat& hb) {
   hb.nextCheckInS = static_cast<int>(intent_.nextCheckInS);
   hb.hasMaxTransactionsThisWake = intent_.maxTransactionsThisWake > 0;
   hb.maxTransactionsThisWake = intent_.maxTransactionsThisWake;
+  // The observer (task p1.7-28; meshmaster.dk's D-46): whatever the consumer's provider says,
+  // and nothing at all when there is none - this library knows only that it is an object the
+  // provider fills. A provider that answers false is one whose observer was turned off between
+  // two heartbeats, and the member is left out for it as it is for a consumer that has none.
+  hb.observer = nullptr;
+  if (observerProvider_ != nullptr) {
+    observer_ = HeartbeatObserver();
+    if (observerProvider_->describeObserver(observer_)) hb.observer = &observer_;
+  }
 }
 
 // The board's own link, proven: the link up *and* a time that came off the network. An RTC that

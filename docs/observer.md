@@ -13,8 +13,15 @@ its MeshMaster uplink — and the uplink always comes first.
 **It is off by default.** A board does nothing of this until an `mqtt1.preset`
 (or `mqtt2.preset`) is set on the console, and it stops the moment both are set
 back to `none` or `erase confirm` forgets them. MeshMaster sees none of what is
-published; it receives only the observer's state, from task 28 on
-(meshmaster.dk D-46).
+published; it receives only the observer's **state**, in the heartbeat, and
+shows it on an *Observer* card
+([below](#what-meshmaster-shows); meshmaster.dk
+[D-46](https://github.com/twinoak/meshmaster.dk/blob/master/spec/DECISIONS.md)).
+There is no field, no form and no job in MeshMaster for any of this, and there
+is not going to be one: the brokers are somebody else's service, the sign-in is
+this node's own identity, and an installation that could turn a stranger's
+observer on would be a worse thing than the convenience is worth. This page is
+where it is written down.
 
 ## The lines to type
 
@@ -137,10 +144,29 @@ slot 2 meshmapper (wss://mqtt.meshmapper.net:443/mqtt): connected since 12:03:26
 memory    a slot opens while free heap >= 90112 and the largest block >= 34816 (now 121304 and 65524); the uplink's 0 memory failure(s) so far
 ```
 
-A slot's state is one of `waiting-for-wifi`, `waiting-for-clock` (a token needs
-the time; nothing is sent before SNTP or the server set it), `waiting-for-heap`,
-`connecting`, `connected`, `backing-off` (a refused sign-in, a failed handshake
-or a lost connection: 5 s, doubled each time to ten minutes, with the reason).
+**Read line by line**, because every number in it answers a question the bench
+asks:
+
+| Line | What to read in it |
+|---|---|
+| `observer  …` | the same line `status` prints: each slot and its state, then the region code, the origin name, how many packet messages this board has **made** (not published — that is per slot), how many did not fit the message buffer, and *N of M slot(s) connected*. When the observer is off it says `off:` and **why** — *no slot configured*, *mqtt.iata is not set*, *no identity* — which is the first line to read when nothing is happening |
+| `slot N <preset> (<url>)` | which broker this slot is and how it is reached. `slot 2 none: off (preset is none)` is an empty slot and is not a fault |
+| `… : <state> since <time>` | the state word and when it was entered, by this board's clock. The seven words are below; `backing off since …, next attempt in N s` and `waiting for heap since …, looks again in N s` carry the wait as well |
+| `root ISRG Root X1/X2` | which CA store verified this connection — the two roots this firmware carries, or `the core's bundle` for a custom broker whose chain ends elsewhere. Never *unverified*: there is no such state |
+| `N published, N dropped, N queued` | **published** is what the broker took, packets and status alike; **dropped** is packet messages this slot threw away — its 2 KB queue was full, or it was not connected; **queued** is what is waiting in that queue right now. `dropped` climbing while `published` does not is a slot that is down, not a slot that is slow |
+| `N connects, N refusal(s), N error(s), N renewal(s), gave way N time(s)` | sessions the broker accepted; CONNECTs it refused; transport failures and lost connections; tokens made again before they expired (about one a day per slot); and how often this slot closed so the MeshMaster uplink could have the heap. **`gave way` above 0 on a healthy board is the reserve being too tight** — the constants are in `src/observer/Connection.h` |
+| `last error: <phrase>` | the last refusal or failure, one phrase and its numbers (`bad username or password (CONNACK 4)`, `tls handshake failed (tls -0x7780, errno 104)`), or `none`. This is the line to copy verbatim into a bench note; it is also the one the heartbeat carries, so MeshMaster's card shows the same words |
+| `memory  …` | the two thresholds a slot opens above, and the heap as it is **now** — free, and the largest block — followed by how many times the uplink's own call has failed for want of memory. If `largest block` is under the second figure, the second slot is waiting and the line above says so |
+
+A slot's state is one of `off`, `waiting-for-wifi`, `waiting-for-clock` (a token
+carries an issue time; nothing is sent before SNTP or the server set the clock),
+`waiting-for-heap`, `connecting`, `connected`, `backing-off` (a refused sign-in,
+a failed handshake or a lost connection: 5 s, doubled each time to ten minutes,
+with the reason). **Those seven words are a contract**, not a display string:
+the heartbeat carries each slot's state and meshmaster.dk shows it, so renaming
+one here changes what the Observer card says
+(`test/test_connection` holds them).
+
 The OLED's third line gains `MQTT 2/2` against its right edge while a slot is
 configured — `HB 12:03:14  MQTT 2/2` — and says nothing about MQTT when none is.
 
@@ -158,6 +184,46 @@ The log says connects, refusals and drops as counts and reasons and nothing else
 
 Never a packet, a token or a password: `test/test_connection` runs the whole
 state machine against a fake broker and reads the log ring back to hold it.
+
+## What MeshMaster shows
+
+The heartbeat carries the observer's **state** and nothing else, and only while
+the observer is on: a board with both slots `none` sends a heartbeat with no
+observer object in it at all, byte for byte the heartbeat it sent before this
+existed. When it is on, the object is the region code and one entry per slot —
+the preset, the broker, the state word, when the slot entered that state, how
+many messages were published, how many were dropped, and the last error. That is
+the whole of it: **not a packet, not a byte of one, not the radio's numbers for
+one, and not a count of them per key.** What a slot sent is between this node
+and that broker.
+
+The exit node's page, `/exit-nodes/{id}`, then draws an **Observer** card from
+the newest object it has received:
+
+- A lead line, *It publishes every packet it hears to its community brokers, set
+  up on its own console* — or, when a slot is down, *…and one of its brokers is
+  not taking it now.*
+- One row per slot: **slot 1 · meshview — connected since 4 minutes ago**, the
+  broker under it with *1420 published, 3 dropped*, and the slot's last error in
+  amber when there is one. A slot that is off reads *no broker*.
+- *Reported <when>*, and a Help panel saying what **dropped** and **published**
+  count and that MeshMaster relays and stores no packet.
+- The exit nodes list gains an **Observer** column, *connected over configured* —
+  `2/2`, `0/1` — and it is **empty** for an exit node that is not one, because
+  most are not and a column of dashes is noise.
+
+Two things that card does deliberately. A state word MeshMaster has never heard
+of is **kept and shown as it came** rather than refused, so this firmware can
+gain a state before the server has heard of it; only `connected` is ever counted
+as connected. And an observer object with a field over the server's bound is
+**refused by name while the rest of the heartbeat is still taken** — a broker's
+name being too long must never take an exit node off the air. The bounds are
+`preset` 32, `host` 64, `state` 32 and `lastError` 120 characters, and six
+slots; everything this firmware can produce is inside them.
+
+The card **disappears a day** after the observer is switched off — a day of
+heartbeats carrying none, which is long enough that a reboot or a reflash does
+not empty it.
 
 ## Privacy, in one place
 

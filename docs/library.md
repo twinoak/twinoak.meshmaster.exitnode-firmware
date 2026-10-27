@@ -40,7 +40,7 @@ Concretely, these are yours:
 | where a log line goes | one function pointer, `mm::logSetSink` |
 | storage | the library reads no setting and writes no file. Everything it needs comes in as a value: the token is your uplink's, the identity and the radio parameters are a `HeartbeatIdentity` you fill. The one thing it will *hand you* to store is the image a sleep keeps (`IRetained`, §5.1) — optional, and only a device that sleeps wants it |
 | the console, the display, a watchdog, sleep | yours entirely. The library's console *reports* (`jobs`, `sessions`, `server`, `errors`) write to a `TextOut` you implement if you want them |
-| the observer (`src/observer/`, pile 1.7) | the Heltec's and not the library's: the dialect of the community's MQTT observers, signed in with the node's own key, over the frames *this* radio hears. The Walter has no use for it — its radio is a RAK across a UART, and what it carries to meshmaster.dk goes through `IUplink`, not to a broker — so it is a module of this firmware beside the library, host-tested on its own (`test/test_observer`), and nothing of it is reached from `<agent/...>` |
+| the observer (`src/observer/`, pile 1.7) | the Heltec's and not the library's: the dialect of the community's MQTT observers, signed in with the node's own key, over the frames *this* radio hears. The Walter has no use for it — its radio is a RAK across a UART, and what it carries to meshmaster.dk goes through `IUplink`, not to a broker — so it is a module of this firmware beside the library, host-tested on its own (`test/test_observer`), and nothing of it is reached from `<agent/...>`. The **one** place the library meets it is the heartbeat: since `0.4.0` a consumer that has an observer hands the loop an `IHeartbeatObserver` and the loop writes what it says (§6.1). The library still does not know what an observer *is* |
 
 ## 2. Taking it
 
@@ -322,8 +322,8 @@ wake's `Budget` is how you refuse such a job rather than be surprised by it (§6
 | `supports(type)` false | the type is left out of the heartbeat's `jobTypes`; a job of it anyway is `unsupported` at no transaction, *this mesh cannot carry a 'trace' job* in the log, nothing sent, `beginJob` not called |
 | `beginJob` false | the job is `failed`, one log line, nothing sent |
 | `sendLogin`/`sendRequest`/`sendCli` → `Failed` | *the packet could not be built*: the job ends `failed` |
-| `awaitReply` false after a login | silence. Stock firmware answers a login it will not take with **silence**, and that cannot be told from a repeater that is off the air: the sequence (`agent/LoginSequence.h`) tries **twice** and reports `unreachable` — or `unauthorized`, when a blank probe login between the two tries *was* answered and only the password's try was silent. A `discover` job escalates further on its own: `forgetPath()`, a flooded login, and the path-discovery request last |
-| `awaitReply` false after a request on a reused session | one retry with a **fresh login**, then `unreachable` |
+| `awaitReply` false after a login | silence. Stock firmware answers a login it will not take with **silence**, and that cannot be told from a repeater that is off the air: the sequence (`agent/LoginSequence.h`) tries **twice** and reports `unreachable` — or `unauthorized`, when a blank probe login between the two tries *was* answered and only the password's try was silent. A `discover` job escalates further on its own: `forgetPath()`, a flooded login, and the path-discovery request last. Since `0.4.0` the result also says **where** it failed: `failedAt: "login"` (§6.2) |
+| `awaitReply` false after a request on a reused session | one retry with a **fresh login**, then `unreachable`. `failedAt` is `"request"` when the fresh login was answered and the second try was not, and `"login"` when the fresh login was not answered either — the step the job *ended* at (§6.2) |
 | `awaitText` false after a CLI line | **nothing is sent again.** One send per command is the rail: a `set` sent twice is a change made twice. The line is recorded as unanswered and the sequence stops |
 | a reply the codec cannot read | a login reply that is not one is *refused*, which the sequence reports `unauthorized` and which drops the cached session; a request's reply that will not parse is `failed`. Either way the bytes never reach a log line |
 
@@ -558,7 +558,11 @@ neighbour list alone is more than the 8 kB of stack the Arduino loop task has.
    characters, or `nullptr` while it has none — it forwards to the runner, which
    is why there is one call and not two. `begin()` is also where the loop hands
    its observation ring to the mesh and the airtime budget to the runner.
-5. **Drive it**, one of two ways:
+5. **The observer in the heartbeat** (optional, §6.1):
+   `agent.setHeartbeatObserver(&yours)` if your unit also publishes every packet
+   it hears to the community's MQTT brokers. Give none and the heartbeat is the
+   heartbeat it always was, byte for byte.
+6. **Drive it**, one of two ways:
    - **`agent.loop()`** — call it for ever, as often as you like, with the link
      up. It does at most one blocking call per pass, in the .NET agent's order:
      the config call once, the heartbeat every accepted interval, then the
@@ -570,7 +574,7 @@ neighbour list alone is more than the 8 kB of stack the Arduino loop task has.
      sleeps. Returns a `WakeReport`; then you sleep for
      `report.acceptedIntervalS`, but never less than `report.sleepAtLeastS`,
      and call it again.
-6. **Across a sleep**: `const mm::WakeState s = agent.state();` into retained
+7. **Across a sleep**: `const mm::WakeState s = agent.state();` into retained
    storage as bytes before you sleep, and `agent.restore(s)` after the next boot,
    before the wake. It is a trivially copyable POD of 76 bytes; every duration in
    it is a *duration* and not a deadline, because `millis()` restarts at zero,
@@ -578,7 +582,7 @@ neighbour list alone is more than the 8 kB of stack the Arduino loop task has.
    another `version` and changes nothing. What it carries: the backoff and how
    long the present run of failures has lasted, the accepted interval, the
    airtime budget, a 401, and the counters the heartbeat reports.
-7. **What the sleep keeps** (optional, §5.1): `agent.setRetained(&store,
+8. **What the sleep keeps** (optional, §5.1): `agent.setRetained(&store,
    scratch, sizeof scratch)` once after `begin()`, with a store of yours and a
    scratch the image is built in — the library allocates nothing, so the RAM is
    yours; a full image is about 19.5 kB (`ResultBuffer::kCapacityBytes` of
@@ -675,6 +679,122 @@ matter never reaches it.
 `describe(buf, cap)` on either, where `out` is a `mm::TextOut` of yours (one
 `write(text, len)`, and `print`/`println`/`printf` come with it). They print what
 this firmware's `server`, `errors`, `jobs` and `sessions` commands print.
+
+### 6.1 `IHeartbeatObserver` — the observer in the heartbeat (optional)
+
+Since `0.4.0`. An exit node may also be an **observer**: a MeshCore node that
+publishes every packet its radio hears to the MQTT brokers behind the
+community's maps — meshview.dk, meshmapper.net —
+signed in with a token made from its own key. MeshMaster's part is to *show the
+state* of that and to configure none of it
+([D-46](https://github.com/twinoak/meshmaster.dk/blob/master/spec/DECISIONS.md);
+this firmware's [`observer.md`](observer.md) is what an owner reads).
+
+**This library does not know what an observer is.** Not a broker, not a topic,
+not a key, not a packet — and it is not going to. What it knows is that the
+heartbeat has an `observer` member and that somebody else fills it:
+
+```cpp
+class MyObserver : public mm::IHeartbeatObserver {
+ public:
+  bool describeObserver(mm::HeartbeatObserver& out) override {
+    if (!on_) return false;              // not an observer *now*: the member is left out
+    slots_[0].slot = 1;                  // 1, 2, … as your own console numbers them
+    slots_[0].preset = "meshview";       // nullptr leaves the field out
+    slots_[0].host = "wss://mqtt.meshview.dk:443/mqtt";
+    slots_[0].state = "connected";       // one of the seven words below
+    slots_[0].since = enteredAtEpoch_;   // 0 leaves it out: a unit with no clock yet
+    slots_[0].published = published_;
+    slots_[0].dropped = dropped_;
+    slots_[0].lastError = error_[0] == '\0' ? nullptr : error_;
+    out.iata = "AAR";
+    out.hasSlots = true;                 // false leaves `slots` out; it is not an empty array
+    out.slots = slots_;
+    out.slotCount = 1;
+    return true;
+  }
+ private:
+  mm::HeartbeatObserverSlot slots_[2];   // yours, and it outlives the call
+};
+
+MyObserver observer;
+agent.setHeartbeatObserver(&observer);   // or never call it, and nothing changes
+```
+
+Five things to know, and then it is done:
+
+- **Nothing is copied.** The strings and the slot array are yours, and they have
+  to be valid until the heartbeat has been posted — the same rule
+  `HeartbeatIdentity` lives by. Members of your object, as above, is the simple
+  way to be right.
+- **Absent is a first-class answer.** No provider, or a provider that returns
+  `false`, means there is no `observer` member in the body at all — which is
+  what a unit whose owner has not turned one on sends, and what a unit whose
+  owner has just turned one *off* sends from the next heartbeat. The loop asks
+  at every heartbeat, so the answer may change between two of them.
+- **The state words are a contract**, spelled in the server's
+  `AgentObserverStates` and held to this firmware's `slotStateName` by
+  `test/test_connection`: `off`, `waiting-for-wifi`, `waiting-for-clock`,
+  `waiting-for-heap`, `connecting`, `connected`, `backing-off`. A word the
+  server has not heard of is **kept and shown** rather than refused, and only
+  `connected` is counted as connected — so inventing one does not break a
+  heartbeat, it quietly changes what the Observer card says.
+- **The server's bounds are the server's, and this library enforces none of
+  them**: `preset` 32, `host` 64, `state` 32 and `lastError` 120 characters, at
+  most six slots, and the whole object under `AgentLimits.Json`. A field over
+  its bound is **refused by name while the rest of the heartbeat is still
+  taken** — a bad observer object must never take an exit node off the air — so
+  a provider that overshoots loses the object and keeps its exit node. Keep your
+  own buffers inside those numbers and nothing is ever refused.
+- **Size your heartbeat body for it.** `writeHeartbeat` returns 0 rather than
+  writing a truncated body, and a heartbeat that does not fit is a unit the
+  server reads as offline. Two slots at the bounds above are about 700 bytes on
+  top of what your own fields come to; this firmware's buffer is 2 048 bytes
+  (`src/agent/AgentClient.cpp`), up from 1 024 at `0.3.1`.
+
+`published` and `dropped` are the record's non-nullable `long`s and are written
+whatever they are, zero included. Everything else optional is left out when it
+is absent, which is what the records' nulls mean (§9).
+
+**What it must not carry** is the other half of D-46, and it is a rail rather
+than a convention: *not a published packet, not a byte of one, not the radio's
+numbers for one, and not a count of them per key.* What a slot sent is between
+that unit and that broker; the heartbeat carries the slot's state and nothing
+else.
+
+### 6.2 `failedAt` — where a failed job failed
+
+Since `0.4.0`, and you get it for nothing: `JobRunner` fills it for every job it
+runs and `writeJobResult` writes it. It exists because **`unreachable` was two
+different things** — a login nobody answered, which on stock firmware is also a
+wrong password, and a request lost twice after a login that *was* answered — and
+the page that tells an owner *the stored guest password is probably wrong* must
+say it for the first alone.
+
+`JobReport::failedAt` is one of three values, and `JobRunner` chooses by the
+step the job **ended** at:
+
+| | What it means |
+|---|---|
+| `mm::kFailedAtLogin` (`"login"`) | no login was answered: silence to the password twice, or a refusal, or a login answered below the class the job needed |
+| `mm::kFailedAtRequest` (`"request"`) | a login was answered — fresh or a reused session — and the request or the CLI line after it was not |
+| `nullptr` | the field is left out |
+
+It is **absent** in three cases, each of them deliberate: an `ok` result (the
+field is the one member `JobResultReport.json` never carries, which is why
+`JobResultReportFailed.json` is a file of its own); a `CredentialClass::None`
+job, because a `trace` logs in to nobody and has no step to name; and a job that
+put **nothing on the air** — a type your mesh declines, a lease that had already
+run out, a wake with no room for it — because naming a login that never went out
+would point an owner at a password on the strength of a packet nobody sent.
+`test/test_runner`'s `failedAt` suite has one case per credential class.
+
+The server reads a result without the field exactly as it read every result
+before this, so nothing of yours has to change. **If you write a `JobReport`
+yourself** rather than letting `JobRunner` do it — the `IJobExtension` path
+writes its own `data` but not its own envelope, so this is only for a consumer
+that bypasses the runner — set it by the same rule, and leave it `nullptr`
+sooner than guess.
 
 ## 7. `IJobExtension` — your own job types
 
@@ -775,8 +895,12 @@ Two sets, both copied and **never edited here**:
   agent API's envelopes, generated by `MeshMaster.Contracts`' own round-trip
   tests in `twinoak/meshmaster.dk` and copied byte for byte.
   `MANIFEST.txt` names the commit they came from, with a sha256 and a size per
-  file; at `v0.3.0` that commit is **`79b1e9c`**, 69 files — and that bump is the
-  one a consumer has to read, because the **dialect** moved with it (§10, and
+  file; at `v0.4.0` that commit is **`67c2a4c`**, 75 files, and the bump from
+  `v0.3.0`'s `79b1e9c` (69 files) **added six files and changed no existing
+  file's bytes** — the `observer` object and `failedAt` (§6.1, §6.2), a sample of
+  a unit whose radio has no identity yet, and the server's transport words as a
+  list. The bump a consumer has to read twice is still `v0.3.0`'s, because the
+  **dialect** moved with that one (§10, and
   `CHANGELOG.md`'s `v0.3.0`): meshmaster.dk writes its envelopes with .NET's
   relaxed JSON encoder now, so `+`, `>`, `&`, `'`, the backtick and every
   assigned character outside ASCII are **themselves** where they used to be
@@ -795,7 +919,7 @@ Two sets, both copied and **never edited here**:
   and a result the server refuses is retried at the head of your ordered queue.
 - [`tests/fixtures/companion/`](../tests/fixtures/companion/README.md) — 46
   transcribed MeshCore frames, which is what `agent/ReplyCodec.h` is held to.
-  **It has a manifest and a commit of its own** (at `v0.3.0`, still `f518ebd`): the two
+  **It has a manifest and a commit of its own** (at `v0.4.0`, still `f518ebd`): the two
   sets move for different reasons — the envelopes when the agent API changes, the
   frames when MeshCore does — and `tools/sync-fixtures.ps1 -Set contracts` or
   `-Set companion` moves one without the other.

@@ -9,6 +9,12 @@
 // nothing under src/observer/ names the network: test/test_observer greps for it, and
 // test/test_connection drives the same state machine with a fake.
 //
+// Since task p1.7-28 it is also the agent loop's `IHeartbeatObserver` (agent/AgentLoop.h): the
+// heartbeat carries the **state** of each slot - the region, the preset, the broker, the state
+// word, since when, published, dropped and the last error - and nothing else of the observer.
+// MeshMaster shows that and configures none of it (meshmaster.dk D-46); the library it goes
+// through does not know what an observer is.
+//
 // What it never does: decode a payload, write a packet's bytes to the log or the display, or
 // let the private key out of the identity - the token is signed through Signer, whose board
 // implementation is mesh::LocalIdentity::sign and nothing else (README.md, the rails; the pile's
@@ -21,6 +27,8 @@
 
 #include <cstddef>
 #include <cstdint>
+
+#include <agent/AgentLoop.h>
 
 #include "mesh/AgentMesh.h"
 #include "observer/Config.h"
@@ -46,7 +54,7 @@ class IdentitySigner : public observer::Signer {
   const mesh::LocalIdentity* id_ = nullptr;
 };
 
-class Observer : public RxTap, public observer::StatusSource {
+class Observer : public RxTap, public observer::StatusSource, public IHeartbeatObserver {
  public:
   // `publicKeyHex` is the identity as hex (any case: stored uppercase, which is what {device},
   // origin_id and the token want); `model` is the board's name for the status message;
@@ -75,6 +83,14 @@ class Observer : public RxTap, public observer::StatusSource {
 
   // StatusSource: the status message as of now, into `out`; its length or 0.
   size_t formatStatus(const char* status, char* out, size_t cap) override;
+
+  // IHeartbeatObserver (task p1.7-28): the observer's **state** for the heartbeat - the region
+  // and one entry per slot - and false while the observer is off, which leaves the field out of
+  // the body altogether. Nothing of what was published goes in it: not a packet, not a topic,
+  // not a count per key (meshmaster.dk D-46). Called from the agent loop, with the slots' own
+  // strings handed over by pointer; they are this object's and the connections', and the
+  // heartbeat is written before the call returns.
+  bool describeObserver(HeartbeatObserver& out) override;
 
   // The last packet message made ("" until one was).
   const char* lastPacketMessage() const { return packet_; }
@@ -122,6 +138,9 @@ class Observer : public RxTap, public observer::StatusSource {
   char why_[64] = {0};
 
   observer::Connections link_;
+  // Where describeObserver()'s answer lives: the loop copies nothing, so the array outlives the
+  // call as the settings above do.
+  HeartbeatObserverSlot hbSlots_[observer::kSlots] = {};
 
   char packet_[observer::kPacketMessageCap] = {0};
   size_t packetLen_ = 0;

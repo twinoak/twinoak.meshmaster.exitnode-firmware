@@ -146,6 +146,55 @@ size_t writeHeartbeat(const Heartbeat& hb, char* out, size_t cap) {
     w.key("maxTransactionsThisWake");
     w.integer(hb.maxTransactionsThisWake);
   }
+  // The observer, last, and only for a consumer that gave the loop a provider (D-46): a node
+  // with the observer off writes nothing here, which is what every exit node sends until its
+  // owner turns one on. `published` and `dropped` are the record's non-nullable longs and are
+  // written whatever they are; everything else optional is left out when it is absent.
+  if (hb.observer != nullptr) {
+    const HeartbeatObserver& o = *hb.observer;
+    w.key("observer");
+    w.beginObject();
+    if (o.iata != nullptr) {
+      w.key("iata");
+      w.string(o.iata);
+    }
+    if (o.hasSlots) {
+      w.key("slots");
+      w.beginArray();
+      for (int i = 0; i < o.slotCount; i++) {
+        const HeartbeatObserverSlot& s = o.slots[i];
+        w.comma();
+        w.beginObject();
+        w.key("slot");
+        w.integer(s.slot);
+        if (s.preset != nullptr) {
+          w.key("preset");
+          w.string(s.preset);
+        }
+        if (s.host != nullptr) {
+          w.key("host");
+          w.string(s.host);
+        }
+        w.key("state");
+        w.string(s.state == nullptr ? "" : s.state);
+        if (s.since != 0) {
+          w.key("since");
+          writeTime(w, s.since);
+        }
+        w.key("published");
+        w.integer(s.published);
+        w.key("dropped");
+        w.integer(s.dropped);
+        if (s.lastError != nullptr) {
+          w.key("lastError");
+          w.string(s.lastError);
+        }
+        w.endObject();
+      }
+      w.endArray();
+    }
+    w.endObject();
+  }
   w.endObject();
   return w.overflowed() ? 0 : w.length();
 }
