@@ -19,7 +19,7 @@ test, so it is the session the console accepts, line for line.
 | `set <key> <value>` | store a setting in NVS; it takes effect at once (see below). The value is the rest of the line, trimmed; a WiFi name with spaces is fine |
 | `get <key>` | print one setting. `wifi.pass` and `meshmaster.token` print `set` or `unset` and never the value |
 | `get` | print every setting, one per line, in the order of the table below; an unset key shows its fallback in brackets |
-| `status` | firmware, board and reset reason, the public key, the radio and its frame counters, WiFi, time and where it came from, the server's last answer, the heartbeat, the heap |
+| `status` | firmware, board and reset reason, the public key, the radio and its frame counters, WiFi, time and where it came from, the server's last answer, the heartbeat, the observer (its two slots, or why it is off, and how many packet messages it has made), the heap |
 | `mesh` | the adverts heard: how many, how many are waiting to be posted and how many the ring dropped, and the last five with their names, roles, hops, SNR and RSSI |
 | `server` | the exit node's loop: the last heartbeat and the next, the last observation batch, the job counters, and the four error counters the heartbeat itself carries |
 | `jobs` | the airtime budget in force and what it has spent, how many claims were made, the thirteen job types this firmware advertises, and the last ten jobs with their outcome, their transaction count and when they ended |
@@ -30,10 +30,18 @@ test, so it is the session the console accepts, line for line.
 | `wifi` | a blocking scan (a few seconds): every network with channel, RSSI and security, then the link's state |
 | `reboot` | restart; the reason is noted so that `reboots` after it says *asked for on the console* |
 | `erase confirm` | forget every setting. The identity is not a setting and stays, so the exit node keeps its key on meshmaster.dk. Without the word, `erase` refuses and says what the word is |
+| `get mqtt.presets` | the broker presets an `mqttN.preset` can name — `meshview`, `meshmapper`, `custom`, `none` — with each one's broker and sign-in (task p1.7-26) |
 
 A refusal is one line starting with `error:` and names what was wrong:
 an unknown command or key, a missing value, a value out of range, a scheme
 that is not `https://`, a line over 200 characters, a control character.
+
+Two lines of the observer firmware's guide are **answered rather than
+stored**, with one line each and no `error:`: `set timezone …` (this firmware
+keeps UTC from the server or SNTP, and what it publishes is stamped in UTC) and
+`set bridge.source …` (an exit node publishes what it receives and forwards
+nothing). `set wifi.pwd …` is that guide's name for `set wifi.pass …` and is
+the same key: redacted on echo, `set` or `unset` in `get`.
 
 ## Keys
 
@@ -51,12 +59,31 @@ that is not `https://`, a line over 200 characters, a control character.
 | `log.level` | `error`, `warn`, `info`, `debug` | `info` |
 | `log.frames` | `on`, `off`: one log line per frame, both directions. A frame of a job in flight - the login, the request, a CLI line and its reply, a trace - is printed as hex, header, path and payload; a login that carries a password, and the `password` line of a rotation and the reply that echoes it, are printed with their encrypted bodies as one `*` per byte, which is the .NET agent's redaction of `CMD_SEND_LOGIN` and of a sensitive CLI line; an advert and the mesh's own chat are the header line only, never their bytes | `off` |
 | `display.timeout` | seconds, 0..86400: how long the OLED stays lit after a button press | `0`: it never turns off. `300` is the five minutes this firmware did before task p1.2-09 |
+| `mqtt.origin` | 1..31 characters: the observer's name in what it publishes | `MeshMaster-` and the first four characters of the key |
+| `mqtt.iata` | three letters, any case typed, stored uppercase: the region the brokers file this node under — `AAL`, `AAR`, `BLL`, `ODE`, `CPH` or `RNN` in Denmark | none: no slot on the default topic publishes until it is set |
+| `mqtt.owner` | the owner's public key, 64 hex digits, named in the sign-in token | none: the token names no owner |
+| `mqtt.email` | the owner's email, `name@host`, at most 63 characters, named in the sign-in token | none |
+| `mqtt1.preset`, `mqtt2.preset` | `none`, `meshview`, `meshmapper` or `custom` (`get mqtt.presets`) | `none`: the slot is off |
+| `mqttN.server` | `custom` only: `wss://host[:port][/path]` or `mqtts://host[:port]`, at most 63 characters. TLS only — `ws://` and `mqtt://` are refused, because every connection this firmware makes is verified | none |
+| `mqttN.audience` | `custom` only: the broker's name as the token's audience, a host name of at most 63 characters. Set, the slot signs in with the token; unset, with `mqttN.username` and `mqttN.password` | none |
+| `mqttN.topic` | `custom` only: a topic template with `{iata}`, `{device}` (the key, uppercase hex) and `{type}` (`status`, `packets`); printable, no space, no `+` or `#`, at most 95 characters | `meshcore/{iata}/{device}/{type}` |
+| `mqttN.username` | `custom` only, 1..31 characters: for a broker that wants a username instead of a token | none |
+| `mqttN.password` | `custom` only, 1..63 characters; never printed | none |
 
 The radio's fallbacks are the Danish MeshCore channel, the one the field
 repeaters run; the ranges are MeshCore's own. A `set` takes effect at once:
 `wifi.*` drops the link and rejoins, `meshmaster.*` starts the server loop
 again (and forgets a 401), `radio.*` reprograms the SX1262, `log.*` changes
-what is printed, `display.timeout` restarts the panel's timer.
+what is printed, `display.timeout` restarts the panel's timer, `mqtt.*` and
+`mqttN.*` make the observer read its settings again.
+
+The `mqtt` keys are the observer's (task p1.7-26, `src/observer/`): the names
+and the shapes are the observer firmware's
+([agessaman/MeshCore, branch observer-firmware](https://github.com/agessaman/MeshCore/blob/d664d89df66bdacc1319900a2e2d152fa31b9dc9/MQTT_IMPLEMENTATION.md)),
+so its Danish guide typed on this console ends in the same two slots. What is
+published, to whom and what it costs is task 27's `docs/observer.md`; until it
+lands, a configured observer formats every received frame into the message the
+brokers take and `status` counts them, and nothing leaves the board.
 
 `radio.freq`, `radio.bw`, `radio.sf` and `radio.cr` are also what the heartbeat
 reports as its `radio` block, which is what the exit node's page on

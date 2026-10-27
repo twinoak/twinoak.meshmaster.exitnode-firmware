@@ -1,11 +1,12 @@
 // The serial console: reads lines from the USB serial port, parses them (Parser.h) and acts.
 //
 // What it prints, and what it does not: typed characters are echoed so a terminal without local
-// echo is usable, except the value of `set wifi.pass ...` and `set meshmaster.token ...`, which
-// echoes as asterisks; a reply never contains a secret (`get` says set/unset for one, `set`
-// answers "ok <key>"); `status` prints the public key, the radio, the firmware, the link, the
-// time, the server's last answer and the heap. The rest of what the port carries is the log
-// (Log.h), which holds the same line.
+// echo is usable, except the value of a `set` of a secret key - wifi.pass (and its other name
+// wifi.pwd), meshmaster.token, mqtt1.password, mqtt2.password - which echoes as asterisks; a
+// reply never contains a secret (`get` says set/unset for one, `set` answers "ok <key>");
+// `status` prints the public key, the radio, the firmware, the link, the time, the server's last
+// answer, the observer and the heap. The rest of what the port carries is the log (Log.h), which
+// holds the same line.
 
 #pragma once
 
@@ -44,6 +45,7 @@ class Console {
   void runLine();
   void prompt();
   void help();
+  void presets();
   void getAll();
   bool secretValueIsBeingTyped() const;
 

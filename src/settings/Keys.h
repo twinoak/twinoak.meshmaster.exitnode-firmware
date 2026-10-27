@@ -5,9 +5,15 @@
 // native tests (test/test_console_parser) cover the same rules the board applies. The NVS
 // side is src/settings/Store.h, which is board-only.
 //
-// Two keys are secrets: wifi.pass and meshmaster.token. They are typed once, kept in NVS,
-// and printed by no command - `get` says "set" or "unset" for them and never the value
-// (README.md, "Rails that hold in every task").
+// Four keys are secrets: wifi.pass, meshmaster.token, mqtt1.password and mqtt2.password. They
+// are typed once, kept in NVS, and printed by no command - `get` says "set" or "unset" for them
+// and never the value (README.md, "Rails that hold in every task").
+//
+// Since task p1.7-26 the table also holds the observer's keys, under the names the observer
+// firmware (agessaman/MeshCore, observer-firmware) gives them where it has one: mqtt.iata,
+// mqtt.owner, mqtt.email, mqtt.origin and two slots of mqttN.preset, .server, .audience, .topic,
+// .username, .password. `wifi.pwd` is that firmware's name for wifi.pass and is accepted as
+// another name of it (findKey). What the keys mean is src/observer/Config.h.
 
 #pragma once
 
@@ -25,6 +31,13 @@ enum class ValueKind : uint8_t {
   Int,     // an integer within [min, max]
   Level,   // error | warn | info | debug
   OnOff,   // on | off
+  Iata,    // three letters A-Z, any case typed, stored uppercase (the observer firmware's mqtt.iata)
+  Hex64,   // 64 hex digits, any case: a public key (mqtt.owner)
+  Email,   // one @ with something on both sides, no spaces, bounded (mqtt.email)
+  Host,    // a host name: letters, digits, . and -, bounded (mqttN.audience)
+  BrokerUrl,  // wss://host[:port][/path] or mqtts://host[:port] - TLS only, bounded (mqttN.server)
+  Topic,   // an MQTT topic template: printable ASCII, no space, no + or # wildcard, bounded (mqttN.topic)
+  Preset,  // none | meshview | meshmapper | custom (src/observer/Presets.h)
 };
 
 struct KeyDef {
@@ -42,17 +55,26 @@ struct KeyDef {
 // The longest value any key accepts, and the buffer size a caller needs for one.
 constexpr size_t kMaxValueLen = 128;
 
-constexpr int kKeyCount = 12;
+constexpr int kKeyCount = 28;
 extern const KeyDef kKeys[kKeyCount];
 
-// The key called `name`, or nullptr. Exact, case-sensitive match.
+// The key called `name`, or nullptr. Exact, case-sensitive match - and one alias: `wifi.pwd`, the
+// observer firmware's name for the WPA passphrase, finds wifi.pass.
 const KeyDef* findKey(const char* name);
 
-// True for the two keys whose value is never printed.
+// A name the observer firmware has a setting for and this firmware answers with one line
+// instead (`timezone`, `bridge.source`): that line, or nullptr for any other name.
+const char* explainKey(const char* name);
+
+// True for the keys whose value is never printed.
 bool isSecret(const KeyDef& key);
 
 // Validate `value` for `key`. On refusal, `err` (errCap bytes) gets one line saying why.
 bool validateValue(const KeyDef& key, const char* value, char* err, size_t errCap);
+
+// What is stored of a value that passed validateValue: the same bytes, except an Iata, which is
+// stored uppercase as the observer firmware stores it (CommonCLI_Observer.cpp:335-337).
+void normalizeValue(const KeyDef& key, char* value);
 
 // What `get <key>` prints: "<key> <value>", or for a secret "<key> set" / "<key> unset", or for
 // an unset non-secret "<key> unset (<fallback>)". `stored` is nullptr or "" when the key is unset.

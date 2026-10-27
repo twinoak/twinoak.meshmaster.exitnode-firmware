@@ -51,6 +51,29 @@ namespace mm {
 static_assert(kMeshReplyDataCap >= MAX_PACKET_PAYLOAD, "agent/IMesh.h's kMeshReplyDataCap is smaller than MeshCore's MAX_PACKET_PAYLOAD");
 static_assert(kMeshPathCap >= MAX_PATH_SIZE, "agent/IMesh.h's kMeshPathCap is smaller than MeshCore's MAX_PATH_SIZE");
 
+// A received frame as the observer (src/observer/, task p1.7-26) takes it: the bytes the radio
+// received and its numbers for them, and the packet hash MeshCore computed. Handed over at
+// logRx, which Dispatcher::checkRecv (src/Dispatcher.cpp:191-238 at d9296435) calls right after
+// logRxRaw for the same frame, once tryParsePacket has accepted it - so the raw bytes stashed
+// at logRxRaw and the packet at logRx are the same frame, and a frame the dispatcher refused
+// is never handed over. Nothing in it is decoded by anyone: the tap carries bytes.
+struct RxFrame {
+  const uint8_t* raw = nullptr;  // the whole frame, MAX_TRANS_UNIT bytes at most
+  int len = 0;
+  float snr = 0;
+  float rssi = 0;
+  float score = 0;               // the dispatcher's rebroadcast score for it
+  uint8_t hash[MAX_HASH_SIZE] = {0};  // mesh::Packet::calculatePacketHash
+};
+
+class RxTap {
+ public:
+  virtual void onRxFrame(const RxFrame& frame) = 0;
+
+ protected:
+  ~RxTap() {}
+};
+
 class AgentMesh : public mesh::Mesh, public IMesh {
  public:
   static constexpr int kRecent = 5;  // what `mesh` prints: the last five, with their names
@@ -110,6 +133,10 @@ class AgentMesh : public mesh::Mesh, public IMesh {
   void setFrameLog(bool on) { frameLog_ = on; }
   bool frameLog() const { return frameLog_; }
 
+  // The observer's tap (RxTap above): every frame the dispatcher accepts, as bytes. nullptr is
+  // no tap, and then logRxRaw stashes nothing.
+  void setRxTap(RxTap* tap) { tap_ = tap; }
+
   // The newest first, at most kRecent of them; count() is how many are real.
   const HeardAdvert& recent(int index) const { return recent_[index]; }
   int recentCount() const { return recentCount_; }
@@ -131,6 +158,7 @@ class AgentMesh : public mesh::Mesh, public IMesh {
   bool allowPacketForward(const mesh::Packet*) override { return false; }
   void onAdvertRecv(mesh::Packet* pkt, const mesh::Identity& id, uint32_t timestamp, const uint8_t* app_data,
                     size_t app_data_len) override;
+  void logRxRaw(float snr, float rssi, const uint8_t raw[], int len) override;
   void logRx(mesh::Packet* pkt, int len, float score) override;
   void logTx(mesh::Packet*, int) override { counters_.tx++; }
 
@@ -176,6 +204,14 @@ class AgentMesh : public mesh::Mesh, public IMesh {
   HeardAdvert recent_[kRecent];
   int recentCount_ = 0;
   bool frameLog_ = false;
+
+  // The observer's tap and the frame stashed for it between logRxRaw and logRx (RxFrame above).
+  RxTap* tap_ = nullptr;
+  uint8_t rawStash_[MAX_TRANS_UNIT] = {0};
+  int rawStashLen_ = 0;
+  float rawStashSnr_ = 0;
+  float rawStashRssi_ = 0;
+  bool rawStashed_ = false;
 
   mesh::Identity peer_;
   bool peerSet_ = false;

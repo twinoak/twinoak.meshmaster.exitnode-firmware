@@ -1,0 +1,40 @@
+# packet-flood-advert - an advert heard as a flood
+# Route F, no transport codes, no path: the common case, and a score the formula clamps at 1 (1000).
+#
+# Written by hand from the observer firmware's source, agessaman/MeshCore observer-firmware @ d664d89df66bdacc1319900a2e2d152fa31b9dc9,
+# and MeshCore at this firmware's pin, meshcore-dev/MeshCore @ d92964352441e53b93e8667b802e04f6e072b39e (companion-v1.17.1). Each field, and where it came from:
+#   timestamp    MQTTMessageBuilder.cpp:288-307  "%Y-%m-%dT%H:%M:%S" of gmtime, then ".%06ld+00:00" of the microseconds
+#   hash         MQTTMessageBuilder.cpp:543-547  Packet::calculatePacketHash as 16 uppercase hex (bytesToHex :606-622);
+#                src/Packet.cpp:41-50 at the pin: SHA-256 of the payload type byte, then for a TRACE the two bytes of
+#                path_len (a uint16_t, little-endian), then the payload; the first eight bytes of the digest. Computed
+#                here with Python's hashlib over exactly those bytes
+#   origin       MQTTBridge.cpp:38-47            mqtt.origin, else the node's name; here the fallback this firmware uses
+#   type         MQTTPayloadBuilder.cpp:300      "PACKET"
+#   direction    MQTTMessageBuilder.cpp:556      "rx"
+#   time, date   MQTTMessageBuilder.cpp:521-532  "%H:%M:%S" and "%d/%m/%Y" of the same gmtime
+#   len          MQTTMessageBuilder.cpp:558, MQTTPayloadBuilder.cpp:293,304  the radio frame's length, as a string
+#   packet_type  MQTTMessageBuilder.cpp:540, MQTTPayloadBuilder.cpp:294,305  Packet::getPayloadType, as a string
+#   route        MQTTMessageBuilder.cpp:541,597-604  "D" when Packet::isRouteDirect (Packet.h:65: route 2 or 3), else "F"
+#   payload_len  MQTTMessageBuilder.cpp:560, MQTTPayloadBuilder.cpp:295,307  Packet::payload_len, as a string
+#   raw          MQTTMessageBuilder.cpp:534-537  the whole frame, uppercase hex
+#   origin_id    examples/simple_repeater/MyMesh.cpp:1222-1226  the public key, Utils::toHex (uppercase at the pin, Utils.cpp:174-184)
+#   SNR          MQTTPayloadBuilder.cpp:311-317  "%.1f" of the radio's SNR
+#   RSSI         MQTTPayloadBuilder.cpp:318-321  "%d" of the RSSI, which arrives as a float through an int parameter (truncated)
+#   score        MQTTPayloadBuilder.cpp:322-325  "%d" of (int)(score * 1000); score is RadioLibWrapper::packetScoreInt(snr, sf, len),
+#                RadioLibWrappers.cpp:221-239 at the pin, computed here in the same float/double steps
+#   path         MQTTPayloadBuilder.cpp:328-342 with MQTTMessageBuilder.cpp:551  only on a direct route with hops: one
+#                lowercase hex token per hop, hashSize bytes each, at most four
+# The field order is the order buildPacketMessage fills its document (MQTTPayloadBuilder.cpp:297-342).
+#
+# The frame: header 0x11 (version 0, type 4, route 1), path_len 0x00 (hash size 1, 0 hop(s)), 30 payload byte(s).
+origin=MeshMaster-7F3A
+originId=7F3A9C02E1B44D9A0F6C2B7D8E9A1C3F5D7B9E0A2C4E6F8A0B1C2D3E4F5A6B7C
+epoch=1793016000
+micros=123456
+raw=1100A0A1A2A3A4A5A6A7A8A9AAABACADAEAFB0B1B2B3B4B5B6B7B8B9BABBBCBD
+hash=85F7D5540DDEB6C5
+snr=9.5
+rssi=-84.5
+sf=8
+score1000=1000
+expected={"timestamp":"2026-10-26T12:00:00.123456+00:00","hash":"85F7D5540DDEB6C5","origin":"MeshMaster-7F3A","type":"PACKET","direction":"rx","time":"12:00:00","date":"26/10/2026","len":"32","packet_type":"4","route":"F","payload_len":"30","raw":"1100A0A1A2A3A4A5A6A7A8A9AAABACADAEAFB0B1B2B3B4B5B6B7B8B9BABBBCBD","origin_id":"7F3A9C02E1B44D9A0F6C2B7D8E9A1C3F5D7B9E0A2C4E6F8A0B1C2D3E4F5A6B7C","SNR":"9.5","RSSI":"-84","score":"1000"}

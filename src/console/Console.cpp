@@ -5,6 +5,7 @@
 
 #include <agent/Log.h>
 
+#include "observer/Presets.h"
 #include "version.h"
 
 namespace mm {
@@ -30,12 +31,19 @@ void Console::loop() {
 }
 
 bool Console::secretValueIsBeingTyped() const {
-  static const char* const prefixes[] = {"set wifi.pass ", "set meshmaster.token "};
-  for (const char* p : prefixes) {
-    const size_t n = std::strlen(p);
-    if (len_ >= n && std::strncmp(line_, p, n) == 0) return true;
-  }
-  return false;
+  // "set <key> " where the key is a secret - by the table, so that every secret key is redacted
+  // and so is every other name of one (`wifi.pwd` is wifi.pass, Keys.cpp).
+  static const char kSet[] = "set ";
+  const size_t setLen = sizeof kSet - 1;
+  if (len_ <= setLen || std::strncmp(line_, kSet, setLen) != 0) return false;
+  char name[32];
+  size_t n = 0;
+  size_t i = setLen;
+  for (; i < len_ && line_[i] != ' ' && n + 1 < sizeof name; i++) name[n++] = line_[i];
+  name[n] = '\0';
+  if (i >= len_ || line_[i] != ' ') return false;  // the key is still being typed
+  const KeyDef* key = findKey(name);
+  return key != nullptr && isSecret(*key);
 }
 
 void Console::takeChar(char c) {
@@ -86,10 +94,18 @@ void Console::help() {
   io_->println("  wifi                scan for networks and show the link");
   io_->println("  reboot");
   io_->printf("  erase %s       forget every setting; the identity stays\r\n", kEraseWord);
+  io_->println("  get mqtt.presets    the broker presets an mqttN.preset can name");
   io_->println("keys:");
   for (const KeyDef& k : kKeys) {
     io_->printf("  %-18s %s\r\n", k.name, k.help);
   }
+  io_->println("  wifi.pwd           another name for wifi.pass; set timezone and set bridge.source are answered, not stored");
+}
+
+void Console::presets() {
+  io_->println("presets   name, broker, sign-in (set mqtt1.preset <name>, set mqtt2.preset <name>)");
+  observer::describePresets(
+      [](void* ctx, const char* text) { static_cast<Stream*>(ctx)->printf("%s\r\n", text); }, io_);
 }
 
 void Console::getAll() {
@@ -177,6 +193,12 @@ void Console::runLine() {
       }
       io_->println("ok every setting forgotten; the identity stays");
       if (host_.erased) host_.erased();
+      return;
+    case Verb::Note:
+      io_->printf("%s\r\n", r.command.note != nullptr ? r.command.note : "");
+      return;
+    case Verb::Presets:
+      presets();
       return;
   }
 }
