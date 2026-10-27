@@ -7,6 +7,8 @@
 #include <Arduino.h>
 #include <sys/time.h>
 
+#include <agent/Log.h>
+
 #include "version.h"
 
 namespace mm {
@@ -34,8 +36,15 @@ void readKey(SettingsStore& store, const char* name, char* out, size_t cap) {
 
 }  // namespace
 
+void Observer::reportLine(void*, LogLevel level, const char* line) {
+  // The connections' lines - counts and reasons, never a payload, a token or a password
+  // (test/test_connection reads the ring back to hold that) - onto this board's log.
+  logf(level, "%s", line);
+}
+
 void Observer::begin(SettingsStore& settings, const mesh::LocalIdentity* identity, const char* publicKeyHex,
-                     const char* model, uint32_t (*clock)()) {
+                     const char* model, uint32_t (*clock)(), observer::Client* const clients[observer::kSlots],
+                     const observer::Environment& env) {
   settings_ = &settings;
   signer_.setIdentity(identity);
   clock_ = clock;
@@ -46,6 +55,8 @@ void Observer::begin(SettingsStore& settings, const mesh::LocalIdentity* identit
   }
   publicKeyHex_[i] = '\0';
   std::snprintf(defaultOrigin_, sizeof defaultOrigin_, "MeshMaster-%.4s", publicKeyHex_);
+  observer::formatClientVersion(firmwareString(), clientVersion_, sizeof clientVersion_);
+  link_.begin(clients, env, signer_, *this, &Observer::reportLine, this);
   reconfigure();
 }
 
@@ -84,7 +95,16 @@ void Observer::reconfigure() {
   readSettings();
   enabled_ = observer::observerEnabled(view_, why_, sizeof why_) && publicKeyHex_[0] != '\0';
   if (publicKeyHex_[0] == '\0') std::snprintf(why_, sizeof why_, "no identity");
+  // The connections read the same view: a slot whose URL, sign-in or topics changed starts
+  // over, the others keep their sessions (Connections::configure).
+  link_.configure(view_, enabled_, publicKeyHex_, clientVersion_);
 }
+
+void Observer::loop() { link_.loop(); }
+
+void Observer::setLinkUp(bool up) { link_.setLinkUp(up); }
+
+void Observer::onUplinkMemoryFailure() { link_.onUplinkMemoryFailure(); }
 
 const char* Observer::origin() const { return origin_[0] != '\0' ? origin_ : defaultOrigin_; }
 
@@ -109,12 +129,12 @@ void Observer::onRxFrame(const RxFrame& frame) {
     return;
   }
   formatted_++;
+  link_.onPacketMessage(packet_, packetLen_);
 }
 
 size_t Observer::formatStatus(const char* status, char* out, size_t cap) {
   observer::StatusFields f;
   char radio[48];
-  char client[96];
   f.status = status;
   f.origin = origin();
   f.originId = publicKeyHex_;
@@ -123,41 +143,41 @@ size_t Observer::formatStatus(const char* status, char* out, size_t cap) {
   observer::formatRadio(settings_->number(*findKey("radio.freq")), settings_->number(*findKey("radio.bw")),
                         static_cast<int>(settings_->number(*findKey("radio.sf"))),
                         static_cast<int>(settings_->number(*findKey("radio.cr"))), radio, sizeof radio);
-  observer::formatClientVersion(f.firmwareVersion, client, sizeof client);
   f.radio = radio;
-  f.clientVersion = client;
+  f.clientVersion = clientVersion_;
   microsNow(clock_, f.atEpoch, f.atMicros);
   f.repeat = "off";  // an exit node forwards nothing (AgentMesh::allowPacketForward)
   f.uptimeSecs = static_cast<int>(millis() / 1000);
   f.internalHeap = static_cast<int>(ESP.getFreeHeap());
   f.heapLargest = static_cast<int>(ESP.getMaxAllocHeap());
+  f.mqttSlotsUp = link_.connectedSlots();
+  f.mqttSlotsTotal = link_.configuredSlots();
+  const uint32_t failures = link_.connectFailures();
+  f.mqttConnectFailures = failures > 0 ? static_cast<int>(failures) : -1;  // left out when 0, as the observer firmware's "> 0" rule
   return observer::formatStatus(f, out, cap);
 }
 
 void Observer::describe(char* out, size_t cap) const {
   if (out == nullptr || cap == 0) return;
-  char slots[96];
+  char slots[128];
   size_t n = 0;
   slots[0] = '\0';
   for (int s = 0; s < observer::kSlots; s++) {
     const observer::ResolvedSlot r = observer::resolveSlot(view_.slot[s]);
-    const int w = std::snprintf(slots + n, sizeof slots - n, "%sslot %d %s%s%s", s > 0 ? ", " : "", s + 1, r.name,
-                                r.active ? "" : " (", r.active ? "" : r.why);
+    const observer::SlotView v = link_.view(s);
+    const int w = std::snprintf(slots + n, sizeof slots - n, "%sslot %d %s%s%s%s", s > 0 ? ", " : "", s + 1, r.name,
+                                r.active ? " " : " (", r.active ? observer::slotStateName(v.state) : r.why, r.active ? "" : ")");
     if (w < 0) break;
     n += static_cast<size_t>(w);
     if (n >= sizeof slots) break;
-    if (!r.active) {
-      const int c = std::snprintf(slots + n, sizeof slots - n, ")");
-      if (c > 0) n += static_cast<size_t>(c);
-      if (n >= sizeof slots) break;
-    }
   }
   if (!enabled_) {
     std::snprintf(out, cap, "off: %s; %s; %lu frame(s) heard while off", why_, slots, static_cast<unsigned long>(heardWhileOff_));
     return;
   }
-  std::snprintf(out, cap, "%s; iata %s, origin \"%s\"; %lu packet message(s) made, %lu did not fit; nothing sent (task 27)",
-                slots, iata_, origin(), static_cast<unsigned long>(formatted_), static_cast<unsigned long>(notFitting_));
+  std::snprintf(out, cap, "%s; iata %s, origin \"%s\"; %lu packet message(s) made, %lu did not fit; %d of %d slot(s) connected (get mqtt.status)",
+                slots, iata_, origin(), static_cast<unsigned long>(formatted_), static_cast<unsigned long>(notFitting_),
+                link_.connectedSlots(), link_.configuredSlots());
 }
 
 }  // namespace mm

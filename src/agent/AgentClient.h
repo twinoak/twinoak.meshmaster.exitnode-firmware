@@ -77,6 +77,12 @@ class AgentClient : public IUplink {
   // For `status`, e.g. "https://meshmaster.dk: config ok at 12:03:14, agent 17 \"Window\", ...".
   void describe(char* out, size_t cap) const;
 
+  // Calls that got no reply for want of memory: mbedtls said an allocation failed, or the
+  // largest free block after the failed call could not hold one TLS content buffer. The observer
+  // watches this count move and gives up its highest broker connection for ten minutes when it
+  // does (src/observer/Connection.h: the radio first, the uplink second, the observer last).
+  uint32_t memoryFailures() const { return memoryFailures_; }
+
  private:
   // One request. `method` is "GET" or "POST"; `requestBody` is nullptr for a GET. The reply's
   // bytes land in `body` (bodyCap), NUL-terminated and cut if longer.
@@ -105,6 +111,7 @@ class AgentClient : public IUplink {
   RateLimiter limiter_;
   AgentConfig config_;
   bool hasConfig_ = false;
+  uint32_t memoryFailures_ = 0;
 };
 
 }  // namespace mm

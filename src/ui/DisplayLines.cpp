@@ -75,8 +75,21 @@ void renderLines(const DisplayState& state, char lines[kDisplayLines][kDisplayCo
                 state.online ? "yes" : "no");
   put(lines[1], buf);
 
-  // 3. When meshmaster.dk last heard from this board. (*Last heartbeat:* would be 24.)
-  if (state.everHeartbeated) {
+  // 3. When meshmaster.dk last heard from this board. (*Last heartbeat:* would be 24.) With an
+  // observer slot configured the word is cut to *HB* and the broker connections take the right
+  // edge: "HB 12:03:14  MQTT 2/2" is exactly 21, and nothing else about the line moves.
+  if (state.observerSlotsConfigured > 0) {
+    char left[24];
+    char right[16];
+    if (state.everHeartbeated) {
+      formatClock(state.lastHeartbeatAtEpoch, when, sizeof when);
+      std::snprintf(left, sizeof left, "HB %s", when);
+    } else {
+      std::snprintf(left, sizeof left, "HB none");
+    }
+    std::snprintf(right, sizeof right, "MQTT %d/%d", state.observerSlotsConnected, state.observerSlotsConfigured);
+    putEnds(lines[2], left, right);
+  } else if (state.everHeartbeated) {
     formatClock(state.lastHeartbeatAtEpoch, when, sizeof when);
     std::snprintf(buf, sizeof buf, "Heartbeat: %s", when);
     put(lines[2], buf);

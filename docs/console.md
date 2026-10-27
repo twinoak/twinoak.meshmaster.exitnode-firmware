@@ -19,7 +19,7 @@ test, so it is the session the console accepts, line for line.
 | `set <key> <value>` | store a setting in NVS; it takes effect at once (see below). The value is the rest of the line, trimmed; a WiFi name with spaces is fine |
 | `get <key>` | print one setting. `wifi.pass` and `meshmaster.token` print `set` or `unset` and never the value |
 | `get` | print every setting, one per line, in the order of the table below; an unset key shows its fallback in brackets |
-| `status` | firmware, board and reset reason, the public key, the radio and its frame counters, WiFi, time and where it came from, the server's last answer, the heartbeat, the observer (its two slots, or why it is off, and how many packet messages it has made), the heap |
+| `status` | firmware, board and reset reason, the public key, the radio and its frame counters, WiFi, time and where it came from, the server's last answer, the heartbeat, the observer (its two slots and their states, or why it is off, how many packet messages it has made and how many slots are connected), the heap |
 | `mesh` | the adverts heard: how many, how many are waiting to be posted and how many the ring dropped, and the last five with their names, roles, hops, SNR and RSSI |
 | `server` | the exit node's loop: the last heartbeat and the next, the last observation batch, the job counters, and the four error counters the heartbeat itself carries |
 | `jobs` | the airtime budget in force and what it has spent, how many claims were made, the thirteen job types this firmware advertises, and the last ten jobs with their outcome, their transaction count and when they ended |
@@ -31,6 +31,7 @@ test, so it is the session the console accepts, line for line.
 | `reboot` | restart; the reason is noted so that `reboots` after it says *asked for on the console* |
 | `erase confirm` | forget every setting. The identity is not a setting and stays, so the exit node keeps its key on meshmaster.dk. Without the word, `erase` refuses and says what the word is |
 | `get mqtt.presets` | the broker presets an `mqttN.preset` can name — `meshview`, `meshmapper`, `custom`, `none` — with each one's broker and sign-in (task p1.7-26) |
+| `get mqtt.status` | the observer's two broker slots, one line each: preset or host, state (`waiting-for-wifi`, `waiting-for-clock`, `waiting-for-heap`, `connecting`, `connected`, `backing-off`), since when, published, dropped, queued, connects, refusals, errors, token renewals, how often it gave way to the uplink, and the last error — then the memory rule the slots live under and what the heap is now (task p1.7-27, [`observer.md`](observer.md)) |
 
 A refusal is one line starting with `error:` and names what was wrong:
 an unknown command or key, a missing value, a value out of range, a scheme
@@ -75,15 +76,18 @@ repeaters run; the ranges are MeshCore's own. A `set` takes effect at once:
 `wifi.*` drops the link and rejoins, `meshmaster.*` starts the server loop
 again (and forgets a 401), `radio.*` reprograms the SX1262, `log.*` changes
 what is printed, `display.timeout` restarts the panel's timer, `mqtt.*` and
-`mqttN.*` make the observer read its settings again.
+`mqttN.*` make the observer read its settings again — a slot whose broker,
+sign-in or topics changed closes and connects again with the new ones, the other
+keeps its session, and no `mqtt` key needs a reboot.
 
 The `mqtt` keys are the observer's (task p1.7-26, `src/observer/`): the names
 and the shapes are the observer firmware's
 ([agessaman/MeshCore, branch observer-firmware](https://github.com/agessaman/MeshCore/blob/d664d89df66bdacc1319900a2e2d152fa31b9dc9/MQTT_IMPLEMENTATION.md)),
 so its Danish guide typed on this console ends in the same two slots. What is
-published, to whom and what it costs is task 27's `docs/observer.md`; until it
-lands, a configured observer formats every received frame into the message the
-brokers take and `status` counts them, and nothing leaves the board.
+published, to whom, over which roots and what it costs in memory is
+[`observer.md`](observer.md): two TLS WebSocket connections at most, signed in
+with the node's own token, verified against the roots in `src/agent/TlsRoots.h`,
+and the first thing to give way when the MeshMaster uplink is short of heap.
 
 `radio.freq`, `radio.bw`, `radio.sf` and `radio.cr` are also what the heartbeat
 reports as its `radio` block, which is what the exit node's page on
@@ -237,7 +241,7 @@ Idle, last 12:34:56
 |---|---|
 | 1 | the first four characters of the companion key - the prefix meshmaster.dk shows this exit node by - and the clock right-aligned, or `no time` until it is set. `no identity` alone when the radio made none. The IP address is not here; `status` has it |
 | 2 | `WiFi` is the link, `Online` is *the last call to meshmaster.dk was answered and the next one is not waiting*: a heartbeat has happened, nothing has gone unanswered since, the token has not been refused, and no backoff or `Retry-After` hold is running |
-| 3 | when the server last heard from this board, `Heartbeat: none` until the first |
+| 3 | when the server last heard from this board, `Heartbeat: none` until the first. With an observer slot configured the word is cut to `HB` and the broker connections take the right edge: `HB 12:03:14  MQTT 2/2` is connected slots over configured slots (task p1.7-27) |
 | 4 | what it is doing, and when it is doing nothing, why - the table below |
 
 **Line four is the one to read when something is wrong.** Line two's *no* says

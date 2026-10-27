@@ -87,6 +87,14 @@ TEST(TlsPolicy, NothingInTheTreeSkipsCertificateVerification) {
   for (const std::string& h : hits) ADD_FAILURE() << h;
 }
 
+namespace {
+int countOf(const std::string& text, const std::string& needle) {
+  int n = 0;
+  for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + needle.size())) n++;
+  return n;
+}
+}  // namespace
+
 TEST(TlsPolicy, ThePinnedRootIsIsrgRootX1) {
   // The root the client verifies meshmaster.dk's chain against, checked by its subject line and
   // by the certificate's dates being the ones Let's Encrypt publishes for ISRG Root X1.
@@ -98,6 +106,28 @@ TEST(TlsPolicy, ThePinnedRootIsIsrgRootX1) {
   EXPECT_NE(std::string::npos, text.find("-----END CERTIFICATE-----"));
   // The SHA-256 fingerprint Let's Encrypt publishes for it, kept beside the PEM so a reader can check.
   EXPECT_NE(std::string::npos, text.find("96:BC:EC:06:26:49:76:F3:74:60:77:9A:CF:28:C5:A7:CF:E8:A3:C0:AA:E1:1A:8F:FC:EE:05:C0:BD:DF:08:C6"));
+}
+
+TEST(TlsPolicy, TheBrokersRootIsIsrgRootX2AndTheCarriedRootsAreExactlyTheTwo) {
+  // Task p1.7-27: the two observer brokers' chains (mqtt.meshview.dk, mqtt.meshmapper.net) are
+  // Let's Encrypt's ECDSA hierarchy, anchored at ISRG Root X2 and served cross-signed by X1. The
+  // header carries X2 beside X1 with its subject, its validity and the fingerprint Let's Encrypt
+  // publishes - and no third root: the two hosts are named beside the evidence, so a reader can
+  // repeat the `openssl s_client` the report quotes.
+  std::ifstream in(fs::path(PROJECT_DIR) / "src" / "agent" / "TlsRoots.h");
+  ASSERT_TRUE(in.is_open()) << "src/agent/TlsRoots.h";
+  std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  EXPECT_NE(std::string::npos, text.find("CN=ISRG Root X2"));
+  EXPECT_NE(std::string::npos, text.find("valid until 2040-09-17"));
+  EXPECT_NE(std::string::npos, text.find("69:72:9B:8E:15:A8:6E:FC:17:7A:57:AF:B7:17:1D:FC:64:AD:D2:8C:2F:CA:8C:F1:50:7E:34:45:3C:CB:14:70"));
+  EXPECT_NE(std::string::npos, text.find("mqtt.meshview.dk:443"));
+  EXPECT_NE(std::string::npos, text.find("mqtt.meshmapper.net:443"));
+  EXPECT_EQ(2, countOf(text, "-----BEGIN CERTIFICATE-----")) << "exactly two roots are carried";
+  EXPECT_EQ(2, countOf(text, "-----END CERTIFICATE-----"));
+  EXPECT_NE(std::string::npos, text.find("kCarriedRootsPem[] = MM_ISRG_ROOT_X1_PEM MM_ISRG_ROOT_X2_PEM"));
+  // The PEM bodies are the two roots and nothing else: X1's is RSA (MIIFaz...), X2's ECDSA (MIICGz...).
+  EXPECT_NE(std::string::npos, text.find("MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw"));
+  EXPECT_NE(std::string::npos, text.find("MIICGzCCAaGgAwIBAgIQQdKd0XLq7qeAwSxs6S+HUjAKBggqhkjOPQQDAzBPMQsw"));
 }
 
 // ---- the rails list ---------------------------------------------------------------------------
@@ -163,7 +193,8 @@ TEST(Rails, EveryPathTheRailsListNamesIsInTheTree) {
 TEST(Rails, TheTestsTheRailsLeanOnAreAllThere) {
   const fs::path root(PROJECT_DIR);
   const char* const suites[] = {"test_tls_policy",        "test_console_parser", "test_credentials",
-                                "test_contract_fixtures", "test_buffers",        "test_server_policy"};
+                                "test_contract_fixtures", "test_buffers",        "test_server_policy",
+                                "test_observer",          "test_connection"};
   for (const char* s : suites) {
     EXPECT_TRUE(fs::is_directory(root / "test" / s)) << "test/" << s << " is gone";
   }

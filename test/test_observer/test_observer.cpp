@@ -661,8 +661,11 @@ TEST(Settings, ASlotThatCannotConnectSaysWhatIsMissing) {
 // ---- the rails ------------------------------------------------------------------------------
 
 TEST(Rails, NothingInTheObserverOpensASocketOrKnowsTheNetwork) {
-  // The connection is task 27's. Until then no file of src/observer/ may name a client, a
-  // socket or the WiFi - as a grep, so that a line added by mistake fails here before it builds.
+  // The connection's state machine is here (Connection.h, task 27) and its network client is not:
+  // the board's esp-mqtt adapter is src/net/MqttClient.cpp, behind an interface, so no file of
+  // src/observer/ may name a client, a socket or the WiFi - as a grep, so that a line added by
+  // mistake fails here before it builds, and so that test/test_connection's fake is the only
+  // other thing that has ever implemented the interface.
   const char* const forbidden[] = {"WiFiClient", "WiFi.h", "mqtt_client", "esp_mqtt", "socket(", "lwip/", "esp_tls", "HTTPClient",
                                    "PubSubClient", "Psychic", "connect("};
   const fs::path dir = fs::path(PROJECT_DIR) / "src" / "observer";
@@ -680,12 +683,15 @@ TEST(Rails, NothingInTheObserverOpensASocketOrKnowsTheNetwork) {
       }
     }
   }
-  EXPECT_GE(files, 12);
+  EXPECT_GE(files, 16);
 }
 
 TEST(Rails, NothingInTheObserverWritesAPayloadToTheLog) {
   // The raw bytes and the payload are formatted into a message buffer and nowhere else: no
   // LOG_ call and no Serial in src/observer/ at all, so there is no line that could carry them.
+  // The connections (Connection.cpp, task 27) report through one callback the board points at
+  // the log, and test/test_connection reads the ring back after a run to hold that those lines
+  // are counts and reasons; Observer.cpp's logf("%s", line) is that callback's board end.
   const fs::path dir = fs::path(PROJECT_DIR) / "src" / "observer";
   for (const auto& item : fs::directory_iterator(dir)) {
     if (!item.is_regular_file()) continue;

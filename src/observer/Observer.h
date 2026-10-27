@@ -1,15 +1,19 @@
 // The observer on the board: the dialect of src/observer/ (Dialect.h, Token.h, Presets.h,
 // Topics.h, Config.h - all host-portable) wired to this board's settings, identity, clock and
-// radio. It is the tap AgentMesh hands every received frame to (AgentMesh.h, RxTap): when a slot
-// is configured, the frame becomes a packet message in this object's buffer, and the status
-// message is made on demand. **Nothing here opens a socket**: putting the messages on the air -
-// the two TLS WebSocket connections, the sign-in, the queue, the retries - is task 27's, and it
-// reads the messages from here. Until then `status` says how many were made.
+// radio, and since task p1.7-27 the two broker connections (Connection.h) that put it on the air.
+// It is the tap AgentMesh hands every received frame to (AgentMesh.h, RxTap): when a slot is
+// configured, the frame becomes a packet message in this object's buffer and is handed to every
+// slot's queue; the status message is made on demand for the connections and for the will.
+//
+// The clients are the board's (src/net/MqttClient.h, esp-mqtt), handed in by main.cpp so that
+// nothing under src/observer/ names the network: test/test_observer greps for it, and
+// test/test_connection drives the same state machine with a fake.
 //
 // What it never does: decode a payload, write a packet's bytes to the log or the display, or
 // let the private key out of the identity - the token is signed through Signer, whose board
 // implementation is mesh::LocalIdentity::sign and nothing else (README.md, the rails; the pile's
-// "Privacy, in one place").
+// "Privacy, in one place"). The log lines the connections produce - connects, refusals, drops,
+// as counts and reasons - go through one callback below.
 //
 // Board-only: Preferences through SettingsStore, MeshCore's LocalIdentity and the radio's clock.
 
@@ -20,6 +24,7 @@
 
 #include "mesh/AgentMesh.h"
 #include "observer/Config.h"
+#include "observer/Connection.h"
 #include "observer/Dialect.h"
 #include "observer/Token.h"
 #include "settings/Store.h"
@@ -41,31 +46,47 @@ class IdentitySigner : public observer::Signer {
   const mesh::LocalIdentity* id_ = nullptr;
 };
 
-class Observer : public RxTap {
+class Observer : public RxTap, public observer::StatusSource {
  public:
   // `publicKeyHex` is the identity as hex (any case: stored uppercase, which is what {device},
-  // origin_id and the token want); `model` is the board's name for the status message.
+  // origin_id and the token want); `model` is the board's name for the status message;
+  // `clients` are the two slots' MQTT clients and `env` the board's clocks, heap and roots.
   void begin(SettingsStore& settings, const mesh::LocalIdentity* identity, const char* publicKeyHex, const char* model,
-             uint32_t (*clock)());
-  // Re-read every mqtt.* and mqttN.* key: after a `set` of one, and after `erase confirm`.
+             uint32_t (*clock)(), observer::Client* const clients[observer::kSlots], const observer::Environment& env);
+  // Re-read every mqtt.* and mqttN.* key: after a `set` of one, and after `erase confirm`. A
+  // slot whose connection would change starts over; the others keep their sessions.
   void reconfigure();
+
+  // Every pass of the main loop: the connections' events, timers and queues.
+  void loop();
+  // WiFi's state, every pass (WifiLink::connected()).
+  void setLinkUp(bool up);
+  // The MeshMaster uplink's call failed for want of memory (AgentClient::memoryFailures moved):
+  // the highest slot gives way for ten minutes.
+  void onUplinkMemoryFailure();
 
   bool enabled() const { return enabled_; }
   const observer::ObserverSettings& settings() const { return view_; }
   observer::Signer& signer() { return signer_; }
+  const observer::Connections& connections() const { return link_; }
 
   // RxTap: a received frame, after MeshCore accepted it. Formats it when enabled; counts always.
   void onRxFrame(const RxFrame& frame) override;
 
-  // The status message as of now, into `out`; its length or 0.
-  size_t formatStatus(const char* status, char* out, size_t cap);
+  // StatusSource: the status message as of now, into `out`; its length or 0.
+  size_t formatStatus(const char* status, char* out, size_t cap) override;
 
-  // The last packet message made ("" until one was), for the publisher of task 27.
+  // The last packet message made ("" until one was).
   const char* lastPacketMessage() const { return packet_; }
   size_t lastPacketLength() const { return packetLen_; }
 
   // One line for `status`: the slots, the code, the origin, and the counts.
   void describe(char* out, size_t cap) const;
+  // One line per slot for `mqtt.status` (Connections::describe).
+  void describeSlot(int slot, char* out, size_t cap) const { link_.describe(slot, out, cap); }
+
+  int slotsConfigured() const { return link_.configuredSlots(); }
+  int slotsConnected() const { return link_.connectedSlots(); }
 
   uint32_t packetsFormatted() const { return formatted_; }
   uint32_t packetsNotFitting() const { return notFitting_; }
@@ -73,6 +94,7 @@ class Observer : public RxTap {
  private:
   void readSettings();
   const char* origin() const;
+  static void reportLine(void* ctx, LogLevel level, const char* line);
 
   SettingsStore* settings_ = nullptr;
   IdentitySigner signer_;
@@ -80,6 +102,7 @@ class Observer : public RxTap {
   const char* model_ = "";
   char publicKeyHex_[observer::kPublicKeyHexLen + 1] = {0};
   char defaultOrigin_[16] = {0};  // "MeshMaster-" + the first four of the key
+  char clientVersion_[96] = {0};  // "meshcore/<firmware>", the token's `client` claim and the status message's client_version
 
   // The settings, as the store holds them (sizes: Keys.cpp's maxLen + 1).
   char iata_[4] = {0};
@@ -97,6 +120,8 @@ class Observer : public RxTap {
   observer::ObserverSettings view_;
   bool enabled_ = false;
   char why_[64] = {0};
+
+  observer::Connections link_;
 
   char packet_[observer::kPacketMessageCap] = {0};
   size_t packetLen_ = 0;

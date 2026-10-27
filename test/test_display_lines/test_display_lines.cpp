@@ -128,6 +128,31 @@ TEST(LineThree, TheLastHeartbeatOrNoneBeforeTheFirst) {
   EXPECT_EQ("Heartbeat: none", Frame(s).line[2]);
 }
 
+TEST(LineThree, WithAnObserverSlotConfiguredTheBrokerCountTakesTheRightEdge) {
+  // Task p1.7-27: "HB <clock>" at the left, "MQTT <up>/<configured>" against the right edge,
+  // exactly the font's 21 characters; with no slot configured the line is as it was.
+  DisplayState s = working();
+  s.lastHeartbeatAtEpoch = at("2026-10-04T12:03:14Z");
+  s.observerSlotsConfigured = 2;
+  s.observerSlotsConnected = 2;
+  EXPECT_EQ("HB 12:03:14  MQTT 2/2", Frame(s).line[2]);
+  EXPECT_EQ(static_cast<size_t>(kDisplayWidth), Frame(s).line[2].size());
+
+  s.observerSlotsConnected = 1;
+  EXPECT_EQ("HB 12:03:14  MQTT 1/2", Frame(s).line[2]);
+  s.observerSlotsConnected = 0;
+  s.observerSlotsConfigured = 1;
+  EXPECT_EQ("HB 12:03:14  MQTT 0/1", Frame(s).line[2]);
+
+  s.everHeartbeated = false;
+  EXPECT_EQ("HB none      MQTT 0/1", Frame(s).line[2]);
+
+  s.observerSlotsConfigured = 0;
+  EXPECT_EQ("Heartbeat: none", Frame(s).line[2]) << "the observer off: nothing about MQTT on the panel";
+  s.everHeartbeated = true;
+  EXPECT_EQ("Heartbeat: 12:03:14", Frame(s).line[2]);
+}
+
 // ---- line four: what it is doing ------------------------------------------------------------
 
 TEST(LineFour, TheOpenJobsIdAndType) {
@@ -287,6 +312,13 @@ TEST(TheFrame, NoLineIsEverWiderThanTheFont) {
     v.serverConfigured = (mask & 32) != 0;
     v.publicKeyHex = (mask & 1) != 0 ? kKey : nullptr;
     checkFrame(v);
+    for (int configured = 0; configured <= 2; configured++) {
+      for (int up = 0; up <= configured; up++) {
+        v.observerSlotsConfigured = configured;
+        v.observerSlotsConnected = up;
+        checkFrame(v);
+      }
+    }
   }
 }
 

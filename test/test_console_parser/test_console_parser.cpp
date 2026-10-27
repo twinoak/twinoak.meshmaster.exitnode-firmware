@@ -103,6 +103,12 @@ TEST(Keys, TimezoneAndBridgeSourceAreAnsweredNotStored) {
                parseLine("set bridge.source rx").command.note);
   EXPECT_EQ(Verb::Presets, parseLine("get mqtt.presets").command.verb);
   EXPECT_FALSE(parseLine("set mqtt.presets x").ok) << "the list is read, never set";
+  // Task p1.7-27: the two broker slots' state, as one line each.
+  EXPECT_TRUE(parseLine("get mqtt.status").ok);
+  EXPECT_EQ(Verb::MqttStatus, parseLine("get mqtt.status").command.verb);
+  EXPECT_EQ(nullptr, parseLine("get mqtt.status").command.key);
+  EXPECT_FALSE(parseLine("set mqtt.status on").ok) << "read, never set";
+  EXPECT_FALSE(parseLine("get mqtt.status 1").ok) << "get takes one word";
 }
 
 TEST(Keys, EveryKeyAcceptsAValidValueAndSetIsAcceptedForIt) {

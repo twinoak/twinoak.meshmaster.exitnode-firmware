@@ -25,6 +25,28 @@ namespace {
 constexpr int kMbedtlsCertVerifyFailed = -0x2700;  // MBEDTLS_ERR_X509_CERT_VERIFY_FAILED
 constexpr size_t kBodyCap = 2048;                  // the config and heartbeat answers are a few hundred bytes
 
+// One of mbedtls' two TLS content buffers as one allocation (CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN
+// 16384 in this core's sdkconfig, plus its header room): what the largest free block has to hold
+// for a handshake to be possible at all. The same figure as src/observer/Connection.h's
+// kTlsBufferBytes, written here because this file includes nothing of the observer.
+constexpr uint32_t kTlsBufferBytes = 16 * 1024 + 1024;
+
+// A call that failed for want of memory, as far as this side can tell: mbedtls' own allocation
+// failures (ssl, x509, pk, ecp, mpi), or a heap whose largest block cannot hold a content buffer
+// once the failed call's client is gone. src/observer/Connection.h acts on the count.
+bool failedForMemory(int tlsError) {
+  switch (tlsError) {
+    case -0x7F00:  // MBEDTLS_ERR_SSL_ALLOC_FAILED
+    case -0x2880:  // MBEDTLS_ERR_X509_ALLOC_FAILED
+    case -0x3F80:  // MBEDTLS_ERR_PK_ALLOC_FAILED
+    case -0x4D80:  // MBEDTLS_ERR_ECP_ALLOC_FAILED
+    case -0x0010:  // MBEDTLS_ERR_MPI_ALLOC_FAILED
+      return true;
+    default:
+      return ESP.getMaxAllocHeap() < kTlsBufferBytes;
+  }
+}
+
 // The two answer headers this firmware acts on. Retry-After is the wait a 429 names (API §1);
 // X-RateLimit-Remaining is what is left of the 120 a minute, and is only ever logged.
 // Not `const char* const[]`: HTTPClient::collectHeaders takes `const char*[]`.
@@ -218,6 +240,11 @@ bool AgentClient::call(const char* method, const char* endpoint, const char* req
   out.httpStatus = code > 0 ? code : 0;
   out.reachable = code > 0;
   out.ok = code == 200;
+  if (code <= 0 && failedForMemory(tlsError)) {
+    memoryFailures_++;
+    LOG_W("server: the call failed for want of memory (tls %d, largest free block %lu); %lu such failure(s)", tlsError,
+          static_cast<unsigned long>(ESP.getMaxAllocHeap()), static_cast<unsigned long>(memoryFailures_));
+  }
   lastCall_ = out;
   return out.reachable;
 }

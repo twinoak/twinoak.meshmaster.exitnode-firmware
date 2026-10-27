@@ -15,7 +15,8 @@
 //               the WiFi end of the uplink seam, and all that is left here of agent/
 //   settings/   the key table (host-portable) and the NVS store
 //   console/    the line parser (host-portable) and the console that acts on it
-//   net/        WiFi with backoff, and the clock (SNTP, the server as fallback)
+//   net/        WiFi with backoff, the clock (SNTP, the server as fallback), and since task
+//               p1.7-27 the MQTT client the observer's broker connections run on (esp-mqtt)
 //   platform/   the Arduino-on-ESP32 end of the platform seam: millis, delay, random, the heap,
 //               the reboot for health
 //   mesh/       the mesh in companion role: hears adverts, forwards nothing, and speaks a job
@@ -32,6 +33,7 @@
 
 #include <Arduino.h>
 #include <SPIFFS.h>
+#include <esp_system.h>
 
 #include <cinttypes>
 #include <cstdio>
@@ -48,10 +50,12 @@
 #include "Health.h"
 #include "SerialLog.h"
 #include "agent/AgentClient.h"
+#include "agent/TlsRoots.h"
 #include "console/Console.h"
 #include "console/StreamOut.h"
 #include "mesh/AgentMesh.h"
 #include "net/Clock.h"
+#include "net/MqttClient.h"
 #include "net/WifiLink.h"
 #include "observer/Observer.h"
 #include "platform/Esp32Platform.h"
@@ -76,7 +80,10 @@ mm::AgentLoop agent;
 mm::HeartbeatIdentity identity;  // what the heartbeat says about this board; refreshed on `set radio.*`
 mm::Console console;
 mm::Oled oled;
-mm::Observer observer;  // the observer dialect over this board's frames (task p1.7-26); nothing sent until 27
+mm::Observer observer;  // the observer dialect over this board's frames (task p1.7-26) and its two broker connections (27)
+mm::MqttClient mqttSlot1;  // the clients the observer's two slots run on: esp-mqtt, one task each, verified TLS
+mm::MqttClient mqttSlot2;
+uint32_t uplinkMemoryFailuresSeen = 0;  // AgentClient::memoryFailures() as last handed to the observer
 
 ArduinoMillis ms_clock;
 StdRNG fast_rng;
@@ -94,6 +101,12 @@ bool display_ok = false;
 char public_key_hex[2 * PUB_KEY_SIZE + 1] = {0};
 
 uint32_t clockForLog() { return agentClock.now(); }
+
+// What the observer's connections read of this board (observer/Connection.h, Environment).
+uint32_t millisNow() { return millis(); }
+uint32_t heapFree() { return ESP.getFreeHeap(); }
+uint32_t heapLargestBlock() { return ESP.getMaxAllocHeap(); }
+uint32_t randomBits() { return esp_random(); }
 
 // ---- the radio ------------------------------------------------------------------------------
 
@@ -226,6 +239,22 @@ void printStatus(Stream& out) {
 
 void printWifi(Stream& out) { wifi.scan(out); }
 
+// `get mqtt.status`: one line per broker slot - preset or host, state, since, published,
+// dropped, last error - and the memory rule the slots live under.
+void printMqttStatus(Stream& out) {
+  char line[320];
+  observer.describe(line, sizeof line);
+  out.printf("observer  %s\r\n", line);
+  for (int s = 0; s < mm::observer::kSlots; s++) {
+    observer.describeSlot(s, line, sizeof line);
+    out.printf("%s\r\n", line);
+  }
+  out.printf("memory    a slot opens while free heap >= %lu and the largest block >= %lu (now %lu and %lu); the uplink's %lu memory failure(s) so far\r\n",
+             static_cast<unsigned long>(mm::observer::kHeapReserveFree), static_cast<unsigned long>(mm::observer::kHeapReserveLargest),
+             static_cast<unsigned long>(ESP.getFreeHeap()), static_cast<unsigned long>(ESP.getMaxAllocHeap()),
+             static_cast<unsigned long>(server.memoryFailures()));
+}
+
 // `mesh`: what the radio has heard. The names are printed here and in no log line - this is the
 // one place a person reads them, and they come from strangers, so they are the bounded, valid
 // UTF-8 the ring kept (agent/Observations.h).
@@ -356,6 +385,10 @@ void pumpDuringAJob() {
   mm::healthTick();  // a thirteen-minute region load must not look like a wedged board
   console.loop();
   oled.loop();
+  // And the observer's queues and events (task p1.7-27): the frames heard during a long job go
+  // to the brokers as they are heard, rather than piling up in a two-kilobyte queue.
+  observer.setLinkUp(wifi.connected());
+  observer.loop();
   // And the heartbeat that fell due while the job was waiting for the budget (task 06): a claim
   // is run to the end before the loop gets its turn back, and a board that is working hard is
   // not a board the server should be marking *quiet*.
@@ -429,6 +462,8 @@ void fillOled(char lines[mm::Oled::kLines][mm::Oled::kCols]) {
   }
   state.tokenRefused = agent.halted();
   state.serverConfigured = server.configured();
+  state.observerSlotsConfigured = observer.slotsConfigured();
+  state.observerSlotsConnected = observer.slotsConnected();
   // Any wait before the next call, not only a doubling one: a 503 that named Retry-After is by
   // design not a consecutive failure (task p1.2-10), and the panel still has to say *retry*
   // through a deploy (task p1.3-12).
@@ -493,10 +528,20 @@ void setup() {
   agent.begin(server, platform, the_mesh, jobs, identity);
   agent.setIdentity(public_key_hex[0] != 0 ? public_key_hex : nullptr);
   // The observer: off until a slot is configured, and then the dialect over every frame the
-  // radio hears (src/observer/Observer.h). The tap is set only with an identity, because a
-  // message without an origin_id is nothing a broker could file.
+  // radio hears (src/observer/Observer.h) and two broker connections on esp-mqtt
+  // (src/net/MqttClient.h), signed in with this identity's own key and verified against the
+  // roots in src/agent/TlsRoots.h. The tap is set only with an identity, because a message
+  // without an origin_id is nothing a broker could file.
+  mm::observer::Client* const mqttClients[mm::observer::kSlots] = {&mqttSlot1, &mqttSlot2};
+  mm::observer::Environment observerEnv;
+  observerEnv.millis = &millisNow;
+  observerEnv.epoch = &clockForLog;
+  observerEnv.freeHeap = &heapFree;
+  observerEnv.largestBlock = &heapLargestBlock;
+  observerEnv.random = &randomBits;
+  observerEnv.caPem = mm::kCarriedRootsPem;
   observer.begin(settings, identity_ok ? &the_mesh.self_id : nullptr, identity_ok ? public_key_hex : nullptr,
-                 board.getManufacturerName(), &clockForLog);
+                 board.getManufacturerName(), &clockForLog, mqttClients, observerEnv);
   if (identity_ok) the_mesh.setRxTap(&observer);
   if (!server.configured()) LOG_I("server: not configured; set meshmaster.token (meshmaster.url is https://meshmaster.dk unless set)");
   if (display_ok) {
@@ -506,7 +551,8 @@ void setup() {
 
   mm::ConsoleHost host = {&printStatus,  &printMesh,    &printServer, &printJobs,
                           &printSessions, &printErrors,  &printReboots, &printDump,
-                          &printWifi,     &doReboot,     &onSettingChanged, &onErased};
+                          &printWifi,     &doReboot,     &onSettingChanged, &onErased,
+                          &printMqttStatus};
   console.begin(Serial, settings, host);
   board.onBootComplete();
 }
@@ -526,6 +572,16 @@ void loop() {
   // The config call, the heartbeat every pollIntervalS and the observation batches between them:
   // one blocking call at a time, and nothing at all after a 401 (agent/AgentLoop.h).
   agent.loop();
+
+  // The observer's broker connections: events, timers and queues, never a wait (the clients run
+  // on tasks of their own). The uplink comes first: a call of its that failed for want of memory
+  // takes the highest slot down for ten minutes (src/observer/Connection.h).
+  observer.setLinkUp(wifi.connected());
+  if (server.memoryFailures() != uplinkMemoryFailuresSeen) {
+    uplinkMemoryFailuresSeen = server.memoryFailures();
+    observer.onUplinkMemoryFailure();
+  }
+  observer.loop();
 
   console.loop();
   oled.loop();

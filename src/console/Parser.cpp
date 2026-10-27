@@ -116,6 +116,7 @@ ParseResult parseLine(const char* line) {
       if (isSpace(*p)) return refuse("get takes one key: get <key>");
     }
     if (std::strcmp(rest, "mqtt.presets") == 0) return accept(Verb::Presets);
+    if (std::strcmp(rest, "mqtt.status") == 0) return accept(Verb::MqttStatus);
     const KeyDef* key = findKey(rest);
     if (key == nullptr) {
       if (const char* note = explainKey(rest)) {

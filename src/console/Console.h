@@ -5,8 +5,8 @@
 // wifi.pwd), meshmaster.token, mqtt1.password, mqtt2.password - which echoes as asterisks; a
 // reply never contains a secret (`get` says set/unset for one, `set` answers "ok <key>");
 // `status` prints the public key, the radio, the firmware, the link, the time, the server's last
-// answer, the observer and the heap. The rest of what the port carries is the log (Log.h), which
-// holds the same line.
+// answer, the observer and the heap; `get mqtt.status` the observer's two broker slots. The rest
+// of what the port carries is the log (Log.h), which holds the same line.
 
 #pragma once
 
@@ -33,6 +33,7 @@ struct ConsoleHost {
   void (*reboot)();
   void (*settingChanged)(const KeyDef& key);  // after a successful `set`, so it takes effect live
   void (*erased)();                            // after `erase confirm`
+  void (*mqttStatus)(Stream& out);             // `get mqtt.status`: one line per broker slot (task p1.7-27)
 };
 
 class Console {

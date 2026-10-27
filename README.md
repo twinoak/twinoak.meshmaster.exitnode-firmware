@@ -51,8 +51,10 @@ says so, with nothing sleeping and no board in the room:
 how a consumer of the library reuses them.
 
 The tree is in two halves. `src/` is **this board**: the serial console and its
-settings, WiFi and the clock, the TLS client and the root it verifies against,
-the OLED, the mesh in companion role, the watchdog, and where a log line goes —
+settings, WiFi and the clock, the TLS client and the roots it verifies against,
+the OLED, the mesh in companion role, the watchdog, where a log line goes, and
+since pile 1.7 the observer — the dialect of the community's MQTT maps and the
+two broker connections that carry it ([`docs/observer.md`](docs/observer.md)) —
 MeshCore's core, the Heltec variant and its display driver are compiled from the
 pinned package beside it, and no example of upstream's is built.
 
@@ -314,7 +316,9 @@ meshmaster.dk shows an exit node by — and the clock, or `no time` until it is
 set; `no identity` alone when the radio made none. Line two is the two
 questions worth asking at a glance: *WiFi* is the link, *Online* is whether the
 last call to meshmaster.dk was answered. Line three is when the server last
-heard from this board, `Heartbeat: none` until the first. Line four is what it
+heard from this board, `Heartbeat: none` until the first — and, once an observer
+slot is configured, `HB 12:03:14  MQTT 2/2`: the broker connections up, over the
+slots configured ([`docs/observer.md`](docs/observer.md)). Line four is what it
 is doing — `Job 1234 acl.set` while a job is on the air, `Idle, last 12:34:56`
 otherwise, `Idle, no jobs yet` before any — and when it is doing nothing
 because something is wrong, which of the four it is: `token revoked/wrong`
@@ -442,11 +446,12 @@ reading.
 
 ## Rails that hold in every task
 
-- **TLS is verified.** The server's certificate chain is checked against a
-  bundled root (ISRG Root X1 for meshmaster.dk's Let's Encrypt chain, and the
-  ESP32 core's certificate bundle beside it); the client is never told to
-  accept an unverified chain, and a native test greps the tree for the calls
-  and flags that would tell it so (`test/test_tls_policy`).
+- **TLS is verified.** Every certificate chain is checked against a bundled
+  root (ISRG Root X1 for meshmaster.dk's Let's Encrypt chain, ISRG Root X1 and
+  X2 for the observer's brokers, and the ESP32 core's certificate bundle beside
+  them); no client is ever told to accept an unverified chain, and a native
+  test greps the tree for the calls and flags that would tell it so
+  (`test/test_tls_policy`).
 - **Secrets stay where they are.** The agent token lives in NVS and is printed
   by no command (`get meshmaster.token` says *set*); a repeater's password lives
   in RAM for the job and is overwritten after (a test reads the bytes back, and
