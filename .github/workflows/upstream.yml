@@ -11,11 +11,14 @@
 # The comparison itself is tools/upstream-check.ps1, so it can be run by hand and this workflow is
 # only the git and gh around it.
 #
-# WHERE THIS RUNS. At home, on this repository's own runners ([self-hosted, unraid]) like every job
-# of ci.yml, because it *checks* rather than ships; ci.yml's guard holds that (task p1.8-29). A
-# runner there is shared and keeps its disk between jobs, so the two files this job writes outside
-# its workspace - the blobless clone of upstream and the pull request's body - go to $RUNNER_TEMP,
-# which the runner empties at the start of every job, and not to /tmp, which it does not.
+# WHERE THIS RUNS. On GitHub's runners (`ubuntu-latest`), like every job of every workflow here:
+# this repository is public, so they are free, and a self-hosted runner is the one thing a public
+# repository must not have - a fork's pull request can change a workflow, and it would run on the
+# host. ci.yml's guard, tools/check-runners.py, holds that, and README's *Where CI runs* is the
+# page (task p1.8-29). The two files this job writes outside its workspace - the blobless clone of
+# upstream and the pull request's body - go to $RUNNER_TEMP and not to a fixed path in /tmp, which
+# is right on any runner: $RUNNER_TEMP is per-job and emptied when the job starts, so a second run
+# cannot trip over what a first one left, wherever the job happens to be running.
 #
 # REHEARSAL. With the pin_tag input this workflow proves itself without waiting for upstream: it
 # pushes a throwaway base branch whose pin is that older tag, then does the real thing on top of
@@ -45,7 +48,7 @@ concurrency:
 jobs:
   bump:
     name: is there a newer MeshCore?
-    runs-on: [self-hosted, unraid]
+    runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write

@@ -46,9 +46,9 @@ upstream's own note says 10 at the chip is 22 dBm at the socket. The range
 On Windows `pio test -e native` needs a C++ compiler the machine usually has
 only inside a container;
 [`tasks/RUNBOOK.md §2`](tasks/RUNBOOK.md) has the one-line `docker run` for it.
-Those same two commands are what CI runs on every pull request, on this
-repository's own runners — *Where CI runs*, below, says which workflow runs
-where and why the release is the one that does not.
+Those same two commands are what CI runs on every pull request, on GitHub's
+runners — *Where CI runs*, below, says where every workflow runs, why it is not
+at home, and what it would take to move it there.
 
 Those tests are not units alone. Since pile 1.5 they run **the whole agent** —
 the loop, the runner, every one of the thirteen job types, the login sequence,
@@ -173,8 +173,7 @@ A release publishes, per board, a **merged** image (bootloader + partition table
 with `SHA256SUMS` and the one `esptool` line to use. A tag `vX.Y.Z` on a commit
 CI has passed is what makes one; *Run workflow* on `release.yml` rehearses it
 and publishes nothing. Both are built on a **GitHub-hosted** runner, a machine
-that is new every time, and not on the self-hosted runners the rest of CI uses
-(*Where CI runs*, below).
+that is new every time, like every other job here (*Where CI runs*, below).
 
 **Which of the two.** The merged image is for a board **out of the box, or one
 coming from other firmware** — the repeater image, a companion build — because
@@ -450,57 +449,75 @@ is the bug this rail exists to catch.
 
 ## Where CI runs
 
-Everything that **checks** runs at home; everything that **ships** stays away.
+**On GitHub's runners, every job of every workflow.** Not at home, and that is a
+decision rather than an omission.
 
 | Workflow | What it does | `runs-on` |
 |---|---|---|
-| [`ci.yml`](.github/workflows/ci.yml) | every pull request and every push to `master`: the board matrix, the native tests, the library, the fixtures | `[self-hosted, unraid]` |
-| [`upstream.yml`](.github/workflows/upstream.yml) | the weekly MeshCore check | `[self-hosted, unraid]` |
+| [`ci.yml`](.github/workflows/ci.yml) | every pull request and every push to `master`: the board matrix, the native tests, the library, the fixtures | `ubuntu-latest` |
+| [`upstream.yml`](.github/workflows/upstream.yml) | the weekly MeshCore check | `ubuntu-latest` |
 | [`release.yml`](.github/workflows/release.yml) | a tag `vX.Y.Z`: the images people flash, and the Release | `ubuntu-latest` |
 
-The first two are at home because GitHub-hosted minutes got out of hand: a task
-session opens a pull request, every pull request builds two boards and runs the
-host suite, and that happens several times a day. The runners are Thomas's own,
-self-hosted on Unraid at the organisation level (`myoung34/github-runner`, the
-containers `unraid-1`…`unraid-5`, labels `self-hosted` and `unraid`);
-meshmaster.dk moved its CI to them on 29 October 2026 and this repository
-followed in task p1.8-29.
+Twinoak's other repositories — meshmaster.dk, the repeater firmware — moved
+their CI home in October 2026, to self-hosted runners on Thomas's Unraid box
+(`myoung34/github-runner`, the containers `unraid-1`…`unraid-5`, labels
+`self-hosted` and `unraid`), because GitHub-hosted minutes got out of hand.
+**This repository is public, and that changes both halves of the sum.**
 
-`release.yml` did not, deliberately. **A self-hosted runner keeps its home
-between jobs** — `~/.platformio` and every toolchain in it — and is shared with
-every branch a session pushes, so an image built there is only as clean as the
-last branch that ran on that container. What people flash is built on a machine
-that is new every time. A tag is a few times a month, so the minutes are few.
+**Running here costs nothing.** [Actions on standard GitHub-hosted runners are
+free in a public repository](https://docs.github.com/en/actions/concepts/billing-and-usage),
+so this repository's CI has never spent a credit of the organisation's. The
+minutes that got out of hand were the private repositories', which is where
+moving home paid. There is nothing here to save.
 
-**The caches are skipped at home.** `ci.yml`'s `actions/cache` steps for
-`~/.platformio` and `~/.cache/pip` carry
-`if: runner.environment == 'github-hosted'`: the directory is already on the
-runner's disk, and restoring a tarball of it over the WAN every job would be
-slower than the thing it is meant to make fast. `release.yml` keeps its cache
-with no such condition, because it runs where nothing is on disk to begin with.
-What is *not* skipped anywhere is `actions/setup-python` and the pinned
-`pip install platformio==<version>`: the PlatformIO Core a build resolves its
-toolchain with is part of the build, at home as much as away.
+**And a public repository is the one place a self-hosted runner must not be.**
+Anyone may fork this repository and open a pull request, and a pull request can
+change a workflow file; on a self-hosted runner that pull request's code would
+run on the Unraid host, with its docker socket, its LAN and its Tailscale.
+GitHub's own guidance is that
+[self-hosted runners "should almost never be used for public repositories"](https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#hardening-for-self-hosted-runners).
+A runner group reaches a public repository only when its *Allow public
+repositories* is ticked, and in this organisation it is not — which is what
+stops it today, from outside the repository. The guard below is what stops it
+from inside.
+
+**If this repository is ever made private**, the sum changes back and the move
+is already written: commit
+[`dc0861b`](https://github.com/twinoak/twinoak.meshmaster.exitnode-firmware/commit/dc0861b)
+(*CI runs at home, the release does not*) puts `ci.yml` and `upstream.yml` on
+`[self-hosted, unraid]`, leaves `release.yml` away from home because a
+self-hosted runner keeps its toolchains between jobs, skips the caches at home
+with `if: runner.environment == 'github-hosted'`, and carries the guard the
+other way round. It is not a clean `git revert` — the commits after it on the
+same branch edit the same lines — but it is the whole of the move in one diff,
+with a commit message explaining each half. What it needs beyond itself is `g++`
+and `cmake` on the runner image, which nothing in a job installs (below).
 
 **Neither half may move by accident.** The first real step of `ci.yml`'s native
 job is [`tools/check-runners.py`](tools/check-runners.py), which reads every job
 of every file in `.github/workflows/` and fails — naming the file, the line and
-the job — when one that checks is not at home, when a job of `release.yml` is,
-when a job has no `runs-on` at all, or when it is an expression nobody can read
-at a glance. The rule and the reason for it are at the top of that one file, and
-`--self-test` runs it against seven planted workflows it must refuse.
+the job — when one runs on a `self-hosted` label (whatever other label is beside
+it), when one names a runner by a label that is not GitHub's, when a job has no
+`runs-on` at all, or when its `runs-on` is an expression that could evaluate to
+anything. The rule and the reason for it are at the top of that one file, and
+`--self-test` runs it against ten planted workflows: nine it must refuse and one
+it must accept.
 
-**What a runner must have**, which is everything the jobs reach for that is not
-installed by a step: a working `actions/setup-python` (Python itself is
-installed by the step, into the runner's tool cache), **pwsh** (the fixture
-check and `upstream-check.ps1`), **gh** and **jq** (`release.yml`'s wait for a
-green `ci`, `upstream.yml`'s pull request), **node** (every `actions/*` step),
-**git**, **g++** and **cmake** (the native tests, the library's five host
-compiles, and the ESP-IDF component file), and `curl`. Nothing in this
-repository binds a host port or writes outside its workspace and the runner's
-home: `upstream.yml`'s blobless clone of MeshCore goes to `$RUNNER_TEMP`, which
-the runner empties at the start of every job, and `actions/checkout`'s clean —
-the default — is what takes the last branch's `.pio/` out of the workspace.
+**What a runner must have** is short, because a GitHub-hosted `ubuntu-latest`
+has all of it: `actions/setup-python` (Python itself comes from the step, into
+the tool cache), **pwsh** (the fixture check and `upstream-check.ps1`), **gh**
+and **jq** (`release.yml`'s wait for a green `ci`, `upstream.yml`'s pull
+request), **node** (every `actions/*` step), **git**, **g++** and **cmake** (the
+native tests, the library's five host compiles, and the ESP-IDF component file),
+and `curl`. The list is here for the day the move of `dc0861b` is taken back: a
+self-hosted image is where two of them, `g++` and `cmake`, are not a given.
+
+**One habit kept from the move anyway.** `upstream.yml` writes its blobless
+clone of MeshCore and its pull request body to `$RUNNER_TEMP` rather than to a
+fixed path in `/tmp`. `$RUNNER_TEMP` is per-job and emptied when the job starts,
+so a second run cannot trip over what a first one left behind — which is true on
+a hosted runner that is new every time as well, and would be the difference
+between green and red on one that is not.
 
 ## Keeping up with MeshCore
 

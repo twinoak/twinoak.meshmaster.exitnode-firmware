@@ -4,32 +4,43 @@
 #   python tools/check-runners.py --self-test        the rule against planted workflows
 #   python tools/check-runners.py --dir <dir>        a directory of workflow files
 #
-# THE RULE. Everything that **checks** runs at home; everything that **ships** stays away.
+# THE RULE. Every job of every workflow here runs on a GitHub-hosted runner. None of them runs on a
+# self-hosted one: this repository is public, and a fork's pull request would run on the host.
 #
-#   ci.yml, upstream.yml, and any workflow added later    runs-on: [self-hosted, unraid]
-#   release.yml                                           runs-on: <a GitHub-hosted label>
+#   ci.yml, release.yml, upstream.yml, and any workflow added later    runs-on: ubuntu-latest
 #
-# WHY. The runners are Thomas's, self-hosted on Unraid at the organisation level
-# (myoung34/github-runner, containers unraid-1..5, labels `self-hosted` and `unraid`), and
-# GitHub-hosted minutes got out of hand: every pull request a task session opens runs the board
-# matrix and the native tests, several times a day. meshmaster.dk moved its CI to those runners on
-# 29 October 2026 and this repository follows (task p1.8-29).
+# WHY, at more length than one sentence. **This repository is public** - meshmaster.dk and the
+# repeater firmware are private - and that one fact gives both halves of the reason:
 #
-# And release.yml does not, deliberately. A self-hosted runner **keeps its home between jobs** -
-# `~/.platformio` and every toolchain in it - and is shared with every branch a task session
-# pushes, so an image built there is only as clean as the last branch that ran on that container.
-# The images people flash are built on a machine that is new every time. release.yml runs at a tag,
-# a few times a month, so the minutes it costs are few.
+#   Running here costs nothing. Actions on standard GitHub-hosted runners are free in a public
+#   repository, so this repository's CI has never spent a credit. The minutes that got out of hand
+#   in October 2026 are the private repositories', and their CI is the one that moved home to
+#   Thomas's Unraid runners (myoung34/github-runner, containers unraid-1..5, labels `self-hosted`
+#   and `unraid`).
 #
-# A job with no `runs-on`, or one whose `runs-on` is an expression this cannot read, is a failure
-# too: the rule is only worth having if it cannot be stepped around by accident.
+#   A self-hosted runner on a public repository runs a stranger's code. Anyone may fork this
+#   repository and open a pull request, and a pull request can change a workflow file; on a
+#   self-hosted runner that would execute on the Unraid host, with its docker socket, its LAN and
+#   its Tailscale. GitHub's own guidance: self-hosted runners "should almost never be used for
+#   public repositories". The runner group's *Allow public repositories* is not ticked, which is
+#   what stops it today; this guard is what stops it being worked around from inside the repository.
+#
+# So there is no `release.yml` exception and no file that is special: one rule, every file. If this
+# repository is ever made private, the move home is commit `dc0861b` (*CI runs at home, the release
+# does not*) with its own guard, ready to take back - README's *Where CI runs* says so too.
+#
+# A job with no `runs-on`, one whose `runs-on` is an expression this cannot read, and a label that
+# is neither GitHub's nor an admitted `self-hosted` (a bare `unraid`, or a misspelt
+# `ubunut-latest`) are failures too: the rule is only worth having if it cannot be stepped around
+# by accident.
 #
 # Python 3 and the standard library, because this runs as an early step of ci.yml's native job -
-# before PlatformIO is installed and before anything is built - and a self-hosted runner has no
-# PyYAML. The reader below understands the slice of YAML these workflows are written in: a `jobs:`
-# mapping at column 0, one job per key two spaces in, and that job's `runs-on` two spaces further.
-# It is block-scalar aware (a `run: |` body is skipped whole), so a heredoc cannot be misread as a
-# job, and it fails loudly rather than quietly when a file is not in that shape.
+# before PlatformIO is installed and before anything is built - and so that it keeps working
+# wherever it is run from. The reader below understands the slice of YAML these workflows are
+# written in: a `jobs:` mapping at column 0, one job per key two spaces in, and that job's
+# `runs-on` two spaces further. It is block-scalar aware (a `run: |` body is skipped whole), so a
+# heredoc cannot be misread as a job, and it fails loudly rather than quietly when a file is not in
+# that shape.
 
 import os
 import re
@@ -39,16 +50,20 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORKFLOWS = os.path.join(ROOT, ".github", "workflows")
 
-# The one file that ships, and so the one file that stays away from home.
-SHIPS = "release.yml"
+# The label GitHub puts on every self-hosted runner of its own accord, and so the one that names
+# what must not happen here.
+SELF_HOSTED = "self-hosted"
 
-# What a job that checks must say, as a set of labels.
-HOME = frozenset(("self-hosted", "unraid"))
-
-# GitHub's own runner images, as the label prefixes they are named with. A hosted label never
-# includes `self-hosted`, which is the half that actually matters; the prefixes keep a typo
-# ("ubunut-latest") from passing as hosted.
+# GitHub's own runner images, as the label prefixes they are named with. Checking for the prefix
+# rather than for the absence of `self-hosted` is what catches a self-hosted runner addressed by
+# its own label alone (`runs-on: unraid`) and a typo that would queue for ever ("ubunut-latest").
 HOSTED_PREFIXES = ("ubuntu-", "windows-", "macos-", "macOS-")
+
+# One sentence, which is what a red step prints.
+REASON = (
+    "a public repository; a fork's pull request would run on the host. "
+    "Every job here runs on a GitHub-hosted runner, which is free for a public repository."
+)
 
 JOB_KEY = re.compile(r"^(\s*)([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$")
 BLOCK_SCALAR = re.compile(r"^[|>][+-]?\d*$")
@@ -195,22 +210,26 @@ def check(directory):
             if "${{" in runs_on:
                 failures.append(
                     "%s: `runs-on: %s` is an expression. Where a job runs is not something to "
-                    "decide at run time: write the labels." % (where, runs_on)
+                    "decide at run time - an expression can evaluate to a self-hosted runner and "
+                    "this guard cannot see that it does not: write the labels." % (where, runs_on)
                 )
                 continue
             labels = labels_of(runs_on)
-            if name == SHIPS:
-                if not (len(labels) == 1 and labels[0].startswith(HOSTED_PREFIXES)):
-                    failures.append(
-                        "%s: `runs-on: %s`. %s builds the images people flash and publishes "
-                        "them, so it runs on a GitHub-hosted runner - a machine that is new "
-                        "every time - and not on a self-hosted runner that keeps its home "
-                        "between jobs." % (where, runs_on, SHIPS)
-                    )
-            elif frozenset(labels) != HOME:
+            if SELF_HOSTED in labels:
                 failures.append(
-                    "%s: `runs-on: %s`. Everything that checks runs at home: "
-                    "`runs-on: [self-hosted, unraid]`." % (where, runs_on)
+                    "%s: `runs-on: %s` is a self-hosted runner. No job here may run on one - %s"
+                    % (where, runs_on, REASON)
+                )
+            elif not (len(labels) == 1 and labels[0].startswith(HOSTED_PREFIXES)):
+                failures.append(
+                    "%s: `runs-on: %s` is not a GitHub-hosted runner label (one of %s). If it is a "
+                    "self-hosted runner addressed by its own label, the rule is the same - %s"
+                    % (
+                        where,
+                        runs_on,
+                        ", ".join("`%s*`" % p for p in HOSTED_PREFIXES[:3]),
+                        REASON,
+                    )
                 )
 
     if failures:
@@ -224,8 +243,8 @@ def check(directory):
         return 1
 
     print(
-        "every job of %d workflow(s) runs where it must: %s on a GitHub-hosted runner, "
-        "everything else on [self-hosted, unraid]" % (len(names), SHIPS)
+        "every job of %d workflow(s) runs on a GitHub-hosted runner: free for a public "
+        "repository, and no fork's pull request on the Unraid host" % len(names)
     )
     return 0
 
@@ -238,7 +257,7 @@ GOOD_CI = "\n".join(
         "jobs:",
         "  build:",
         "    name: build (${{ matrix.env }})",
-        "    runs-on: [self-hosted, unraid]",
+        "    runs-on: ubuntu-latest",
         "    strategy:",
         "      matrix:",
         "        env: [heltec_v3, heltec_v4]",
@@ -248,12 +267,11 @@ GOOD_CI = "\n".join(
         "        run: |",
         "          cat <<'XEOFX'",
         "          native:",
-        "            runs-on: ubuntu-latest",
+        "            runs-on: [self-hosted, unraid]",
         "          XEOFX",
         "  native:",
         "    runs-on:",
-        "      - self-hosted",
-        "      - unraid",
+        "      - ubuntu-latest",
         "    steps:",
         "      - run: echo hi",
         "",
@@ -275,32 +293,56 @@ GOOD_RELEASE = "\n".join(
     ]
 )
 
-HOME_LINE = "runs-on: [self-hosted, unraid]"
+HOSTED_LINE = "runs-on: ubuntu-latest"
 
 SELF_TEST_CASES = [
     ("what this repository has", {"ci.yml": GOOD_CI, "release.yml": GOOD_RELEASE}, 0),
     (
-        "a ci.yml job on a GitHub-hosted runner",
+        "a ci.yml job at home",
         {
-            "ci.yml": GOOD_CI.replace(HOME_LINE, "runs-on: ubuntu-latest", 1),
+            "ci.yml": GOOD_CI.replace(HOSTED_LINE, "runs-on: [self-hosted, unraid]", 1),
             "release.yml": GOOD_RELEASE,
         },
         1,
     ),
     (
-        "a release.yml job at home",
+        "self-hosted with any other label, not only unraid",
+        {
+            "ci.yml": GOOD_CI.replace(HOSTED_LINE, "runs-on: [self-hosted, linux, x64]", 1),
+            "release.yml": GOOD_RELEASE,
+        },
+        1,
+    ),
+    (
+        "self-hosted on its own",
+        {
+            "ci.yml": GOOD_CI.replace(HOSTED_LINE, "runs-on: self-hosted", 1),
+            "release.yml": GOOD_RELEASE,
+        },
+        1,
+    ),
+    (
+        "release.yml at home, which is no different",
         {
             "ci.yml": GOOD_CI,
-            "release.yml": GOOD_RELEASE.replace("runs-on: ubuntu-latest", HOME_LINE),
+            "release.yml": GOOD_RELEASE.replace(
+                HOSTED_LINE, "runs-on: [self-hosted, unraid]"
+            ),
+        },
+        1,
+    ),
+    (
+        "a runner group's own label, with no self-hosted beside it",
+        {
+            "ci.yml": GOOD_CI.replace(HOSTED_LINE, "runs-on: unraid", 1),
+            "release.yml": GOOD_RELEASE,
         },
         1,
     ),
     (
         "a job with no runs-on",
         {
-            "ci.yml": GOOD_CI.replace(
-                "    runs-on:\n      - self-hosted\n      - unraid\n", ""
-            ),
+            "ci.yml": GOOD_CI.replace("    runs-on:\n      - ubuntu-latest\n", ""),
             "release.yml": GOOD_RELEASE,
         },
         1,
@@ -308,15 +350,7 @@ SELF_TEST_CASES = [
     (
         "a runs-on decided at run time",
         {
-            "ci.yml": GOOD_CI.replace(HOME_LINE, "runs-on: ${{ vars.RUNNER }}", 1),
-            "release.yml": GOOD_RELEASE,
-        },
-        1,
-    ),
-    (
-        "half the labels",
-        {
-            "ci.yml": GOOD_CI.replace(HOME_LINE, "runs-on: [self-hosted]", 1),
+            "ci.yml": GOOD_CI.replace(HOSTED_LINE, "runs-on: ${{ vars.RUNNER }}", 1),
             "release.yml": GOOD_RELEASE,
         },
         1,
@@ -325,9 +359,7 @@ SELF_TEST_CASES = [
         "a label that looks hosted and is a typo",
         {
             "ci.yml": GOOD_CI,
-            "release.yml": GOOD_RELEASE.replace(
-                "runs-on: ubuntu-latest", "runs-on: ubunut-latest"
-            ),
+            "release.yml": GOOD_RELEASE.replace(HOSTED_LINE, "runs-on: ubunut-latest"),
         },
         1,
     ),
@@ -358,7 +390,7 @@ def self_test():
         if got != expected:
             bad += 1
         verdicts.append(
-            "self-test %-5s %-40s expected %d, got %d"
+            "self-test %-5s %-55s expected %d, got %d"
             % ("ok" if got == expected else "WRONG", label, expected, got)
         )
     print("")
