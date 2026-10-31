@@ -21,6 +21,13 @@
 // of "meshmaster-agent/<version>" like the .NET agent's. The token is read from NVS for the call
 // and wiped after; a call is blocking and takes a few seconds on a cold handshake.
 //
+// One connection, kept (task p1.8-30). The WiFiClientSecure and the HTTPClient over it live
+// across calls: the handshake happens at the first call and again only when the connection is
+// gone - the server closed it (its idle timeout is about two minutes, measured), a call failed,
+// the WiFi link was remade, the root to verify against changed. The rules are KeepAlive.h's and
+// are tested on the host; what every call costs the heap is measured here and printed by
+// `status` (describeUplink), because a board whose memory is the constraint wants the number.
+//
 // The 120-a-minute ceiling of the server's `agent` rate-limit policy is kept on this side too
 // (RateLimit.h): a call that would break it is not made.
 //
@@ -35,19 +42,36 @@
 
 #include <agent/IUplink.h>
 
+#include "KeepAlive.h"
 #include "net/Clock.h"
 #include "net/WifiLink.h"
 #include "settings/Store.h"
 
+class WiFiClientSecure;
+class HTTPClient;
+
 namespace mm {
 
-class AgentClient : public IUplink {
+class AgentClient : public IUplink, private uplink::Transport {
  public:
-  enum class Root : uint8_t { IsrgRootX1, CoreBundle };
+  using Root = uplink::Root;
+
+  // What the last call cost the heap: the free heap before it, the lowest free heap seen during
+  // it, and the free heap after. The lowest is exact for mbedtls's own allocations - every one
+  // of them goes through a wrapper of its allocator while a call is in flight (AgentClient.cpp)
+  // - and sampled at four points for everything else; and if the board's minimum-ever moved
+  // during the call, the lowest is that, which is exact for everything.
+  struct HeapCost {
+    bool any = false;
+    uint32_t freeBefore = 0;
+    uint32_t lowest = 0;
+    uint32_t freeAfter = 0;
+    uint32_t atEpoch = 0;
+  };
 
   void begin(SettingsStore& settings, AgentClock& clock, WifiLink& wifi, const char* agentVersion);
 
-  // After `set meshmaster.*`: re-read the URL and forget the last outcome.
+  // After `set meshmaster.*`: re-read the URL, forget the last outcome, drop the kept connection.
   void reconfigure();
 
   // ------------------------------------------------------------------ IUplink
@@ -77,6 +101,12 @@ class AgentClient : public IUplink {
   // For `status`, e.g. "https://meshmaster.dk: config ok at 12:03:14, agent 17 \"Window\", ...".
   void describe(char* out, size_t cap) const;
 
+  // For `status`, the line after the heap's: the kept connection and since when (or why not),
+  // handshakes against calls, and what the last call cost (task p1.8-30).
+  void describeUplink(char* out, size_t cap) const;
+  const uplink::KeepAlive& line() const { return line_; }
+  const HeapCost& lastCost() const { return cost_; }
+
   // Calls that got no reply for want of memory: mbedtls said an allocation failed, or the
   // largest free block after the failed call could not hold one TLS content buffer. The observer
   // watches this count move and gives up its highest broker connection for ten minutes when it
@@ -84,8 +114,28 @@ class AgentClient : public IUplink {
   uint32_t memoryFailures() const { return memoryFailures_; }
 
  private:
-  // One request. `method` is "GET" or "POST"; `requestBody` is nullptr for a GET. The reply's
-  // bytes land in `body` (bodyCap), NUL-terminated and cut if longer.
+  // ---- uplink::Transport: the wire under KeepAlive, which is a WiFiClientSecure and an
+  // HTTPClient that outlive the call. The request exchange() sends is `pending_`, bound by
+  // request() just before.
+  bool connected() override;
+  void close() override;
+  uplink::Attempt exchange(Root root) override;
+
+  struct Pending {
+    const char* method = "GET";
+    const char* path = "";
+    const char* requestBody = nullptr;
+    size_t requestLen = 0;
+    char* body = nullptr;
+    size_t bodyCap = 0;
+    size_t bodyLen = 0;
+    uint32_t retryAfterS = 0;
+    int rateLimitRemaining = -1;
+    char error[128] = {0};
+  };
+
+  // One request, under KeepAlive's rules. `method` is "GET" or "POST"; `requestBody` is nullptr
+  // for a GET. The reply's bytes land in `body` (bodyCap), NUL-terminated and cut if longer.
   int request(Root root, const char* method, const char* path, const char* requestBody, size_t requestLen,
               char* body, size_t bodyCap, size_t& bodyLen, int& tlsError, Call& call);
 
@@ -112,6 +162,16 @@ class AgentClient : public IUplink {
   AgentConfig config_;
   bool hasConfig_ = false;
   uint32_t memoryFailures_ = 0;
+
+  // The kept connection: the client is made at a handshake and deleted when the connection is
+  // gone, so that every handshake starts from a client with no history (its last error, the root
+  // it was given); the HTTPClient is made once in begin() and drives whichever client is current.
+  WiFiClientSecure* client_ = nullptr;
+  HTTPClient* http_ = nullptr;
+  uplink::KeepAlive line_;
+  Pending pending_;
+  HeapCost cost_;
+  uint32_t linkConnectsSeen_ = 0;  // WifiLink::connects() at the last call: a change means the link was remade
 };
 
 }  // namespace mm

@@ -233,6 +233,10 @@ void printStatus(Stream& out) {
     out.printf("; after the tls call %lu", static_cast<unsigned long>(o.heapAfter));
   }
   out.print("\r\n");
+  // The kept connection and what a call costs (task p1.8-30): the figures task 31 sets the
+  // observer's gate from.
+  server.describeUplink(line, sizeof line);
+  out.printf("uplink    %s\r\n", line);
   out.printf("log       level %s, frames %s, oled %s\r\n", mm::logLevelName(mm::logLevel()), the_mesh.frameLog() ? "on" : "off",
              display_ok ? (oled.isOn() ? "on" : "off") : "not found");
 }

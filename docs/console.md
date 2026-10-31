@@ -19,7 +19,7 @@ test, so it is the session the console accepts, line for line.
 | `set <key> <value>` | store a setting in NVS; it takes effect at once (see below). The value is the rest of the line, trimmed; a WiFi name with spaces is fine |
 | `get <key>` | print one setting. `wifi.pass` and `meshmaster.token` print `set` or `unset` and never the value |
 | `get` | print every setting, one per line, in the order of the table below; an unset key shows its fallback in brackets |
-| `status` | firmware, board and reset reason, the public key, the radio and its frame counters, WiFi, time and where it came from, the server's last answer, the heartbeat, the observer (its two slots and their states, or why it is off, how many packet messages it has made and how many slots are connected), the heap |
+| `status` | firmware, board and reset reason, the public key, the radio and its frame counters, WiFi, time and where it came from, the server's last answer, the heartbeat, the observer (its two slots and their states, or why it is off, how many packet messages it has made and how many slots are connected), the heap, and the uplink's kept connection with what the last call cost (task p1.8-30, below) |
 | `mesh` | the adverts heard: how many, how many are waiting to be posted and how many the ring dropped, and the last five with their names, roles, hops, SNR and RSSI |
 | `server` | the exit node's loop: the last heartbeat and the next, the last observation batch, the job counters, and the four error counters the heartbeat itself carries |
 | `jobs` | the airtime budget in force and what it has spent, how many claims were made, the thirteen job types this firmware advertises, and the last ten jobs with their outcome, their transaction count and when they ended |
@@ -117,10 +117,50 @@ clock and the server call is one line, so a bench walk is reading:
 [+5s] I clock: sntp started against pool.ntp.org
 [+7s] I server: GET https://meshmaster.dk/agent/v1/config (root: ISRG Root X1)
 [12:03:12] I clock: 2026-09-28T12:03:12Z from sntp
-[12:03:14] I heap: 187432 free after the call (231212 before), min ever 180020
+[12:03:14] I uplink: handshake 1 for call 1 (the first call)
+[12:03:14] I heap: 187432 free after the call (231212 before, lowest 152880 during), min ever 152880
 [12:03:14] I server: config ok: agent 17 "Window at Grenaa", transport onboard, budget 2/min gap 20 s, poll 30 s, serverTime 2026-09-28T12:03:14Z
 [12:04:19] I observations: 20 posted, 20 accepted
+[12:06:31] I uplink: handshake 2 for call 7 (the server closed it)
 ```
+
+`uplink: handshake N for call M (why)` is printed at every TLS handshake and
+never for a call that went over the kept connection (those are one line each at
+`debug`), so at `info` the log says how often the connection is remade and why:
+`the first call`, `the server closed it` (its idle timeout, about two minutes -
+see the `uplink` line below), `the root changed`, `the last call failed`,
+`dropped on purpose` (a `set meshmaster.*`), or `the WiFi link was remade`. A
+kept connection that turns out dead when a request goes over it is
+`uplink: the kept connection was dead under the request; reopened inside the
+call`, and the call is answered on the new connection: nothing the loop sees.
+
+### The `uplink` line of `status`
+
+```
+heap      free 136580, min ever 97212, largest block 73716; after the tls call 136580
+uplink    connection kept since 12:03:14 (root ISRG Root X1); 2 handshake(s) for 41 call(s), 39 reused, 0 reopened in-call; last call 136580 free before, lowest 97212 during, 136412 after
+```
+
+Since task p1.8-30 the uplink keeps **one** TLS connection to meshmaster.dk
+between calls (`src/agent/KeepAlive.h`): the handshake happens at the first call
+and again only when the connection is gone. The line says:
+
+| | |
+|---|---|
+| `connection kept since HH:MM:SS (root …)` | there is a connection, made at that time, verified against that root. Otherwise `no connection kept (why)`: `the server closed it`, `the last call failed`, `the server answered and closed`, `the root changed`, `dropped on purpose` |
+| `N handshake(s) for M call(s)` | TLS handshakes since boot against calls since boot. One per connection, not one per call: on a board whose calls are 30 s apart this is a handful against hundreds. `reused` is the calls answered on a kept connection; `reopened in-call` the kept connections that were dead under a request and remade inside the same call |
+| `last call … free before, lowest … during, … after` | what the last call cost the heap. *Lowest* is the lowest free heap seen during the call: **exact for mbedtls's own allocations** - every one of them goes through a wrapper of its allocator while a call is in flight, which is the whole handshake and both 16 KB content buffers - sampled at four points for the rest (lwIP, HTTPClient's buffers), and exact for everything if the board's `min ever` moved during the call. The handshake is the peak; a reused call dips far less |
+
+**How long the server keeps an idle connection.** Measured from a PC on
+31 October 2026 with one TLS connection, one request and then silence:
+meshmaster.dk (IIS, its default `connectionTimeout` of 120 s) closed it after
+**128 s** of idling; a second request after 30 s and after 100 s of idling was
+answered on the same connection. The heartbeat is every 30 s with work and
+every 120 s idle, timed from the end of the previous call, so the kept
+connection is normally still there at the next heartbeat; a job, a hold or a
+backoff in between outlasts it, and the next call handshakes again - one
+`uplink: handshake` line, and not a failure. The two figures are what task 31
+sets the observer's gate from.
 
 At `log.level debug` there is one line per heartbeat reply and one per advert
 heard - the key's first four bytes, the role, the hops and the SNR, and never
@@ -280,8 +320,11 @@ server comes back. What the four lines say is a pure function of a struct
    `token revoked/wrong`. A URL the chain does not verify for is
    `server: no reply: connection refused (tls -9984: ...)` and the next attempt
    tries the core's certificate bundle. `status` then shows
-   `server ... config ok at HH:MM:SS ... root ISRG Root X1` and the heap after
-   the TLS call - the number every later task budgets from.
+   `server ... config ok at HH:MM:SS ... root ISRG Root X1`, the heap after
+   the TLS call, and the `uplink` line: `connection kept since HH:MM:SS`,
+   `1 handshake(s) for 1 call(s)` and what that first call cost - the numbers
+   every later task budgets from. After ten minutes the handshake count should
+   still be a handful while the call count has climbed.
 5. Block UDP 123 at the router and reboot: `no time` until the config call,
    then `clock: ... from the server (corrected by ... s)`.
 6. The loop: `server` shows the last heartbeat, when the next is due, the poll

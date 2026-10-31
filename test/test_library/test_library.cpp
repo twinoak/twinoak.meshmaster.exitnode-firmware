@@ -251,9 +251,13 @@ TEST(Library, SrcAgentHoldsTheTlsClientAndTheRootAndNothingElse) {
     left.push_back(item.path().filename().generic_string());
   }
   std::sort(left.begin(), left.end());
-  const std::vector<std::string> expected = {"AgentClient.cpp", "AgentClient.h", "TlsRoots.h"};
-  EXPECT_EQ(expected, left) << "src/agent/ is the WiFi uplink and the root it verifies against; "
-                               "everything else portable is lib/agent-core's";
+  // KeepAlive is the WiFi uplink's own kept-connection rule (task p1.8-30): portable so that the
+  // host can test it against a fake wire, but about HTTPClient's codes and WiFiClientSecure's
+  // probe, which is this board's uplink and not the library's seam.
+  const std::vector<std::string> expected = {"AgentClient.cpp", "AgentClient.h", "KeepAlive.cpp", "KeepAlive.h",
+                                             "TlsRoots.h"};
+  EXPECT_EQ(expected, left) << "src/agent/ is the WiFi uplink, its kept-connection rule and the root it verifies "
+                               "against; everything else portable is lib/agent-core's";
 }
 
 TEST(Library, NothingUnderSrcReachesIntoTheLibraryByARelativePath) {
