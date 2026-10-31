@@ -219,6 +219,27 @@ counted (`resultsDropped`), and posted late with the bytes and the client id
 they were written with, which is why a late result is still a good result: the
 server takes it and de-duplicates.
 
+**The connection it keeps, and a router that drops idle sessions.** Since task
+p1.8-30 the uplink keeps one TLS connection to meshmaster.dk between calls
+rather than building one per call ([`console.md`](console.md), the `uplink`
+line of `status`). The server closes an idle connection after about two
+minutes (IIS's default, measured at 128 s on 31 October 2026), which is
+longer than the idle heartbeat's 120 s, so most calls go over the kept
+connection and the handshake - the expensive part, in heap and in seconds -
+is paid once per connection rather than once per call. A home router that
+drops a TCP session that has been quiet for less than that is the one thing
+in the way: the board cannot see a silent drop, so its next call goes over the
+dead connection, waits out the 15 s reply timeout, and is then made again on
+a new connection **inside the same call** (`uplink: the kept connection was
+dead under the request; reopened inside the call`). The call is answered, the
+loop counts no failure, and the only sign is that call's extra fifteen seconds
+and the `reopened in-call` count on the `uplink` line. A router that does that
+at every idle interval turns the kept connection back into one per call,
+fifteen seconds slower; if the count climbs with the calls, raise the router's
+TCP idle timeout above two minutes or accept it. A connection the server or the
+router closes *properly* costs nothing at all: the board sees the close before
+the request and handshakes anew.
+
 **What the board will do by itself.** After twelve consecutive unanswered
 calls *with the WiFi link up*, **and** an hour and a half of them, it decides
 the TLS stack is wedged and restarts, having written the reason into RTC memory
@@ -265,7 +286,10 @@ hand on it. On the seventh day, with a cable:
 
 - `status` — `up 7d hh:mm:ss`, and a `heap free` and `min ever` that have not
   moved since the first day. Every buffer this firmware has is `.bss`; a heap
-  figure that walks downward is a leak and is worth a report.
+  figure that walks downward is a leak and is worth a report. The `uplink`
+  line's handshakes should be a small fraction of its calls, and `reopened
+  in-call` near zero - a count that climbs with the calls is the router
+  dropping idle sessions (§6).
 - `reboots` — ideally *none remembered* and `0 restart(s) since the last power
   cut`.
 - `errors` — `overheard` will be large at a busy window and is not a fault;

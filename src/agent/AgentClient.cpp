@@ -18,12 +18,50 @@
 // The symbol is the blob's start; WiFiClientSecure::setCACertBundle() takes it as is.
 extern const uint8_t kCoreCertBundle[] asm("_binary_x509_crt_bundle_start");
 
+// mbedtls's allocator as this core ships it: MBEDTLS_PLATFORM_MEMORY is on and its standard
+// calloc and free are these two (mbedtls/esp_config.h: MBEDTLS_PLATFORM_STD_CALLOC/FREE), behind
+// the function pointers mbedtls_platform_set_calloc_free() sets. They are C symbols that the
+// core's esp_mem.h declares without an extern "C" - WiFiClientSecure.h pulls that header in
+// above, with C++ linkage - so, like the bundle above, they are reached by their assembler
+// names rather than through a declaration that would conflict with the core's.
+void* coreMbedtlsCalloc(size_t n, size_t size) asm("esp_mbedtls_mem_calloc");
+void coreMbedtlsFree(void* ptr) asm("esp_mbedtls_mem_free");
+#include <mbedtls/platform.h>
+
 namespace mm {
 
 namespace {
 
 constexpr int kMbedtlsCertVerifyFailed = -0x2700;  // MBEDTLS_ERR_X509_CERT_VERIFY_FAILED
 constexpr size_t kBodyCap = 2048;                  // the config and heartbeat answers are a few hundred bytes
+
+// The lowest free heap seen during a call (task p1.8-30). While a call is in flight every
+// allocation mbedtls makes - the handshake's certificate chain, the two 16 KB content buffers,
+// the session's keys - passes through watchedCalloc() below, which reads the free heap right
+// after it: exact for mbedtls's share of the call, which is nearly all of it. The rest (lwIP's
+// segments, HTTPClient's Strings and its 1 KB chunk buffer) is caught by the four samples
+// request() and call() take, and by the board's minimum-ever: if that moved during the call,
+// the call is what moved it and the figure is exact for everything. The wrapper is installed
+// once, in begin(); the esp-mqtt tasks of the observer share the same mbedtls and so are
+// sampled too while a call is in flight, which is right - what is wanted is the free heap at
+// its lowest moment, whoever asked for the bytes - and why these two are volatile and the
+// comparison is not atomic: a lower figure lost to a race between two tasks is at worst one
+// sample, never a wrong one.
+volatile bool g_watching = false;
+volatile uint32_t g_lowest = 0xFFFFFFFFu;
+
+void noteFree() {
+  const uint32_t f = ESP.getFreeHeap();
+  if (f < g_lowest) g_lowest = f;
+}
+
+void* watchedCalloc(size_t n, size_t size) {
+  void* p = coreMbedtlsCalloc(n, size);
+  if (g_watching) noteFree();
+  return p;
+}
+
+void watchedFree(void* p) { coreMbedtlsFree(p); }
 
 // One of mbedtls' two TLS content buffers as one allocation (CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN
 // 16384 in this core's sdkconfig, plus its header room): what the largest free block has to hold
@@ -105,6 +143,18 @@ void AgentClient::begin(SettingsStore& settings, AgentClock& clock, WifiLink& wi
   clock_ = &clock;
   wifi_ = &wifi;
   version_ = agentVersion;
+  linkConnectsSeen_ = wifi.connects();
+  // The HTTP client outlives every call (one connection, kept: KeepAlive.h); the TLS client
+  // under it is made at each handshake, in exchange(). The timeouts are what every call had.
+  if (http_ == nullptr) {
+    http_ = new HTTPClient();
+    http_->setReuse(true);
+    http_->setConnectTimeout(10000);
+    http_->setTimeout(15000);
+    http_->setUserAgent(String("meshmaster-agent/") + version_);
+    http_->collectHeaders(kWantedHeaders, sizeof kWantedHeaders / sizeof kWantedHeaders[0]);
+  }
+  mbedtls_platform_set_calloc_free(&watchedCalloc, &watchedFree);
   reconfigure();
 }
 
@@ -128,31 +178,38 @@ void AgentClient::reconfigure() {
   last_ = Outcome();
   lastCall_ = Call();
   hasConfig_ = false;
+  // A new URL or a new token: the kept connection was made for the old ones.
+  line_.drop(*this);
 }
 
-int AgentClient::request(Root root, const char* method, const char* path, const char* requestBody, size_t requestLen,
-                         char* body, size_t bodyCap, size_t& bodyLen, int& tlsError, Call& out) {
-  bodyLen = 0;
-  tlsError = 0;
+// ---- the wire under KeepAlive ----------------------------------------------------------------
 
-  WiFiClientSecure client;
-  if (root == Root::IsrgRootX1) {
-    client.setCACert(kIsrgRootX1Pem);
-  } else {
-    client.setCACertBundle(kCoreCertBundle);
-  }
-  client.setHandshakeTimeout(30);
+bool AgentClient::connected() { return client_ != nullptr && client_->connected(); }
 
-  HTTPClient http;
-  http.setReuse(false);
-  http.setConnectTimeout(10000);
-  http.setTimeout(15000);
-  http.setUserAgent(String("meshmaster-agent/") + version_);
-  if (!http.begin(client, path)) {
-    std::snprintf(out.error, sizeof out.error, "the URL was refused by the client");
-    return 0;
+void AgentClient::close() {
+  if (client_ == nullptr) return;
+  client_->stop();  // frees mbedtls's context, the chain and both content buffers
+  delete client_;
+  client_ = nullptr;
+}
+
+uplink::Attempt AgentClient::exchange(Root root) {
+  uplink::Attempt a;
+  Pending& p = pending_;
+  if (client_ == nullptr) {
+    // A handshake: a client with no history, verifying against the root this call wants.
+    client_ = new WiFiClientSecure();
+    if (root == Root::IsrgRootX1) {
+      client_->setCACert(kIsrgRootX1Pem);
+    } else {
+      client_->setCACertBundle(kCoreCertBundle);
+    }
+    client_->setHandshakeTimeout(30);
   }
-  http.collectHeaders(kWantedHeaders, sizeof kWantedHeaders / sizeof kWantedHeaders[0]);
+  if (!http_->begin(*client_, p.path)) {
+    std::snprintf(p.error, sizeof p.error, "the URL was refused by the client");
+    return a;  // code 0: no reply
+  }
 
   {
     // The token: NVS -> this buffer -> the header, and wiped. HTTPClient keeps its own copy of
@@ -161,17 +218,18 @@ int AgentClient::request(Root root, const char* method, const char* path, const 
     char bearer[kMaxValueLen + 8] = {0};
     settings_->get(*findKey("meshmaster.token"), token, sizeof token);
     std::snprintf(bearer, sizeof bearer, "Bearer %s", token);
-    http.addHeader("Authorization", bearer);
+    http_->addHeader("Authorization", bearer);
     wipe(token, sizeof token);
     wipe(bearer, sizeof bearer);
   }
-  http.addHeader("X-Agent-Version", version_);
-  http.addHeader("Accept", "application/json");
-  if (requestBody != nullptr) http.addHeader("Content-Type", "application/json");
+  http_->addHeader("X-Agent-Version", version_);
+  http_->addHeader("Accept", "application/json");
+  if (p.requestBody != nullptr) http_->addHeader("Content-Type", "application/json");
 
-  const bool post = std::strcmp(method, "POST") == 0;
-  const int code = post ? http.POST(reinterpret_cast<uint8_t*>(const_cast<char*>(requestBody)), requestLen)
-                        : http.GET();
+  const bool post = std::strcmp(p.method, "POST") == 0;
+  const int code = post ? http_->POST(reinterpret_cast<uint8_t*>(const_cast<char*>(p.requestBody)), p.requestLen)
+                        : http_->GET();
+  noteFree();  // the status line is in: the handshake, if there was one, is behind us
   if (code > 0) {
     // The body straight into the caller's buffer: writeToStream() reads a Content-Length or a
     // chunked body alike, and the sink below takes what fits in bodyCap and drops the rest, which
@@ -179,25 +237,70 @@ int AgentClient::request(Root root, const char* method, const char* path, const 
     // and a String would be one more heap copy of it that nothing wipes (agent/Credentials.h).
     // The chunk buffer HTTPClient moves the bytes through on the way is the one transient this
     // code cannot wipe, the same shape as the .NET agent's HttpClient.
-    BodySink sink(body, bodyCap);
-    http.writeToStream(&sink);
-    bodyLen = sink.length();
-    body[bodyLen] = '\0';
-    out.retryAfterS = parseRetryAfter(http.header("Retry-After"));
-    const String remaining = http.header("X-RateLimit-Remaining");
-    out.rateLimitRemaining = remaining.length() == 0 ? -1 : remaining.toInt();
+    BodySink sink(p.body, p.bodyCap);
+    http_->writeToStream(&sink);
+    noteFree();
+    p.bodyLen = sink.length();
+    p.body[p.bodyLen] = '\0';
+    p.retryAfterS = parseRetryAfter(http_->header("Retry-After"));
+    const String remaining = http_->header("X-RateLimit-Remaining");
+    p.rateLimitRemaining = remaining.length() == 0 ? -1 : remaining.toInt();
   } else {
     char reason[96] = {0};
-    tlsError = client.lastError(reason, sizeof reason);
-    if (tlsError != 0) {
-      std::snprintf(out.error, sizeof out.error, "%s (tls %d: %s)", http.errorToString(code).c_str(), tlsError, reason);
+    a.tlsError = client_->lastError(reason, sizeof reason);
+    if (a.tlsError != 0) {
+      std::snprintf(p.error, sizeof p.error, "%s (tls %d: %s)", http_->errorToString(code).c_str(), a.tlsError, reason);
     } else {
-      std::snprintf(out.error, sizeof out.error, "%s", http.errorToString(code).c_str());
+      std::snprintf(p.error, sizeof p.error, "%s", http_->errorToString(code).c_str());
     }
   }
-  http.end();
-  client.stop();
-  return code;
+  // end() keeps the socket open when the server allowed it (setReuse(true) and no
+  // `Connection: close`), and stops it otherwise; a failed request has already stopped it.
+  http_->end();
+  a.code = code;
+  return a;
+}
+
+int AgentClient::request(Root root, const char* method, const char* path, const char* requestBody, size_t requestLen,
+                         char* body, size_t bodyCap, size_t& bodyLen, int& tlsError, Call& out) {
+  bodyLen = 0;
+  tlsError = 0;
+
+  // A WiFi link remade since the last call: the kept connection went with the old one, and
+  // dropping it here is cheaper than letting a request find out.
+  if (wifi_ != nullptr && wifi_->connects() != linkConnectsSeen_) {
+    linkConnectsSeen_ = wifi_->connects();
+    if (line_.kept()) LOG_I("uplink: the WiFi link was remade; the kept connection goes with it");
+    line_.drop(*this);
+  }
+
+  pending_ = Pending();
+  pending_.method = method;
+  pending_.path = path;
+  pending_.requestBody = requestBody;
+  pending_.requestLen = requestLen;
+  pending_.body = body;
+  pending_.bodyCap = bodyCap;
+
+  const uplink::Attempt a = line_.call(*this, root, clock_->now());
+  const uplink::Counters& c = line_.counters();
+  if (line_.lastReopened()) {
+    LOG_I("uplink: the kept connection was dead under the request; reopened inside the call (handshake %lu, call %lu)",
+          static_cast<unsigned long>(c.handshakes), static_cast<unsigned long>(c.calls));
+  } else if (line_.lastHandshook()) {
+    LOG_I("uplink: handshake %lu for call %lu (%s)", static_cast<unsigned long>(c.handshakes),
+          static_cast<unsigned long>(c.calls), uplink::KeepAlive::whyText(line_.why()));
+  } else {
+    LOG_D("uplink: call %lu on the connection kept since handshake %lu", static_cast<unsigned long>(c.calls),
+          static_cast<unsigned long>(c.handshakes));
+  }
+
+  bodyLen = pending_.bodyLen;
+  tlsError = a.tlsError;
+  out.retryAfterS = pending_.retryAfterS;
+  out.rateLimitRemaining = pending_.rateLimitRemaining;
+  if (pending_.error[0] != '\0') std::snprintf(out.error, sizeof out.error, "%s", pending_.error);
+  return a.code;
 }
 
 bool AgentClient::call(const char* method, const char* endpoint, const char* requestBody, size_t requestLen,
@@ -224,6 +327,14 @@ bool AgentClient::call(const char* method, const char* endpoint, const char* req
   char path[kMaxValueLen + 48];
   std::snprintf(path, sizeof path, "%s%s", url_, endpoint);
 
+  // What this call costs the heap (HeapCost): the allocator wrapper watches from here to the
+  // end of the call, both requests of a root retry included.
+  HeapCost cost;
+  cost.freeBefore = ESP.getFreeHeap();
+  const uint32_t minEverBefore = ESP.getMinFreeHeap();
+  g_lowest = cost.freeBefore;
+  g_watching = true;
+
   int tlsError = 0;
   int code = request(root_, method, path, requestBody, requestLen, body, bodyCap, bodyLen, tlsError, out);
   if (code <= 0 && tlsError == kMbedtlsCertVerifyFailed) {
@@ -236,6 +347,14 @@ bool AgentClient::call(const char* method, const char* endpoint, const char* req
     limiter_.took(millis());
     code = request(root_, method, path, requestBody, requestLen, body, bodyCap, bodyLen, tlsError, out);
   }
+  g_watching = false;
+  cost.freeAfter = ESP.getFreeHeap();
+  cost.lowest = g_lowest < cost.freeAfter ? g_lowest : cost.freeAfter;
+  const uint32_t minEverAfter = ESP.getMinFreeHeap();
+  if (minEverAfter < minEverBefore) cost.lowest = minEverAfter;  // the call moved the board's minimum: exact
+  cost.atEpoch = clock_->now();
+  cost.any = true;
+  cost_ = cost;
   out.atEpoch = clock_->now();
   out.httpStatus = code > 0 ? code : 0;
   out.reachable = code > 0;
@@ -264,8 +383,9 @@ bool AgentClient::fetchConfig() {
   o.via = c.via;
   o.heapAfter = ESP.getFreeHeap();
   std::snprintf(o.error, sizeof o.error, "%s", c.error);
-  LOG_I("heap: %lu free after the call (%lu before), min ever %lu", static_cast<unsigned long>(o.heapAfter),
-        static_cast<unsigned long>(heapBefore), static_cast<unsigned long>(ESP.getMinFreeHeap()));
+  LOG_I("heap: %lu free after the call (%lu before, lowest %lu during), min ever %lu", static_cast<unsigned long>(o.heapAfter),
+        static_cast<unsigned long>(heapBefore), static_cast<unsigned long>(cost_.lowest),
+        static_cast<unsigned long>(ESP.getMinFreeHeap()));
 
   if (!reachable) {
     LOG_E("server: no reply: %s", o.error);
@@ -507,6 +627,33 @@ void AgentClient::describe(char* out, size_t cap) const {
   } else {
     std::snprintf(out, cap, "%s: failed at %s: %s (root %s)", url_, when, last_.error, last_.via);
   }
+}
+
+void AgentClient::describeUplink(char* out, size_t cap) const {
+  if (!cost_.any) {
+    std::snprintf(out, cap, "no call yet");
+    return;
+  }
+  char kept[112];
+  if (line_.kept()) {
+    char since[24];
+    if (line_.keptSince() != 0) {
+      formatClock(line_.keptSince(), since, sizeof since);
+    } else {
+      std::snprintf(since, sizeof since, "boot");
+    }
+    std::snprintf(kept, sizeof kept, "connection kept since %s (root %s)", since, rootName(line_.keptRoot()));
+  } else {
+    std::snprintf(kept, sizeof kept, "no connection kept (%s)", uplink::KeepAlive::whyText(line_.why()));
+  }
+  const uplink::Counters& c = line_.counters();
+  std::snprintf(out, cap,
+                "%s; %lu handshake(s) for %lu call(s), %lu reused, %lu reopened in-call; last call %lu free before, "
+                "lowest %lu during, %lu after",
+                kept, static_cast<unsigned long>(c.handshakes), static_cast<unsigned long>(c.calls),
+                static_cast<unsigned long>(c.reused), static_cast<unsigned long>(c.reopened),
+                static_cast<unsigned long>(cost_.freeBefore), static_cast<unsigned long>(cost_.lowest),
+                static_cast<unsigned long>(cost_.freeAfter));
 }
 
 

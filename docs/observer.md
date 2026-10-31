@@ -119,7 +119,10 @@ PEM:
 **The radio first, the MeshMaster uplink second, the observer last.** A Heltec V3
 has 320 KB of RAM and no PSRAM; a TLS connection takes about 40 KB of heap
 (the observer firmware's figure for one WSS slot, `MQTT_IMPLEMENTATION.md`),
-and so does the uplink's own handshake every time it calls meshmaster.dk. So:
+and so did the uplink's own handshake every time it called meshmaster.dk - until
+task p1.8-30 kept one connection between calls, so that the handshake is paid
+once per connection and `status`'s `uplink` line says what a call costs now
+([`console.md`](console.md)); task 31 sets the figures below from it. So:
 
 - A slot connects only while **free heap is at least 88 KB and the largest free
   block at least 34 KB** (`src/observer/Connection.h`: its own 40 KB, the
