@@ -27,6 +27,19 @@
 #   fixtures            tools/sync-fixtures.ps1 -Verify - the contract fixtures and the
 #                       transcribed companion frames are still meshmaster.dk's bytes and nobody
 #                       edited one here
+#   the runners         tools/check-runners.py - every job of every workflow in this directory runs
+#                       where it must, which since task p1.8-29 is: everything that *checks* on
+#                       this repository's own runners, [self-hosted, unraid]; release.yml, which
+#                       *ships*, on GitHub's. It is the native job's first real step
+#
+# WHERE THIS RUNS. On Thomas's self-hosted runners on Unraid (myoung34/github-runner, containers
+# unraid-1..5, labels `self-hosted` and `unraid`), as meshmaster.dk's CI has since 29 October 2026:
+# every pull request a task session opens runs the board matrix and the native tests, and
+# GitHub-hosted minutes got out of hand. The two jobs below take one runner each, of a host they
+# share with everything else on it - so no job of this file may bind a host port, and nothing it
+# leaves outside its own workspace survives, since `actions/checkout`'s clean (the default) is what
+# empties the workspace of the last branch's .pio/ at the start of every job. The caches are
+# GitHub's runners' only: a runner at home keeps ~/.platformio between jobs.
 #
 # One run per commit is twinoak/meshmaster.dk's rule (its tasks/phase-4/49) and it is here from the
 # first commit: a branch push and its pull request are two refs, so the concurrency group below
@@ -59,7 +72,7 @@ env:
 jobs:
   build:
     name: build (${{ matrix.env }})
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, unraid]
     strategy:
       fail-fast: false
       matrix:
@@ -74,7 +87,12 @@ jobs:
 
       # The toolchain and every library, keyed by the file that decides them: a hit turns a
       # four-minute cold build into seconds. MeshCore is a git dependency, so the pin is in the key.
+      # A self-hosted runner keeps its home between jobs, so ~/.platformio and the toolchains in it
+      # are already on disk and the tarball would come over the WAN every job for nothing: the step
+      # runs on GitHub's runners only, and so does the one in the native job below
+      # (meshmaster.dk 70b73ad, task p1.8-29).
       - name: Cache PlatformIO
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@v4
         with:
           path: |
@@ -129,7 +147,7 @@ jobs:
 
   native:
     name: native tests
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, unraid]
     steps:
       - uses: actions/checkout@v4
 
@@ -137,7 +155,21 @@ jobs:
         with:
           python-version: "3.11"
 
+      # The guard, before anything is installed or built, because it is about this directory and
+      # not about the firmware: every job of every workflow runs where the rule says it must -
+      # everything that checks at home on [self-hosted, unraid], release.yml away on GitHub's
+      # runners, because what ships is built on a machine that is new every time. The rule and its
+      # reason are at the top of the script, in one place, so that neither half moves by accident.
+      # The self-test first: the seven shapes it must refuse.
+      - name: Every job runs where it must
+        run: |
+          set -euo pipefail
+          python tools/check-runners.py --self-test
+          python tools/check-runners.py
+
+      # As in the build job: on this repository's own runners the directory is already there.
       - name: Cache PlatformIO
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@v4
         with:
           path: |

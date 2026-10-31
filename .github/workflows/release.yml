@@ -1,3 +1,10 @@
+# WHERE THIS RUNS, AND WHY IT IS THE ONE THAT DOES NOT RUN AT HOME: all three jobs stay on
+# GitHub's runners, because a self-hosted runner keeps its home and its toolchains between jobs
+# and is shared with every branch a task session pushes - so what ships is built on a machine
+# that is new every time, while everything that only *checks* runs at home ([self-hosted,
+# unraid], ci.yml and upstream.yml). A tag is a few times a month, so the minutes are few.
+# ci.yml's guard, tools/check-runners.py, fails if either half of that moves (task p1.8-29).
+#
 # The release: a GitHub Release with, per board, the image to flash.
 #
 #   push a tag vX.Y.Z   -> wait for ci to be green on that commit -> build every board -> publish
@@ -134,6 +141,8 @@ jobs:
         with:
           python-version: "3.11"
 
+      # Kept, and with no `runner.environment` condition on it, unlike ci.yml's: this job runs on
+      # a GitHub-hosted runner, where nothing is on disk when it starts.
       - name: Cache PlatformIO
         uses: actions/cache@v4
         with:

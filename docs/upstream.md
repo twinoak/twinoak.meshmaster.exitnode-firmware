@@ -77,6 +77,15 @@ mornings and on demand:
    every native test still passes.** A person merges it, or nobody does if
    auto-merge is ever turned on for the `meshcore` label.
 
+This workflow runs **at home**, on this repository's own runners
+(`[self-hosted, unraid]`), like every job of `ci.yml` and unlike `release.yml`:
+it checks rather than ships. The README's *Where CI runs* is the page for that,
+and `tools/check-runners.py` — a step of `ci.yml` — is what holds it. Two things
+follow for anyone editing this workflow: a runner there is **shared**, so
+nothing may bind a host port, and it **keeps its disk between jobs**, so a file
+written outside the workspace goes to `$RUNNER_TEMP` (which the runner empties
+at the start of every job) and never to a fixed path in `/tmp`.
+
 **One click before CI runs.** The pull request is opened by
 `github-actions[bot]` with the workflow's own `GITHUB_TOKEN`, and GitHub holds
 workflows on such a pull request as *action required* rather than starting them

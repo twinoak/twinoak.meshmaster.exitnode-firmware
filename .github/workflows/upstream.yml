@@ -11,6 +11,12 @@
 # The comparison itself is tools/upstream-check.ps1, so it can be run by hand and this workflow is
 # only the git and gh around it.
 #
+# WHERE THIS RUNS. At home, on this repository's own runners ([self-hosted, unraid]) like every job
+# of ci.yml, because it *checks* rather than ships; ci.yml's guard holds that (task p1.8-29). A
+# runner there is shared and keeps its disk between jobs, so the two files this job writes outside
+# its workspace - the blobless clone of upstream and the pull request's body - go to $RUNNER_TEMP,
+# which the runner empties at the start of every job, and not to /tmp, which it does not.
+#
 # REHEARSAL. With the pin_tag input this workflow proves itself without waiting for upstream: it
 # pushes a throwaway base branch whose pin is that older tag, then does the real thing on top of
 # it and opens the pull request between the two. Close the pull request and delete both branches
@@ -39,7 +45,7 @@ concurrency:
 jobs:
   bump:
     name: is there a newer MeshCore?
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, unraid]
     permissions:
       contents: write
       pull-requests: write
@@ -110,14 +116,14 @@ jobs:
           NEW: ${{ steps.check.outputs.sha }}
         run: |
           set -euo pipefail
-          git clone --quiet --filter=blob:none --no-checkout "$UPSTREAM" /tmp/meshcore
+          git clone --quiet --filter=blob:none --no-checkout "$UPSTREAM" "$RUNNER_TEMP/meshcore"
           {
             echo "## MeshCore ${{ steps.check.outputs.previous_tag }} -> ${{ steps.check.outputs.tag }}"
             echo
             echo "\`${PREVIOUS:0:8}\` -> \`${NEW:0:8}\`, and what is between them:"
             echo
             echo '```'
-            git -C /tmp/meshcore log --oneline --no-decorate "$PREVIOUS..$NEW" || echo "(the two pins are not on one line of history; see the tags)"
+            git -C "$RUNNER_TEMP/meshcore" log --oneline --no-decorate "$PREVIOUS..$NEW" || echo "(the two pins are not on one line of history; see the tags)"
             echo '```'
             echo
             echo "CI on this pull request is the test. **Green** means the bump compiled and every"
@@ -132,8 +138,8 @@ jobs:
             echo "Whichever it is, the rails in the README have to survive it - verified TLS,"
             echo "secrets where they are, nothing overheard logged, one send per command, and the"
             echo "contract fixtures unchanged. \`tasks/sync/TEMPLATE.md\` lists them."
-          } > /tmp/body.md
-          cat /tmp/body.md
+          } > "$RUNNER_TEMP/body.md"
+          cat "$RUNNER_TEMP/body.md"
 
       - name: Move the pin and open the pull request
         if: steps.check.outputs.newer == 'true' && steps.branch.outputs.exists == 'false'
@@ -155,7 +161,7 @@ jobs:
           gh label create meshcore --color 0e8a16 --description "A MeshCore pin bump" 2>/dev/null || true
           gh pr create \
             --title "MeshCore $TAG" \
-            --body-file /tmp/body.md \
+            --body-file "$RUNNER_TEMP/body.md" \
             --label meshcore \
             --head "${{ steps.branch.outputs.name }}" \
             --base "${BASE:-master}"
