@@ -181,7 +181,12 @@ def jobs_of(path):
     return [(job, runs_on, line_no) for job, runs_on, line_no in jobs]
 
 
-def check(directory):
+def check(directory, annotate=True):
+    # annotate=False for the self-test: its refusals are the point rather than a problem, and an
+    # `::error::` line is a workflow command that GitHub turns into a *failure annotation* against
+    # the file and line it names. The planted files are called ci.yml and release.yml too, so a
+    # green run would otherwise carry nine annotations pointing at real lines of this repository
+    # that are not wrong at all (seen on run 41191528050; task p1.8-29).
     names = sorted(
         name
         for name in os.listdir(directory)
@@ -235,7 +240,7 @@ def check(directory):
     if failures:
         sys.stderr.write("\n")
         for failure in failures:
-            sys.stderr.write("::error::%s\n" % failure)
+            sys.stderr.write(("::error::%s\n" if annotate else "  refused: %s\n") % failure)
         sys.stderr.write(
             "\n%d job(s) run in the wrong place. The rule, and why it is the rule, is at the top "
             "of tools/check-runners.py.\n" % len(failures)
@@ -386,7 +391,7 @@ def self_test():
                 ) as handle:
                     handle.write(body)
             print("--- self-test: %s" % label)
-            got = check(directory)
+            got = check(directory, annotate=False)
         if got != expected:
             bad += 1
         verdicts.append(
