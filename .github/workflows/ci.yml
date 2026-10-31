@@ -27,6 +27,20 @@
 #   fixtures            tools/sync-fixtures.ps1 -Verify - the contract fixtures and the
 #                       transcribed companion frames are still meshmaster.dk's bytes and nobody
 #                       edited one here
+#   the runners         tools/check-runners.py - no job of any workflow in this directory runs on a
+#                       self-hosted runner, because this repository is public and a fork's pull
+#                       request would otherwise run a stranger's code on the Unraid host (task
+#                       p1.8-29). It is the native job's first real step
+#
+# WHERE THIS RUNS. On GitHub's runners (`ubuntu-latest`), like every job of every workflow here,
+# for two reasons that both come of the same fact: **this repository is public**. Actions on
+# standard GitHub-hosted runners are free in a public repository, so this file has never spent a
+# credit - the minutes that got out of hand are meshmaster.dk's and the repeater firmware's, which
+# are private and whose CI runs at home on the Unraid runners. And a public repository is the one
+# place a self-hosted runner must not be: a fork can open a pull request that changes this file,
+# and it would then run on the Unraid host, with its docker socket, its LAN and its Tailscale.
+# GitHub's own guidance is that self-hosted runners "should almost never be used for public
+# repositories". README's *Where CI runs* is the page, and the guard below is what holds it.
 #
 # One run per commit is twinoak/meshmaster.dk's rule (its tasks/phase-4/49) and it is here from the
 # first commit: a branch push and its pull request are two refs, so the concurrency group below
@@ -74,6 +88,8 @@ jobs:
 
       # The toolchain and every library, keyed by the file that decides them: a hit turns a
       # four-minute cold build into seconds. MeshCore is a git dependency, so the pin is in the key.
+      # Every job here runs on a runner that is new, with nothing on disk, so the cache is
+      # unconditional - as is the one in the native job below (task p1.8-29).
       - name: Cache PlatformIO
         uses: actions/cache@v4
         with:
@@ -136,6 +152,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      # The guard, before anything is installed or built, because it is about this directory and
+      # not about the firmware: no job of any workflow here runs on a self-hosted runner, because
+      # this repository is public and a fork's pull request would then run on the host. The rule
+      # and its reason are at the top of the script, in one place, so that the day someone moves a
+      # job home is the day a job goes red rather than the day a stranger's code runs on Unraid.
+      # The self-test first: the shapes it must refuse.
+      - name: Every job runs where it must
+        run: |
+          set -euo pipefail
+          python tools/check-runners.py --self-test
+          python tools/check-runners.py
 
       - name: Cache PlatformIO
         uses: actions/cache@v4

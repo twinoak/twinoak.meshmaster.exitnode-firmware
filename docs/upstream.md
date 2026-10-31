@@ -77,6 +77,18 @@ mornings and on demand:
    every native test still passes.** A person merges it, or nobody does if
    auto-merge is ever turned on for the `meshcore` label.
 
+This workflow runs on **GitHub's runners** (`ubuntu-latest`), like every job of
+every workflow here, because this repository is **public**: hosted runners are
+free in a public repository, and a self-hosted one would run a fork's pull
+request on the Unraid host. The README's *Where CI runs* is the page for that,
+and `tools/check-runners.py` — a step of `ci.yml` — is what holds it; the other
+twinoak repositories, which are private, do run their CI at home. One thing
+follows for anyone editing this workflow: the two files it writes outside its
+workspace — the blobless clone of upstream and the pull request's body — go to
+`$RUNNER_TEMP` and never to a fixed path in `/tmp`. `$RUNNER_TEMP` is per-job
+and emptied when the job starts, so a second run cannot trip over the first's
+leftovers on a runner that keeps its disk.
+
 **One click before CI runs.** The pull request is opened by
 `github-actions[bot]` with the workflow's own `GITHUB_TOKEN`, and GitHub holds
 workflows on such a pull request as *action required* rather than starting them

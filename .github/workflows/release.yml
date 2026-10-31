@@ -1,3 +1,11 @@
+# WHERE THIS RUNS: all three jobs on GitHub's runners, like every job of ci.yml and upstream.yml,
+# because **this repository is public**. Actions on standard GitHub-hosted runners are free in a
+# public repository, and a public repository is the one place a self-hosted runner must not be: a
+# fork can open a pull request that changes a workflow, and it would then run on the Unraid host.
+# It is the stronger reason here than anywhere - this is the file that builds the images people
+# flash and signs them into a Release. ci.yml's guard, tools/check-runners.py, fails if any job of
+# any workflow here moves to a self-hosted runner (task p1.8-29).
+#
 # The release: a GitHub Release with, per board, the image to flash.
 #
 #   push a tag vX.Y.Z   -> wait for ci to be green on that commit -> build every board -> publish

@@ -11,6 +11,15 @@
 # The comparison itself is tools/upstream-check.ps1, so it can be run by hand and this workflow is
 # only the git and gh around it.
 #
+# WHERE THIS RUNS. On GitHub's runners (`ubuntu-latest`), like every job of every workflow here:
+# this repository is public, so they are free, and a self-hosted runner is the one thing a public
+# repository must not have - a fork's pull request can change a workflow, and it would run on the
+# host. ci.yml's guard, tools/check-runners.py, holds that, and README's *Where CI runs* is the
+# page (task p1.8-29). The two files this job writes outside its workspace - the blobless clone of
+# upstream and the pull request's body - go to $RUNNER_TEMP and not to a fixed path in /tmp, which
+# is right on any runner: $RUNNER_TEMP is per-job and emptied when the job starts, so a second run
+# cannot trip over what a first one left, wherever the job happens to be running.
+#
 # REHEARSAL. With the pin_tag input this workflow proves itself without waiting for upstream: it
 # pushes a throwaway base branch whose pin is that older tag, then does the real thing on top of
 # it and opens the pull request between the two. Close the pull request and delete both branches
@@ -110,14 +119,14 @@ jobs:
           NEW: ${{ steps.check.outputs.sha }}
         run: |
           set -euo pipefail
-          git clone --quiet --filter=blob:none --no-checkout "$UPSTREAM" /tmp/meshcore
+          git clone --quiet --filter=blob:none --no-checkout "$UPSTREAM" "$RUNNER_TEMP/meshcore"
           {
             echo "## MeshCore ${{ steps.check.outputs.previous_tag }} -> ${{ steps.check.outputs.tag }}"
             echo
             echo "\`${PREVIOUS:0:8}\` -> \`${NEW:0:8}\`, and what is between them:"
             echo
             echo '```'
-            git -C /tmp/meshcore log --oneline --no-decorate "$PREVIOUS..$NEW" || echo "(the two pins are not on one line of history; see the tags)"
+            git -C "$RUNNER_TEMP/meshcore" log --oneline --no-decorate "$PREVIOUS..$NEW" || echo "(the two pins are not on one line of history; see the tags)"
             echo '```'
             echo
             echo "CI on this pull request is the test. **Green** means the bump compiled and every"
@@ -132,8 +141,8 @@ jobs:
             echo "Whichever it is, the rails in the README have to survive it - verified TLS,"
             echo "secrets where they are, nothing overheard logged, one send per command, and the"
             echo "contract fixtures unchanged. \`tasks/sync/TEMPLATE.md\` lists them."
-          } > /tmp/body.md
-          cat /tmp/body.md
+          } > "$RUNNER_TEMP/body.md"
+          cat "$RUNNER_TEMP/body.md"
 
       - name: Move the pin and open the pull request
         if: steps.check.outputs.newer == 'true' && steps.branch.outputs.exists == 'false'
@@ -155,7 +164,7 @@ jobs:
           gh label create meshcore --color 0e8a16 --description "A MeshCore pin bump" 2>/dev/null || true
           gh pr create \
             --title "MeshCore $TAG" \
-            --body-file /tmp/body.md \
+            --body-file "$RUNNER_TEMP/body.md" \
             --label meshcore \
             --head "${{ steps.branch.outputs.name }}" \
             --base "${BASE:-master}"
