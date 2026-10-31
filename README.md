@@ -133,7 +133,7 @@ board image altogether.
 ## Flashing it
 
 **The usual way: a release, with the MeshCore web flasher.** Open
-<https://flasher.meshcore.co.uk> in Chrome or Edge, choose **Custom firmware**,
+<https://meshcore.io> in Chrome or Edge, choose **Custom firmware**,
 and pick the release's file for the board:
 
 - a board **out of the box, or coming from other firmware**: the

@@ -25,6 +25,14 @@ where it is written down.
 
 ## The lines to type
 
+**On a Heltec V3, set MeshView only (slot 1) and leave MeshMapper to the V4s.**
+Measured on 28 October with `v0.4.0`: a V3 has about 136 KB free with no broker,
+one broker connection costs about 63 KB, and the MeshMaster uplink's call dips
+about 80 KB — so with one broker up, a call took the board to 3 KB free, and a
+second broker never gets memory to connect (it stays *waiting-for-heap*). Pile
+1.8 makes one slot on a V3 the rule and refuses `mqtt2` there; a V4 can carry
+both.
+
 The Danish observer guide, as the console of this firmware takes it. `set` takes
 effect at once — no `reboot` is needed for any line here, though the guide's
 `reboot` lines are accepted and do what they say.

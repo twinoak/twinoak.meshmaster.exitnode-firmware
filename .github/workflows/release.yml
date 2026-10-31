@@ -220,7 +220,7 @@ jobs:
             echo
             echo "## Flashing"
             echo
-            echo "With the MeshCore web flasher, <https://flasher.meshcore.co.uk>, in Chrome or Edge:"
+            echo "With the MeshCore web flasher, <https://meshcore.io>, in Chrome or Edge:"
             echo "choose **Custom firmware** and the file for your board."
             echo
             echo "| Board | First install: a new board, or one running other firmware | Upgrade: a board already running this firmware |"
@@ -270,12 +270,18 @@ jobs:
           set mqtt.iata AAR
           set mqtt.owner <your own node's public key>
           set mqtt1.preset meshview
-          set mqtt2.preset meshmapper
           get mqtt.status
           ```
 
+          On a **Heltec V4**, add MeshMapper as the second broker: `set mqtt2.preset meshmapper`.
+
+          **On a Heltec V3, set MeshView only.** A V3 has memory for one broker beside its
+          MeshMaster connection, and a second one just waits for memory that never comes.
+          Leave MeshMapper to the V4s.
+
           `mqtt.iata` is your region: `AAL`, `AAR`, `BLL`, `ODE`, `CPH` or `RNN`. `mqtt.owner` is
-          optional. The Danish observer guide's lines (`set mqtt1.preset custom`, …) work as typed too.
+          optional. The Danish observer guide's lines (`set mqtt1.preset custom`, …) work as typed too,
+          except its MeshMapper line on a V3.
 
           Every command and setting: `docs/console.md` and `docs/observer.md` in the repository.
           EOF
