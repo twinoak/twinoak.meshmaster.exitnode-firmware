@@ -137,6 +137,51 @@ struct StatusFields {
 
 size_t formatStatus(const StatusFields& f, char* out, size_t cap);
 
+// The neighbours message (task p1.8-33; MQTTPayloadBuilder.cpp:216-322 at d664d89d, buildNeighborsMessage,
+// with the values finishNeighborDiscover in examples/simple_repeater/MyMesh.cpp:2184-2258 gives it):
+//
+//   timestamp          as above                                              buildNeighborsMessageBase :229
+//   origin, origin_id  as above                                              :230-231
+//   total_neighbors    the table's count when the cycle began                :233
+//   queried_neighbors  scope requests actually sent                          :234
+//   truncated          entries were dropped: the cap of kNeighbourCap, or the buffer   :235, :316
+//   self               { scopes: the node's own flood regions - "" here, an exit node forwards no
+//                        flood - and default_scope: `flood.scope`, or "*" }   :238-240
+//   neighbors          [ { pubkey (64 uppercase hex), snr (dB, a number), heard_secs_ago (an integer;
+//                        the observer firmware writes null before its clock is set, this one counts on
+//                        the uptime clock and always knows), scopes, status } ]   addNeighborsMessageEntry :244-258
+//
+// The entries are written in the order given, which the sweep makes newest first (Neighbours.h),
+// and the list stops before the entry that would not fit `cap`, with `truncated` true - the
+// observer firmware's own rule (:311-317), so the head of the list is the useful end.
+constexpr size_t kNeighboursMessageCap = 10240;  // MQTTBridge.h:691, NEIGHBORS_JSON_BUFFER_SIZE with PSRAM: the task's 10 KB
+constexpr size_t kNeighbourEntryCap = 512;       // one entry: a key, 256 characters of scopes, the rest
+
+struct NeighbourField {
+  const char* pubkeyHex = "";   // 64 uppercase hex
+  float snr = 0;                // dB
+  uint32_t heardSecsAgo = 0;
+  const char* scopes = "";
+  const char* status = "";      // "responded" | "timeout" | "send_failed"
+};
+
+struct NeighboursFields {
+  const char* origin = "";
+  const char* originId = "";
+  uint32_t atEpoch = 0;
+  uint32_t atMicros = 0;
+  int totalNeighbours = 0;
+  int queriedNeighbours = 0;
+  const char* selfScopes = "";
+  const char* defaultScope = "*";
+  const NeighbourField* entries = nullptr;
+  int count = 0;
+};
+
+// The neighbours message into `out`: its length, or 0 when not even the header fits. `written`
+// (optional) is how many entries went in, and `truncated` whether any were left out.
+size_t formatNeighbours(const NeighboursFields& f, char* out, size_t cap, int* written = nullptr, bool* truncated = nullptr);
+
 // "%Y-%m-%dT%H:%M:%S.%06u+00:00" of a UTC clock read (MQTTMessageBuilder.cpp:288-307).
 void formatTimestamp(uint32_t epoch, uint32_t micros, char* out, size_t cap);
 

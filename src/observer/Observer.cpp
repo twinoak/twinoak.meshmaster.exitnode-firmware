@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include <Arduino.h>
@@ -24,6 +25,9 @@ void microsNow(uint32_t (*clock)(), uint32_t& epoch, uint32_t& micros) {
   epoch = clock != nullptr ? clock() : static_cast<uint32_t>(tv.tv_sec);
   micros = tv.tv_usec < 0 ? 0 : static_cast<uint32_t>(tv.tv_usec);
 }
+
+// Arduino's millis() is an unsigned long; the sweep's clock is a uint32_t function (Neighbours.h).
+uint32_t uptimeMs() { return static_cast<uint32_t>(millis()); }
 
 void readKey(SettingsStore& store, const char* name, char* out, size_t cap) {
   const KeyDef* key = findKey(name);
@@ -88,6 +92,15 @@ void Observer::readSettings() {
   view_.owner = owner_;
   view_.email = email_;
   view_.origin = origin_;
+
+  // The neighbour sweep's two keys (task p1.8-33), with the table's fallbacks.
+  char buf[16];
+  settings_->effective(*findKey("mqtt.neighbors"), buf, sizeof buf);
+  sweepSettings_.enabled = std::strcmp(buf, "off") != 0;
+  settings_->effective(*findKey("mqtt.neighbors.interval"), buf, sizeof buf);
+  const long hours = std::strtol(buf, nullptr, 10);
+  sweepSettings_.intervalHours = hours < 12 ? 12u : (hours > 336 ? 336u : static_cast<uint32_t>(hours));
+  sweep_.configure(sweepSettings_);
 }
 
 void Observer::reconfigure() {
@@ -106,7 +119,82 @@ void Observer::reconfigure() {
   link_.configure(view_, enabled_, publicKeyHex_, clientVersion_);
 }
 
-void Observer::loop() { link_.loop(); }
+void Observer::loop() {
+  link_.loop();
+  // The sweep's next step, which may be one regions request and its wait - pumped through the
+  // mesh's pump, which calls this loop again: the connections run through the wait, the sweep
+  // does not re-enter itself.
+  if (inSweep_) return;
+  inSweep_ = true;
+  if (sweep_.loop(link_.connectedSlots() > 0)) reportNeighbours();
+  if (reportOffered_ && link_.neighboursPending() == 0) settleNeighbours();
+  inSweep_ = false;
+}
+
+void Observer::beginNeighbours(observer::NeighbourLink& link, AirtimeGate* gate) {
+  sweep_.begin(table_, link, gate, &uptimeMs);
+  sweep_.configure(sweepSettings_);  // again, now that the sweep has a clock
+}
+
+void Observer::reportNeighbours() {
+  // The report of the cycle that just finished (Dialect.h, formatNeighbours), built once here
+  // and offered to the slots; what becomes of it is recorded when the hand-over ends.
+  observer::NeighbourField fields[observer::kNeighbourCap];
+  char keys[observer::kNeighbourCap][2 * observer::kNeighbourKeyLen + 1];
+  const uint32_t now = millis();
+  const int count = sweep_.snapshotCount();
+  for (int i = 0; i < count; i++) {
+    const observer::SweepEntry& e = sweep_.entry(i);
+    observer::hexUpper(e.key, observer::kNeighbourKeyLen, keys[i], sizeof keys[i]);
+    fields[i].pubkeyHex = keys[i];
+    fields[i].snr = static_cast<float>(e.snrQ4) / 4.0f;
+    fields[i].heardSecsAgo = (now - e.heardAtMs) / 1000u;
+    fields[i].scopes = e.scopes;
+    fields[i].status = observer::queryStatusName(e.status);
+  }
+  observer::NeighboursFields f;
+  f.origin = origin();
+  f.originId = publicKeyHex_;
+  microsNow(clock_, f.atEpoch, f.atMicros);
+  f.totalNeighbours = count;
+  f.queriedNeighbours = sweep_.queriedCount();
+  f.selfScopes = "";  // an exit node forwards no flood: it has no regions of its own, as a repeater with none says
+  f.defaultScope = floodScope_ != nullptr && floodScope_[0] != '\0' ? floodScope_ : "*";
+  f.entries = fields;
+  f.count = count;
+  neighboursLen_ = observer::formatNeighbours(f, neighbours_, sizeof neighbours_);
+  if (neighboursLen_ == 0) {
+    sweep_.noteReport(observer::ReportResult::Failed);
+    logf(LogLevel::Warn, "neighbours: the report could not be built");
+    return;
+  }
+  char why[observer::kReasonCap];
+  switch (link_.offerNeighbours(neighbours_, neighboursLen_, why, sizeof why)) {
+    case observer::Connections::ReportOffer::NoSlot:
+      sweep_.noteReport(observer::ReportResult::NoSlot);
+      logf(LogLevel::Info, "neighbours: report built (%u bytes, %d neighbours, %d responded); %s", static_cast<unsigned>(neighboursLen_),
+           count, sweep_.respondedCount(), why);
+      return;
+    case observer::Connections::ReportOffer::SkippedHeap:
+      sweep_.noteReport(observer::ReportResult::SkippedHeap);
+      logf(LogLevel::Warn, "neighbours: report built (%u bytes, %d neighbours, %d responded) and skipped this cycle: %s",
+           static_cast<unsigned>(neighboursLen_), count, sweep_.respondedCount(), why);
+      return;
+    case observer::Connections::ReportOffer::Queued:
+      reportOffered_ = true;
+      logf(LogLevel::Info, "neighbours: report built (%u bytes, %d neighbours, %d responded), going to %d slot(s)",
+           static_cast<unsigned>(neighboursLen_), count, sweep_.respondedCount(), link_.neighboursPending());
+      return;
+  }
+}
+
+void Observer::settleNeighbours() {
+  reportOffered_ = false;
+  const int taken = link_.neighboursTaken();
+  sweep_.noteReport(taken > 0 ? observer::ReportResult::Ok : observer::ReportResult::Failed);
+  logf(taken > 0 ? LogLevel::Info : LogLevel::Warn, "neighbours: the report went to %d slot(s), %d would not take it", taken,
+       link_.neighboursFailed());
+}
 
 void Observer::setLinkUp(bool up) { link_.setLinkUp(up); }
 
@@ -154,6 +242,15 @@ size_t Observer::formatStatus(const char* status, char* out, size_t cap) {
   microsNow(clock_, f.atEpoch, f.atMicros);
   f.repeat = "off";  // an exit node forwards nothing (AgentMesh::allowPacketForward)
   f.uptimeSecs = static_cast<int>(millis() / 1000);
+  // The fields MeshView showed as "-" (task p1.8-33): the board's, through the statIfKnown path.
+  if (boardStats_ != nullptr) {
+    BoardStats s;
+    boardStats_(s);
+    f.noiseFloor = s.noiseFloor;
+    f.txAirSecs = s.txAirSecs;
+    f.rxAirSecs = s.rxAirSecs;
+    f.batteryMv = s.batteryMv;
+  }
   f.internalHeap = static_cast<int>(ESP.getFreeHeap());
   f.heapLargest = static_cast<int>(ESP.getMaxAllocHeap());
   f.mqttSlotsUp = link_.connectedSlots();

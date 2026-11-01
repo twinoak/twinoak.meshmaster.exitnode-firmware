@@ -291,6 +291,21 @@ jobs:
           optional. The Danish observer guide's lines (`set mqtt1.preset custom`, …) work as typed too,
           except its MeshMapper line on a V3.
 
+          **Naboer (neighbours)**: the board also publishes the repeaters it hears at zero hops and
+          the scopes each one answers with — MeshView's *Direct neighbours* — once a day. Nothing to
+          type: `set mqtt.neighbors on` is the default (the guide's line is accepted as typed, and
+          `set mqtt.neighbors off` turns it off). To try it now, and see the table:
+
+          ```
+          discover.scopes
+          get mqtt.status
+          ```
+
+          Sixty seconds of discovery, then one regions request per neighbour on the board's own
+          airtime budget, and the report goes to every connected broker; `get mqtt.status`'s `nbr:`
+          line says when the next one runs and how the last one went. The status message now carries
+          the noise floor, the air time and the battery, which MeshView showed as *—*.
+
           **The flood scope**: nothing to type. `set flood.scope dk` is the default — the Danish
           standard's region, which every repeater that follows it forwards — and it needs typing only
           to change it:

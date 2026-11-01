@@ -129,6 +129,25 @@ void handUplinkToObserver() {
   }
 }
 
+// The neighbour sweep's "a job is open" (task p1.8-33, src/observer/Neighbours.h): from the
+// claim to the end of the job, whatever the mesh's peer says, nothing of the sweep goes on the air.
+bool jobOpen() { return jobs.openJob() != nullptr; }
+
+// What the board measures for the observer's status message (src/observer/Observer.h,
+// BoardStats): the radio's noise floor, the dispatcher's air-time counters in whole seconds,
+// and the battery as MeshCore's board object reads it - both Heltecs measure one on an ADC pin
+// (variants/heltec_v3/HeltecV3Board.h:53, variants/heltec_v4/HeltecV4Board.cpp:43 at the pin), and
+// a board on USB with nothing on that pin reads noise, which is left out below a volt: this
+// firmware's own line, since the observer firmware publishes whatever the ADC says.
+void fillBoardStats(mm::BoardStats& s) {
+  if (!radio_ok) return;
+  s.noiseFloor = radio_driver.getNoiseFloor();
+  s.txAirSecs = static_cast<int>(the_mesh.getTotalAirTime() / 1000);
+  s.rxAirSecs = static_cast<int>(the_mesh.getReceiveAirTime() / 1000);
+  const uint16_t mv = board.getBattMilliVolts();
+  s.batteryMv = mv >= 1000 ? static_cast<int>(mv) : -1;
+}
+
 // ---- the radio ------------------------------------------------------------------------------
 
 void applyRadioSettings() {
@@ -315,6 +334,9 @@ void printMqttStatus(Stream& out) {
   }
   observer.describeGate(line, sizeof line);
   out.printf("memory    %s\r\n", line);
+  // The neighbour report's schedule and its last outcome (task p1.8-33; `discover.scopes` prints the table).
+  observer.describeNeighbours(line, sizeof line);
+  out.printf("%s\r\n", line);
   out.printf("uplink    %lu memory failure(s) so far, %lu call(s)", static_cast<unsigned long>(server.memoryFailures()),
              static_cast<unsigned long>(server.line().counters().calls));
   const mm::AgentClient::HeapCost& c = server.lastCost();
@@ -340,6 +362,61 @@ void printMqttStatus(Stream& out) {
       out.printf("stack     slot %d task: %lu bytes, the least ever free %lu\r\n", s + 1,
                  static_cast<unsigned long>(mm::MqttClient::kTaskStackBytes), static_cast<unsigned long>(low));
     }
+  }
+}
+
+// `discover.scopes` (task p1.8-33): the neighbour table as it stands - the repeaters heard at
+// zero hops, with what the last cycle's regions request found for each - and a cycle of the
+// sweep started now: sixty seconds of node discovery, then one regions request per neighbour,
+// newest first, each on the airtime budget, and the report to every connected slot. The cycle
+// runs in the background of the main loop; the log says how it went, and `get mqtt.status`'s
+// `nbr:` line has the schedule and the last outcome.
+void printDiscoverScopes(Stream& out) {
+  const mm::observer::NeighbourTable& table = observer.neighbourTable();
+  const mm::observer::NeighbourSweep& sweep = observer.sweep();
+  char line[160];
+  observer.describeNeighbours(line, sizeof line);
+  out.printf("neighbours %d heard at zero hops (table of %d); %s\r\n", table.count(), mm::observer::kNeighbourCap, line);
+  if (table.count() == 0) {
+    out.println("  none yet: a repeater's advert with no hops, or an answer to the node discovery, puts one here");
+  } else {
+    out.println("  key           snr     rssi  heard       last cycle");
+    const uint32_t now = millis();
+    for (int i = 0; i < mm::observer::kNeighbourCap; i++) {
+      const mm::observer::Neighbour& n = table.at(i);
+      if (!n.used) continue;
+      char key[2 * PUB_KEY_SIZE + 1];
+      mesh::Utils::toHex(key, n.key, PUB_KEY_SIZE);
+      // What the last cycle found for this key, if it was in that cycle's snapshot.
+      const char* found = "-";
+      const char* scopes = "";
+      for (int j = 0; j < sweep.snapshotCount(); j++) {
+        if (std::memcmp(sweep.entry(j).key, n.key, PUB_KEY_SIZE) == 0) {
+          found = mm::observer::queryStatusName(sweep.entry(j).status);
+          scopes = sweep.entry(j).scopes;
+          break;
+        }
+      }
+      char rssi[12];
+      if (n.rssi == mm::observer::kNeighbourNoRssi) {
+        std::snprintf(rssi, sizeof rssi, "-");
+      } else {
+        std::snprintf(rssi, sizeof rssi, "%d", n.rssi);
+      }
+      out.printf("  %.12s  %6.2f  %4s  %6lu s ago  %s%s%s\r\n", key, static_cast<double>(n.snrQ4) / 4.0, rssi,
+                 static_cast<unsigned long>((now - n.heardAtMs) / 1000), found, scopes[0] != '\0' ? ": " : "", scopes);
+    }
+  }
+  if (!radio_ok) {
+    out.println("cycle     not started: the radio did not initialise");
+    return;
+  }
+  if (observer.discoverScopes()) {
+    out.printf("cycle     starts now: %lu s of node discovery, then one regions request per neighbour on the airtime budget; "
+               "the report goes to every connected slot (get mqtt.status: nbr)\r\n",
+               static_cast<unsigned long>(mm::observer::kDiscoveryWindowMs / 1000));
+  } else {
+    out.println("cycle     already running (the nbr line above says which phase)");
   }
 }
 
@@ -641,6 +718,18 @@ void setup() {
   observer.begin(settings, identity_ok ? &the_mesh.self_id : nullptr, identity_ok ? public_key_hex : nullptr,
                  board.getManufacturerName(), &clockForLog, mqttClients, observerEnv);
   if (identity_ok) the_mesh.setRxTap(&observer);
+  // The neighbours (task p1.8-33): the mesh fills the observer's table from zero-hop repeater
+  // adverts and discovery answers, the sweep sends its requests through the mesh on the jobs'
+  // own airtime gate and never while a job is open, and the status message carries what the
+  // radio and the board measure.
+  if (identity_ok) {
+    the_mesh.setNeighbourTable(&observer.neighbourTable());
+    the_mesh.setBusyHook(&jobOpen);
+    the_mesh.setPump(&pumpDuringAJob);
+    observer.beginNeighbours(the_mesh, &jobs.gate());
+    observer.setDefaultScope(the_mesh.floodScope());
+  }
+  observer.setBoardStats(&fillBoardStats);
   // And the observer's state in the heartbeat (task p1.7-28): the loop asks this object at every
   // heartbeat and writes what it says, which is nothing at all while the observer is off. The
   // library knows nothing of brokers; MeshMaster shows the state and configures none of it
@@ -655,7 +744,7 @@ void setup() {
   mm::ConsoleHost host = {&printStatus,  &printMesh,    &printServer, &printJobs,
                           &printSessions, &printErrors,  &printReboots, &printDump,
                           &printWifi,     &doReboot,     &onSettingChanged, &onErased,
-                          &printMqttStatus, &printKeyNote};
+                          &printMqttStatus, &printKeyNote, &printDiscoverScopes};
   console.begin(Serial, settings, host);
   board.onBootComplete();
 }

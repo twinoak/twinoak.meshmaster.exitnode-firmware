@@ -3,7 +3,8 @@
 //
 //   {iata}     mqtt.iata, uppercase                             MQTTBridge.cpp:956-964
 //   {device}   the node's public key, 64 uppercase hex           examples/simple_repeater/MyMesh.cpp:1222-1226
-//   {type}     "status" or "packets"                             MQTTTopicRouter.h:30-38 ("raw" and "neighbors" are not published here)
+//   {type}     "status", "packets" or, since task p1.8-33,       MQTTTopicRouter.h:30-38 ("raw" is not published here)
+//              "neighbors"
 //
 // A preset slot, and a custom slot with no template of its own, publish to
 // meshcore/{iata}/{device}/{type}, and only once mqtt.iata is a real code - three letters or
@@ -21,7 +22,7 @@
 namespace mm {
 namespace observer {
 
-enum class MessageType { Status, Packets };
+enum class MessageType { Status, Packets, Neighbours };
 
 constexpr const char* kDefaultTopic = "meshcore/{iata}/{device}/{type}";
 constexpr size_t kTopicCap = 128;  // the observer firmware's own topic buffers (MQTTBridge.cpp:3114, :4109)

@@ -254,5 +254,94 @@ size_t formatStatus(const StatusFields& f, char* out, size_t cap) {
   return finish(w, out, cap);
 }
 
+namespace {
+
+// One neighbours entry (addNeighborsMessageEntry, MQTTPayloadBuilder.cpp:244-258), into `w`.
+void writeNeighbour(JsonWriter& w, const NeighbourField& n) {
+  w.comma();
+  w.beginObject();
+  w.key("pubkey");
+  w.string(n.pubkeyHex);
+  w.key("snr");
+  w.number(static_cast<double>(n.snr));  // a quarter-dB value: the same shortest decimal ArduinoJson writes
+  w.key("heard_secs_ago");
+  w.integer(static_cast<long long>(n.heardSecsAgo));
+  w.key("scopes");
+  w.string(n.scopes != nullptr ? n.scopes : "");
+  w.key("status");
+  w.string(n.status != nullptr ? n.status : "");
+  w.endObject();
+}
+
+// The message with `truncated` as given, and as many entries as fit: how many went in, or -1
+// when not even the header fit. The observer firmware builds the document, sets `truncated`
+// once an entry does not fit and serialises; the key keeps its place in the order it was
+// inserted. This writer streams, so the header is written knowing the answer - the caller
+// writes once with false and again with true if the first pass dropped anything.
+int writeNeighbours(const NeighboursFields& f, bool truncated, char* out, size_t cap, const char* timestamp) {
+  JsonWriter w(out, cap);
+  w.beginObject();
+  w.key("timestamp");
+  w.string(timestamp);
+  w.key("origin");
+  w.string(f.origin);
+  w.key("origin_id");
+  w.string(f.originId);
+  w.key("total_neighbors");
+  w.integer(f.totalNeighbours);
+  w.key("queried_neighbors");
+  w.integer(f.queriedNeighbours);
+  w.key("truncated");
+  w.boolean(truncated);
+  w.key("self");
+  w.beginObject();
+  w.key("scopes");
+  w.string(f.selfScopes != nullptr ? f.selfScopes : "");
+  w.key("default_scope");
+  w.string(f.defaultScope != nullptr ? f.defaultScope : "");
+  w.endObject();
+  w.key("neighbors");
+  w.beginArray();
+  if (w.overflowed()) return -1;
+  int written = 0;
+  for (int i = 0; i < f.count && f.entries != nullptr; i++) {
+    // Measured apart first, so that an entry that does not fit leaves the buffer as it was:
+    // the entry's bytes, a comma before it, "]}" after it, and the NUL.
+    char entry[kNeighbourEntryCap];
+    JsonWriter m(entry, sizeof entry);
+    writeNeighbour(m, f.entries[i]);
+    const size_t comma = written > 0 ? 1 : 0;
+    if (m.overflowed() || w.length() + comma + m.length() + 2 + 1 > cap) break;
+    writeNeighbour(w, f.entries[i]);
+    written++;
+  }
+  w.endArray();
+  w.endObject();
+  if (w.overflowed()) return -1;
+  return written;
+}
+
+}  // namespace
+
+size_t formatNeighbours(const NeighboursFields& f, char* out, size_t cap, int* written, bool* truncated) {
+  if (out == nullptr || cap == 0) return 0;
+  out[0] = '\0';
+  char timestamp[kTimestampCap];
+  formatTimestamp(f.atEpoch, f.atMicros, timestamp, sizeof timestamp);
+
+  int n = writeNeighbours(f, false, out, cap, timestamp);
+  bool cut = n >= 0 && n < f.count;
+  if (cut) n = writeNeighbours(f, true, out, cap, timestamp);  // one byte longer: at most one entry fewer
+  if (n < 0) {
+    out[0] = '\0';
+    if (written != nullptr) *written = 0;
+    if (truncated != nullptr) *truncated = false;
+    return 0;
+  }
+  if (written != nullptr) *written = n;
+  if (truncated != nullptr) *truncated = cut;
+  return std::strlen(out);
+}
+
 }  // namespace observer
 }  // namespace mm

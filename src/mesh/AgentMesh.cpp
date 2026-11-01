@@ -171,7 +171,23 @@ mesh::DispatcherAction AgentMesh::onRecvPacket(mesh::Packet* pkt) {
   // the peer of the job (searchPeersByHash).
   if (type == PAYLOAD_TYPE_ADVERT) return mesh::Mesh::onRecvPacket(pkt);
   if (jobFrame && waiting_ && peerSet_) return mesh::Mesh::onRecvPacket(pkt);
+  // A control frame while this board's own node discovery is open (task p1.8-33): plaintext,
+  // zero hop, and read by onControlDataRecv alone - Mesh::onRecvPacket's control arm releases
+  // it afterwards whatever it was (Mesh.cpp:70-76). At any other time it is released here.
+  if (type == PAYLOAD_TYPE_CONTROL && discoverTag_ != 0 && !elapsed(millis(), discoverUntil_)) return mesh::Mesh::onRecvPacket(pkt);
   return ACTION_RELEASE;
+}
+
+void AgentMesh::onControlDataRecv(mesh::Packet* pkt) {
+  if (table_ == nullptr || discoverTag_ == 0) return;
+  uint8_t key[observer::kNeighbourKeyLen];
+  if (!observer::readDiscoveryResponse(pkt->payload, pkt->payload_len, discoverTag_, key)) return;
+  if (std::memcmp(key, self_id.pub_key, PUB_KEY_SIZE) == 0) return;  // our own, echoed
+  discoveryResponses_++;
+  table_->put(key, static_cast<int8_t>(pkt->getSNR() * 4.0f), hasRssi_ ? static_cast<int16_t>(rssiDbm_) : kNoRssi, millis());
+  char hex[16];
+  mesh::Utils::toHex(hex, key, 4);
+  LOG_D("neighbours: %s answered the node discovery, snr %.2f", hex, static_cast<double>(pkt->getSNR()));
 }
 
 void AgentMesh::onAdvertRecv(mesh::Packet* pkt, const mesh::Identity& id, uint32_t, const uint8_t* app_data,
@@ -214,6 +230,8 @@ void AgentMesh::onAdvertRecv(mesh::Packet* pkt, const mesh::Identity& id, uint32
   counters_.adverts++;
   remember(heard);
   if (ring_ != nullptr) ring_->push(heard);
+  // A repeater heard at zero hops is a neighbour (task p1.8-33; the rule is the table's).
+  if (table_ != nullptr) table_->offer(heard.publicKey, heard.advType, heard.hops, heard.snrQ4, heard.rssi, heard.heardAtMillis);
 
   // The key, not the name: `mesh` on the console is where a name is read, once, by a person.
   char key[16];
@@ -581,6 +599,81 @@ void AgentMesh::onTraceRecv(mesh::Packet* pkt, uint32_t tag, uint32_t, uint8_t f
   reply_.traceSnrCount = hops > MAX_PATH_SIZE ? MAX_PATH_SIZE : hops;
   std::memcpy(reply_.traceSnrs, path_snrs, reply_.traceSnrCount);
   reply_.traceFinalSnr = pkt->getSNR();
+}
+
+// ------------------------------------------------------------------ the neighbours (task p1.8-33)
+
+namespace {
+// A direct send on an empty path is a zero-hop send: ROUTE_TYPE_DIRECT and path_len 0, which is
+// what Mesh's own zero-hop send sets (Mesh.cpp:717-726 at d9296435) - and it goes through the one
+// direct send this file has, so it carries no transport code (test/test_flood_scope holds that).
+const uint8_t kNoPath[1] = {0};
+}  // namespace
+
+bool AgentMesh::sendDiscovery(uint32_t windowMs) {
+  if (peerSet_) return false;
+  uint8_t data[observer::kDiscoveryRequestLen];
+  uint32_t tag = 0;
+  do {
+    getRNG()->random(reinterpret_cast<uint8_t*>(&tag), 4);
+  } while (tag == 0);  // 0 is "no discovery open"
+  observer::discoveryRequest(tag, data);
+  mesh::Packet* pkt = createControlData(data, sizeof data);
+  if (pkt == nullptr) return false;
+  discoverTag_ = tag;
+  discoverUntil_ = millis() + windowMs;
+  discoveryRequests_++;
+  logFrame("tx", pkt, true);
+  sendDirect(pkt, kNoPath, 0);
+  LOG_I("neighbours: node discovery sent (zero hop, repeaters); taking answers for %lu s", static_cast<unsigned long>(windowMs / 1000));
+  return true;
+}
+
+uint32_t AgentMesh::queryTimeoutMs() const {
+  // neighborDiscoverQueryTimeoutMs (examples/simple_repeater/MyMesh.cpp:1997-2001 at d664d89d):
+  // the repeater's SERVER_RESPONSE_DELAY (300 ms, MyMesh.cpp:37 at the pin), its whole CAD
+  // deferral window, one retry's overshoot, and the air time of a full packet twice - one of
+  // priority 0 ahead of the reply, and the reply itself - at this radio's settings.
+  const uint32_t responseAirtime = _radio->getEstAirtimeFor(MAX_PACKET_PAYLOAD + 2);
+  return 300u + getCADFailMaxDuration() + 360u + responseAirtime * 2u;
+}
+
+observer::QueryStatus AgentMesh::queryRegions(const uint8_t key[observer::kNeighbourKeyLen], char* scopes, size_t cap) {
+  if (scopes != nullptr && cap > 0) scopes[0] = '\0';
+  if (peerSet_ || key == nullptr) return observer::QueryStatus::SendFailed;
+  // The peer, as beginJob sets it: the reply is decrypted only because its source hash is this
+  // key's (searchPeersByHash), and endJob below wipes the secret and forgets the peer.
+  endJob();
+  peer_ = mesh::Identity(key);
+  peerSet_ = true;
+  haveOutPath_ = false;
+
+  uint8_t plain[observer::kRegionsRequestLen];
+  const uint32_t tag = getRTCClock()->getCurrentTimeUnique();
+  observer::regionsRequest(tag, plain);
+  mesh::Packet* pkt = createAnonDatagram(PAYLOAD_TYPE_ANON_REQ, self_id, peer_, sharedSecret(), plain, sizeof plain);
+  if (pkt == nullptr) {
+    endJob();
+    return observer::QueryStatus::SendFailed;
+  }
+  regionsQueries_++;
+  logFrame("tx", pkt, true);
+  sendDirect(pkt, kNoPath, 0);  // direct on an empty path: the repeater answers a regions request only when it was direct
+
+  // The repeater reflects the tag as the reply's first four bytes (handleAnonRegionsReq:
+  // "prefix with sender_timestamp, like a tag"), so the reply is matched exactly as a REQ's is.
+  const bool got = awaitReply(tag, queryTimeoutMs(), pump_);
+  observer::QueryStatus status = observer::QueryStatus::Timeout;
+  if (got && reply_.kind == MeshReply::Kind::Response) {
+    observer::readRegionsReply(reply_.data, reply_.len, scopes, cap);
+    status = observer::QueryStatus::Responded;
+  }
+  char hex[16];
+  mesh::Utils::toHex(hex, key, 4);
+  LOG_I("neighbours: regions request to %s: %s%s%s", hex, observer::queryStatusName(status),
+        status == observer::QueryStatus::Responded ? ", scopes " : "", status == observer::QueryStatus::Responded ? scopes : "");
+  endJob();
+  return status;
 }
 
 }  // namespace mm

@@ -43,15 +43,16 @@ std::string setReply(const mm::KeyDef& key) {
 
 // ---- the keys -------------------------------------------------------------------------------
 
-TEST(Keys, TheTableHasTheThirtyKeysTheTasksAskFor) {
-  // The twelve of phase 1, the two of the flood scope (task p1.8-32) and the sixteen of the
-  // observer (task p1.7-26), in `get`'s order.
+TEST(Keys, TheTableHasTheThirtyTwoKeysTheTasksAskFor) {
+  // The twelve of phase 1, the two of the flood scope (task p1.8-32), the sixteen of the
+  // observer (task p1.7-26) and the two of its neighbour report (task p1.8-33), in `get`'s order.
   const char* expected[] = {"wifi.ssid",      "wifi.pass",      "meshmaster.url",  "meshmaster.token", "radio.freq",
                             "radio.bw",       "radio.sf",       "radio.cr",        "radio.tx",         "log.level",
                             "log.frames",     "display.timeout", "flood.scope",    "flood.unscoped",   "mqtt.origin",
-                            "mqtt.iata",      "mqtt.owner",     "mqtt.email",      "mqtt1.preset",     "mqtt1.server",
-                            "mqtt1.audience", "mqtt1.topic",    "mqtt1.username",  "mqtt1.password",   "mqtt2.preset",
-                            "mqtt2.server",   "mqtt2.audience", "mqtt2.topic",     "mqtt2.username",   "mqtt2.password"};
+                            "mqtt.iata",      "mqtt.owner",     "mqtt.email",      "mqtt.neighbors",   "mqtt.neighbors.interval",
+                            "mqtt1.preset",   "mqtt1.server",   "mqtt1.audience",  "mqtt1.topic",      "mqtt1.username",
+                            "mqtt1.password", "mqtt2.preset",   "mqtt2.server",    "mqtt2.audience",   "mqtt2.topic",
+                            "mqtt2.username", "mqtt2.password"};
   ASSERT_EQ(kKeyCount, static_cast<int>(sizeof expected / sizeof expected[0]));
   for (int i = 0; i < kKeyCount; i++) {
     EXPECT_STREQ(expected[i], kKeys[i].name);
@@ -137,6 +138,8 @@ TEST(Keys, EveryKeyAcceptsAValidValueAndSetIsAcceptedForIt) {
       {"mqtt.iata", "AAR"},
       {"mqtt.owner", "0123456789ABCDEF0123456789abcdef0123456789ABCDEF0123456789abcdef"},
       {"mqtt.email", "thomas@example.dk"},
+      {"mqtt.neighbors", "off"},
+      {"mqtt.neighbors.interval", "48"},
       {"mqtt1.preset", "meshview"},
       {"mqtt1.server", "wss://mqtt.meshview.dk:443/mqtt"},
       {"mqtt1.audience", "mqtt.meshview.dk"},
@@ -520,6 +523,32 @@ TEST(Set, AFloodScopeIsARegionNameOrNothingAtAll) {
   EXPECT_EQ(describe(*mm::findKey("flood.scope"), nullptr), "flood.scope unset (dk)");
   EXPECT_EQ(describe(*mm::findKey("flood.unscoped"), nullptr), "flood.unscoped unset (retry)");
   EXPECT_EQ(describe(*mm::findKey("flood.scope"), "*"), "flood.scope *");
+}
+
+// The neighbour report's two keys and its command (task p1.8-33): the observer firmware's names,
+// its range for the interval, and `discover.scopes` as typed there - with no argument.
+TEST(Neighbours, TheTwoKeysTakeTheObserverFirmwaresValuesAndTheCommandTakesNoArgument) {
+  EXPECT_TRUE(parseLine("set mqtt.neighbors on").ok);
+  EXPECT_TRUE(parseLine("set mqtt.neighbors off").ok);
+  EXPECT_FALSE(parseLine("set mqtt.neighbors yes").ok);
+  EXPECT_STREQ("mqtt.neighbors: on | off", parseLine("set mqtt.neighbors yes").error);
+  EXPECT_EQ("mqtt.neighbors unset (on)", describe(*mm::findKey("mqtt.neighbors"), nullptr)) << "on by default here";
+  EXPECT_EQ("mqtt.neighbors.interval unset (24)", describe(*mm::findKey("mqtt.neighbors.interval"), nullptr));
+  EXPECT_TRUE(parseLine("set mqtt.neighbors.interval 12").ok);
+  EXPECT_TRUE(parseLine("set mqtt.neighbors.interval 336").ok);
+  EXPECT_FALSE(parseLine("set mqtt.neighbors.interval 11").ok);
+  EXPECT_FALSE(parseLine("set mqtt.neighbors.interval 337").ok);
+  EXPECT_STREQ("mqtt.neighbors.interval: out of range, 12..336", parseLine("set mqtt.neighbors.interval 6").error);
+  EXPECT_FALSE(parseLine("set mqtt.neighbors.interval daily").ok);
+
+  const ParseResult r = parseLine("discover.scopes");
+  EXPECT_TRUE(r.ok);
+  EXPECT_EQ(Verb::DiscoverScopes, r.command.verb);
+  EXPECT_EQ(Verb::DiscoverScopes, parseLine("  discover.scopes \r\n").command.verb);
+  const ParseResult x = parseLine("discover.scopes now");
+  EXPECT_FALSE(x.ok);
+  EXPECT_STREQ("discover.scopes takes no argument", x.error);
+  EXPECT_FALSE(parseLine("discover.neighbors").ok) << "the observer firmware's other command is not here: the sweep does its discovery";
 }
 
 int main(int argc, char** argv) {

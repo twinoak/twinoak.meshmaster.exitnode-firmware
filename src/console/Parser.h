@@ -23,6 +23,7 @@
 //   erase confirm            forget every setting (the identity stays); "confirm" is the word
 //   get mqtt.presets         the broker presets a slot can take (task p1.7-26)
 //   get mqtt.status          one line per broker slot: state, since, published, dropped, last error (task p1.7-27)
+//   discover.scopes          the repeaters heard at zero hops, and one cycle of the scope sweep now (task p1.8-33)
 //
 // Since task p1.7-26 the lines of the observer firmware's Danish guide are understood as well:
 // `set wifi.pwd ...` is `set wifi.pass ...` (Keys.cpp, findKey), and `set timezone ...` and
@@ -58,6 +59,7 @@ enum class Verb : unsigned char {
   Note,    // a line accepted and answered with one line of explanation: `set timezone ...`
   Presets, // `get mqtt.presets`
   MqttStatus, // `get mqtt.status`
+  DiscoverScopes,  // `discover.scopes`: the neighbour table, and one cycle of the scope sweep now (task p1.8-33)
 };
 
 struct Command {

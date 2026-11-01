@@ -88,6 +88,12 @@ void Connections::report(LogLevel level, const char* fmt, ...) {
 }
 
 void Connections::enter(Slot& s, SlotState state) {
+  // A slot that leaves `connected` with a neighbours report still to take is a slot that will
+  // not take it: the report is this cycle's, and the next cycle makes a new one.
+  if (state != SlotState::Connected && s.reportPending) {
+    s.reportPending = false;
+    neighboursFailed_++;
+  }
   s.state = state;
   s.sinceMillis = env_.millis != nullptr ? env_.millis() : 0;
   s.sinceEpoch = env_.epoch != nullptr ? env_.epoch() : 0;
@@ -128,12 +134,19 @@ void Connections::configure(const ObserverSettings& settings, bool enabled, cons
     }
     char topicStatus[kTopicCap] = {0};
     char topicPackets[kTopicCap] = {0};
+    char topicNeighbours[kTopicCap] = {0};
     if (r.active) {
       const bool ok = buildTopic(r.topic, settings.iata, publicKeyHex_, MessageType::Status, topicStatus, sizeof topicStatus) &&
                       buildTopic(r.topic, settings.iata, publicKeyHex_, MessageType::Packets, topicPackets, sizeof topicPackets);
       if (!ok) {
         r.active = false;
         r.why = "the topic cannot be built";
+      }
+      // The neighbours topic (task p1.8-33): a template with no {type} would send the report to
+      // the packets topic, so such a slot gets none (the task's out-of-scope line).
+      if (ok && buildTopic(r.topic, settings.iata, publicKeyHex_, MessageType::Neighbours, topicNeighbours, sizeof topicNeighbours) &&
+          std::strcmp(topicNeighbours, topicPackets) == 0) {
+        topicNeighbours[0] = '\0';
       }
     }
     // What the connection is made of: a change to any of it means a new session.
@@ -147,6 +160,7 @@ void Connections::configure(const ObserverSettings& settings, bool enabled, cons
     hash = hashString(hash, r.password);
     hash = hashString(hash, topicStatus);
     hash = hashString(hash, topicPackets);
+    hash = hashString(hash, topicNeighbours);
     hash = hashString(hash, r.auth == Auth::Jwt ? owner_ : "");
     hash = hashString(hash, r.auth == Auth::Jwt ? email_ : "");
     hash = hashString(hash, r.allowRetain ? "retain" : "");
@@ -156,6 +170,7 @@ void Connections::configure(const ObserverSettings& settings, bool enabled, cons
     s.cfg = r;  // the pointers may have moved even when the text has not
     std::memcpy(s.topicStatus, topicStatus, sizeof topicStatus);
     std::memcpy(s.topicPackets, topicPackets, sizeof topicPackets);
+    std::memcpy(s.topicNeighbours, topicNeighbours, sizeof topicNeighbours);
     if (!changed) continue;
     s.configHash = hash;
 
@@ -590,8 +605,91 @@ void Connections::serveConnected(int i) {
     }
   }
   if (s.statusPending || reached(now, s.statusDueAt)) publishStatus(i);
+  pumpReport(i);
   pumpQueue(i);
 }
+
+// ---- the neighbours report ---------------------------------------------------------------------
+
+bool Connections::heapAllowsReport(size_t bytes, char* why, size_t cap) const {
+  // The outbox's copy of the report on top of what the uplink's next call needs (the gate's own
+  // arithmetic, less the slot that is already open): free heap holds the copy, the dip, the
+  // floor and the margin, and one block holds the copy with the outbox's item around it.
+  const uint32_t free = env_.freeHeap != nullptr ? env_.freeHeap() : 0xFFFFFFFFu;
+  const uint32_t largest = env_.largestBlock != nullptr ? env_.largestBlock() : 0xFFFFFFFFu;
+  const uint32_t need = static_cast<uint32_t>(bytes) + uplinkDipBytes() + kHeapFloorBytes + kGateMarginBytes;
+  const uint32_t needLargest = static_cast<uint32_t>(bytes) + 256u;
+  if (free < need || largest < needLargest) {
+    if (why != nullptr && cap > 0) {
+      std::snprintf(why, cap, "heap %lu free, largest block %lu; a %lu-byte report needs %lu and %lu", static_cast<unsigned long>(free),
+                    static_cast<unsigned long>(largest), static_cast<unsigned long>(bytes), static_cast<unsigned long>(need),
+                    static_cast<unsigned long>(needLargest));
+    }
+    return false;
+  }
+  return true;
+}
+
+Connections::ReportOffer Connections::offerNeighbours(const char* json, size_t len, char* why, size_t whyCap) {
+  if (why != nullptr && whyCap > 0) why[0] = '\0';
+  // The previous report's hand-over, if any slot still had it, is over: this one replaces it.
+  for (Slot& s : slots_) s.reportPending = false;
+  neighboursJson_ = json;
+  neighboursLen_ = len;
+  neighboursTaken_ = 0;
+  neighboursFailed_ = 0;
+  if (json == nullptr || len == 0) return ReportOffer::NoSlot;
+  int takers = 0;
+  for (const Slot& s : slots_) {
+    if (s.state == SlotState::Connected && s.topicNeighbours[0] != '\0') takers++;
+  }
+  if (takers == 0) {
+    if (why != nullptr && whyCap > 0) std::snprintf(why, whyCap, "no connected slot with a neighbours topic");
+    return ReportOffer::NoSlot;
+  }
+  if (!heapAllowsReport(len, why, whyCap)) {
+    report(LogLevel::Warn, "observer: the neighbours report is skipped this cycle: %s", why != nullptr ? why : "heap");
+    return ReportOffer::SkippedHeap;
+  }
+  for (Slot& s : slots_) {
+    if (s.state == SlotState::Connected && s.topicNeighbours[0] != '\0') s.reportPending = true;
+  }
+  return ReportOffer::Queued;
+}
+
+void Connections::pumpReport(int i) {
+  Slot& s = slots_[i];
+  if (!s.reportPending || neighboursJson_ == nullptr || neighboursLen_ == 0) return;
+  // One at a time: this slot is handed the report only when nothing of the previous slot's is
+  // still in its outbox, and when its own outbox is empty - the report is far over kOutboxBytes
+  // by itself, so the usual bound would never let it through.
+  for (int j = 0; j < i; j++) {
+    if (slots_[j].reportPending) return;
+  }
+  if (clients_[i]->outboxBytes() > 0) return;
+  s.reportPending = false;
+  if (clients_[i]->publish(s.topicNeighbours, neighboursJson_, neighboursLen_, 0, s.cfg.allowRetain)) {
+    s.stats.published++;
+    neighboursTaken_++;
+    report(LogLevel::Info, "observer: slot %d %s: the neighbours report (%lu bytes) is handed to the broker%s", i + 1, s.cfg.name,
+           static_cast<unsigned long>(neighboursLen_), s.cfg.allowRetain ? ", retained" : "");
+  } else {
+    neighboursFailed_++;
+    report(LogLevel::Warn, "observer: slot %d %s: the client would not take the neighbours report", i + 1, s.cfg.name);
+  }
+}
+
+int Connections::neighboursPending() const {
+  int n = 0;
+  for (const Slot& s : slots_) {
+    if (s.reportPending) n++;
+  }
+  return n;
+}
+
+int Connections::neighboursTaken() const { return neighboursTaken_; }
+
+int Connections::neighboursFailed() const { return neighboursFailed_; }
 
 // ---- reading it back --------------------------------------------------------------------------
 

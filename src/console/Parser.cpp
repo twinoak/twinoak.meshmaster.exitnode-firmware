@@ -105,6 +105,11 @@ ParseResult parseLine(const char* line) {
     if (hasRest) return refuse("reboot takes no argument");
     return accept(Verb::Reboot);
   }
+  if (std::strcmp(verb, "discover.scopes") == 0) {
+    // The observer firmware's command, as typed there (MyMesh.cpp:1717-1720 at d664d89d: no options).
+    if (hasRest) return refuse("discover.scopes takes no argument");
+    return accept(Verb::DiscoverScopes);
+  }
   if (std::strcmp(verb, "erase") == 0) {
     if (!hasRest) return refuse("erase forgets every setting; to do it, type: erase %s", kEraseWord);
     if (std::strcmp(rest, kEraseWord) != 0) return refuse("erase: the word is '%s'", kEraseWord);

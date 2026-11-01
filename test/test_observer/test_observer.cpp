@@ -25,6 +25,7 @@
 #include "observer/Config.h"
 #include "observer/Dialect.h"
 #include "observer/Frame.h"
+#include "observer/Neighbours.h"
 #include "observer/Presets.h"
 #include "observer/Token.h"
 #include "observer/Topics.h"
@@ -656,6 +657,150 @@ TEST(Settings, ASlotThatCannotConnectSaysWhatIsMissing) {
   own.slot[0].audience = "b.example";
   own.slot[0].topic = "mine/{device}/{type}";
   EXPECT_TRUE(observerEnabled(own, why, sizeof why)) << why;
+}
+
+// ---- the neighbours message (task p1.8-33) --------------------------------------------------
+
+namespace {
+
+// Two neighbours as MQTT_IMPLEMENTATION.md's sample has them (fixtures/neighbours.fixture).
+struct SampleReport {
+  NeighbourField entries[2];
+  NeighboursFields fields;
+  SampleReport() {
+    entries[0].pubkeyHex = "0011223344556677001122334455667700112233445566770011223344556677";
+    entries[0].snr = 39 / 4.0f;  // 9.75, as a quarter-dB value divided as the firmware divides it
+    entries[0].heardSecsAgo = 42;
+    entries[0].scopes = "DEN,APRS";
+    entries[0].status = "responded";
+    entries[1].pubkeyHex = "8899AABBCCDDEEFF8899AABBCCDDEEFF8899AABBCCDDEEFF8899AABBCCDDEEFF";
+    entries[1].snr = 50 / 4.0f;  // 12.5
+    entries[1].heardSecsAgo = 7;
+    entries[1].scopes = "DEN";
+    entries[1].status = "timeout";
+    fields.origin = "MeshCore-HOWL";
+    fields.originId = "A1B2C3D4E5F67890A1B2C3D4E5F67890A1B2C3D4E5F67890A1B2C3D4E5F67890";
+    fields.atEpoch = 1704110400;  // 2024-01-01T12:00:00Z
+    fields.atMicros = 0;
+    fields.totalNeighbours = 2;
+    fields.queriedNeighbours = 2;
+    fields.selfScopes = "";
+    fields.defaultScope = "dk";
+    fields.entries = entries;
+    fields.count = 2;
+  }
+};
+
+}  // namespace
+
+TEST(Neighbours, TheFormatterWritesTheObserverFirmwaresBytes) {
+  const auto kv = readFixture("neighbours");
+  ASSERT_NE(kv.end(), kv.find("expected"));
+  SampleReport s;
+  char out[kNeighboursMessageCap];
+  int written = -1;
+  bool truncated = true;
+  const size_t n = formatNeighbours(s.fields, out, sizeof out, &written, &truncated);
+  ASSERT_GT(n, 0u);
+  EXPECT_EQ(kv.at("expected"), std::string(out, n));
+  EXPECT_EQ(n, std::strlen(out));
+  EXPECT_EQ(2, written);
+  EXPECT_FALSE(truncated);
+}
+
+TEST(Neighbours, TwentyLongScopedNeighboursStayUnderTenKilobytesAndAreNotTruncated) {
+  // The worst case the table can produce: every entry with the consumer's whole 256 characters
+  // of scopes - more than a reply can carry (a payload is 184 bytes), so the real worst case is
+  // smaller than this one.
+  std::string scopes(256, 'x');
+  for (size_t i = 7; i < scopes.size(); i += 8) scopes[i] = ',';
+  std::vector<std::string> keys;
+  std::vector<NeighbourField> entries;
+  for (int i = 0; i < 20; i++) {
+    char key[65];
+    std::snprintf(key, sizeof key, "%02X", i);
+    std::string k;
+    for (int j = 0; j < 32; j++) k += key;
+    keys.push_back(k);
+  }
+  for (int i = 0; i < 20; i++) {
+    NeighbourField f;
+    f.pubkeyHex = keys[i].c_str();
+    f.snr = -2.75f;
+    f.heardSecsAgo = 86399;
+    f.scopes = scopes.c_str();
+    f.status = "responded";
+    entries.push_back(f);
+  }
+  SampleReport s;
+  s.fields.entries = entries.data();
+  s.fields.count = 20;
+  s.fields.totalNeighbours = 20;
+  s.fields.queriedNeighbours = 20;
+  s.fields.origin = "a thirty-one character origin x";
+  char out[kNeighboursMessageCap];
+  int written = 0;
+  bool truncated = true;
+  const size_t n = formatNeighbours(s.fields, out, sizeof out, &written, &truncated);
+  ASSERT_GT(n, 0u);
+  EXPECT_LT(n, 10240u);
+  EXPECT_EQ(20, written);
+  EXPECT_FALSE(truncated);
+  EXPECT_NE(std::string::npos, std::string(out).find("\"truncated\":false"));
+  EXPECT_NE(std::string::npos, std::string(out).find("\"snr\":-2.75,"));
+}
+
+TEST(Neighbours, ABufferTooSmallForThemAllCutsTheTailAndSaysTruncated) {
+  // The observer firmware's rule (MQTTPayloadBuilder.cpp:311-317): the entries that fit, in the
+  // order given, and `truncated` true - which keeps its place in the field order.
+  SampleReport s;
+  char out[kNeighboursMessageCap];
+  size_t whole = formatNeighbours(s.fields, out, sizeof out);
+  ASSERT_GT(whole, 0u);
+  // Room for the header and the first entry, not the second.
+  int written = 0;
+  bool truncated = false;
+  const size_t n = formatNeighbours(s.fields, out, whole - 20, &written, &truncated);
+  ASSERT_GT(n, 0u);
+  EXPECT_EQ(1, written);
+  EXPECT_TRUE(truncated);
+  const std::string text(out, n);
+  EXPECT_NE(std::string::npos, text.find("\"truncated\":true,\"self\""));
+  EXPECT_NE(std::string::npos, text.find("0011223344556677"));
+  EXPECT_EQ(std::string::npos, text.find("8899AABBCCDDEEFF"));
+  EXPECT_EQ('}', text.back());
+  EXPECT_NE(std::string::npos, text.find("}]}"));
+  // Not even the header: nothing, not half a message.
+  EXPECT_EQ(0u, formatNeighbours(s.fields, out, 100, &written, &truncated));
+  EXPECT_STREQ("", out);
+}
+
+TEST(Neighbours, CoreScopesGuardWouldTakeIt) {
+  // Kpa-clawbot/CoreScope, cmd/ingestor: handleNeighborsReport reads `self.scopes`, and each
+  // neighbour's pubkey (64 hex, lowercased there), scopes (clamped to 256) and status (only
+  // `responded` carries scope evidence); neighbors_guard.go drops a timestamp more than five
+  // minutes ahead, parsed as RFC 3339 - which "+00:00" is. What this holds is what this end can
+  // hold: the shapes.
+  SampleReport s;
+  char out[kNeighboursMessageCap];
+  ASSERT_GT(formatNeighbours(s.fields, out, sizeof out), 0u);
+  const std::string text(out);
+  for (const char* key : {"0011223344556677001122334455667700112233445566770011223344556677",
+                          "8899AABBCCDDEEFF8899AABBCCDDEEFF8899AABBCCDDEEFF8899AABBCCDDEEFF"}) {
+    EXPECT_EQ(64u, std::strlen(key));
+    for (const char* p = key; *p; p++) EXPECT_TRUE((*p >= '0' && *p <= '9') || (*p >= 'A' && *p <= 'F')) << *p;
+    EXPECT_NE(std::string::npos, text.find(std::string("\"pubkey\":\"") + key + "\""));
+  }
+  // RFC 3339 with a numeric offset: date, 'T', time, fraction, "+00:00".
+  const size_t at = text.find("\"timestamp\":\"");
+  ASSERT_NE(std::string::npos, at);
+  const std::string ts = text.substr(at + 13, 32);
+  EXPECT_EQ(32u, ts.size());
+  EXPECT_EQ('T', ts[10]);
+  EXPECT_EQ('.', ts[19]);
+  EXPECT_EQ("+00:00", ts.substr(26));
+  EXPECT_LE(kScopesCap, 256u);
+  EXPECT_NE(std::string::npos, text.find("\"self\":{\"scopes\":\"\",\"default_scope\":\"dk\"}"));
 }
 
 // ---- the rails ------------------------------------------------------------------------------

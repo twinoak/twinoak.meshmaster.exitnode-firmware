@@ -58,6 +58,12 @@ const KeyDef kKeys[kKeyCount] = {
     {"mqtt.iata", "mqtt_iata", ValueKind::Iata, nullptr, 0, 0, 3, 3, "three letters, the region the brokers file this node under: AAL, AAR, BLL, ODE, CPH or RNN in Denmark"},
     {"mqtt.owner", "mqtt_owner", ValueKind::Hex64, nullptr, 0, 0, 64, 64, "the owner's public key, 64 hex digits, named in the sign-in token"},
     {"mqtt.email", "mqtt_email", ValueKind::Email, nullptr, 0, 0, 3, 63, "the owner's email, named in the sign-in token"},
+    // The neighbour report (task p1.8-33, src/observer/Neighbours.h), under the observer firmware's
+    // two names (MQTT_IMPLEMENTATION.md, "CLI Commands": mqtt.neighbors off by default there,
+    // mqtt.neighbors.interval 12..336 hours, default 24). On by default here: an exit node's
+    // observer is already opt-in slot by slot, and the report is why one is on.
+    {"mqtt.neighbors", "mqtt_nbrs", ValueKind::OnOff, "on", 0, 0, 0, 0, "on | off: the repeaters heard at zero hops and their scopes, published every mqtt.neighbors.interval hours"},
+    {"mqtt.neighbors.interval", "mqtt_nbrs_h", ValueKind::Int, "24", 12, 336, 0, 0, "hours between neighbour reports, 12..336"},
     {"mqtt1.preset", "mqtt1_preset", ValueKind::Preset, "none", 0, 0, 4, 10, "none | meshview | meshmapper | custom (get mqtt.presets)"},
     {"mqtt1.server", "mqtt1_server", ValueKind::BrokerUrl, nullptr, 0, 0, 9, 63, "custom: wss://host:port/path or mqtts://host:port"},
     {"mqtt1.audience", "mqtt1_audience", ValueKind::Host, nullptr, 0, 0, 1, 63, "custom: the broker's name in the token; set means token sign-in"},
