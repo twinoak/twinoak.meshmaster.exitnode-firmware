@@ -5,6 +5,8 @@
 
 #include <esp_err.h>
 #include <esp_tls_errors.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <mqtt_client.h>
 
 // The ESP32 core's certificate bundle, the same blob src/agent/AgentClient.cpp names: the Mozilla
@@ -31,18 +33,48 @@ constexpr int kMbedtlsPkAllocFailed = -0x3F80;     // MBEDTLS_ERR_PK_ALLOC_FAILE
 constexpr int kMbedtlsEcpAllocFailed = -0x4D80;    // MBEDTLS_ERR_ECP_ALLOC_FAILED
 constexpr int kMbedtlsMpiAllocFailed = -0x0010;    // MBEDTLS_ERR_MPI_ALLOC_FAILED
 
-// The receive buffer: nothing is subscribed, so what arrives is a CONNACK, a PUBACK, a PINGRESP.
+// The sizes (task p1.8-31), each from what goes through it. esp-mqtt at this pin names them
+// buffer_size, out_buffer_size and task_stack (mqtt_client.h, esp_mqtt_client_config_t).
+//
+// The receive buffer: nothing is subscribed, so what arrives is a CONNACK (4 bytes), a PUBACK
+// (4) and a PINGRESP (2); the WebSocket transport reads its own HTTP upgrade reply into a
+// buffer of its own, and a WebSocket control frame carries 125 bytes at most. 512 is task 27's
+// figure, kept: esp-mqtt's source is not on disk at this pin to prove a smaller floor against,
+// and the quarter kilobyte it would save is not what a slot costs.
 constexpr int kInBufferBytes = 512;
-// The send buffer: the largest message whole - a packet message (observer::kPacketMessageCap),
-// its topic (observer::kTopicCap) and the fixed header - so no message is ever fragmented.
-constexpr int kOutBufferBytes = 1536;
+// The send buffer holds the largest thing ever sent, whole, so that nothing is fragmented. That
+// is the CONNECT, not a packet message: a fixed header (a type byte and up to four of remaining
+// length), the variable header ("MQTT" with its length, the level, the flags, the keepalive),
+// the client id (esp-mqtt's ESP32_<MAC> is 12 bytes; MQTT 3.1.1's bound is 23), the will's
+// topic and payload (the status message), the username and the password (the token) - each
+// string with its two length bytes.
+constexpr int kMqttFixedHeaderBytes = 5;
+constexpr int kConnectVariableHeaderBytes = 10;
+constexpr int kClientIdBytes = 2 + 23;
+constexpr int kConnectBytes = kMqttFixedHeaderBytes + kConnectVariableHeaderBytes + kClientIdBytes +
+                              (2 + static_cast<int>(mm::observer::kTopicCap)) + (2 + static_cast<int>(mm::observer::kStatusMessageCap)) +
+                              (2 + static_cast<int>(mm::observer::kUsernameCap)) + (2 + static_cast<int>(mm::observer::kTokenCap));
+// ...and a PUBLISH of the largest packet message with its topic and, at QoS 1, a message id.
+constexpr int kPublishBytes = kMqttFixedHeaderBytes + (2 + static_cast<int>(mm::observer::kTopicCap)) + 2 +
+                              static_cast<int>(mm::observer::kPacketMessageCap);
+constexpr int kLargestSentBytes = kConnectBytes > kPublishBytes ? kConnectBytes : kPublishBytes;
+constexpr int kOutBufferBytes = ((kLargestSentBytes + 63) / 64) * 64;
+static_assert(kConnectBytes == 1780 && kPublishBytes == 1417 && kOutBufferBytes == 1792,
+              "the send buffer's arithmetic moved: re-read the caps it is made of");
+// The task's stack: esp-mqtt's own default, set here rather than inherited. What runs on it is
+// the TLS handshake - mbedtls's parse of the broker's four-certificate chain and its ECDSA
+// P-256 verification, the deepest call mbedtls makes, about 3 KB of stack at this version with
+// its hardware MPI - esp-tls, the WebSocket transport's framing, esp-mqtt's own loop and this
+// file's event handler (a 96-byte reason). 6 144 leaves about half over; stackLowWater() is the
+// measurement, read on that task, and the bench decides whether 5 120 would do.
+constexpr int kTaskStackBytes = static_cast<int>(mm::MqttClient::kTaskStackBytes);
 // QoS 1 retransmit of an unacknowledged status: the observer firmware's 15 s rather than
 // esp-mqtt's 1 s, which resends a byte-identical status every second while a PUBACK is slow
 // (MQTTBridge.cpp:5136-5143 at d664d89d).
 constexpr int kRetransmitMs = 15000;
 
-static_assert(kOutBufferBytes >= static_cast<int>(mm::observer::kPacketMessageCap + mm::observer::kTopicCap + 16),
-              "the send buffer must hold a packet message and its topic whole");
+static_assert(kOutBufferBytes >= kConnectBytes && kOutBufferBytes >= kPublishBytes,
+              "the send buffer must hold the CONNECT and a packet message whole");
 
 const char* connackReason(int code) {
   // MQTT 3.1.1 CONNACK return codes, as esp_mqtt_connect_return_code_t numbers them.
@@ -84,6 +116,9 @@ void MqttClient::push(const Pending& p) {
 
 void MqttClient::onEvent(void* raw) {
   esp_mqtt_event_handle_t event = static_cast<esp_mqtt_event_handle_t>(raw);
+  // On esp-mqtt's task: how much of its stack has never been touched (bytes, on this port).
+  const uint32_t left = static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr));
+  if (stackLowWater_ == 0 || left < stackLowWater_) stackLowWater_ = left;
   Pending p;
   switch (event->event_id) {
     case MQTT_EVENT_CONNECTED:
@@ -159,6 +194,7 @@ void MqttClient::onEvent(void* raw) {
 bool MqttClient::open(const observer::ClientConfig& cfg, char* reason, size_t cap) {
   if (reason != nullptr && cap > 0) reason[0] = '\0';
   close();
+  stackLowWater_ = 0;
 
   esp_mqtt_client_config_t c = {};
   c.uri = cfg.uri;
@@ -168,6 +204,7 @@ bool MqttClient::open(const observer::ClientConfig& cfg, char* reason, size_t ca
   c.keepalive = cfg.keepaliveS;
   c.buffer_size = kInBufferBytes;
   c.out_buffer_size = kOutBufferBytes;
+  c.task_stack = kTaskStackBytes;
   c.message_retransmit_timeout = kRetransmitMs;
   c.username = (cfg.username != nullptr && cfg.username[0] != '\0') ? cfg.username : nullptr;
   c.password = (cfg.password != nullptr && cfg.password[0] != '\0') ? cfg.password : nullptr;

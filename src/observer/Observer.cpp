@@ -93,7 +93,13 @@ void Observer::readSettings() {
 void Observer::reconfigure() {
   if (settings_ == nullptr) return;
   readSettings();
-  enabled_ = observer::observerEnabled(view_, why_, sizeof why_) && publicKeyHex_[0] != '\0';
+  // A slot this board refuses (observer/Board.h) does not turn the observer on by itself: for
+  // the question "is anything configured", it is as if empty.
+  observer::ObserverSettings forEnabled = view_;
+  for (int s = 0; s < observer::kSlots; s++) {
+    if (observer::slotRefusal(s, link_.board()) != nullptr) forEnabled.slot[s] = observer::SlotSettings();
+  }
+  enabled_ = observer::observerEnabled(forEnabled, why_, sizeof why_) && publicKeyHex_[0] != '\0';
   if (publicKeyHex_[0] == '\0') std::snprintf(why_, sizeof why_, "no identity");
   // The connections read the same view: a slot whose URL, sign-in or topics changed starts
   // over, the others keep their sessions (Connections::configure).
@@ -163,7 +169,10 @@ bool Observer::describeObserver(HeartbeatObserver& out) {
   // `enabled_` is the console's own answer - at least one slot resolved and a region code to
   // build its topic from - and `get mqtt.status` is where its `why_` is read when it is false.
   if (!enabled_) return false;
-  for (int s = 0; s < observer::kSlots; s++) {
+  // The board's own slots: one on a V3, two on a V4 (observer/Board.h). A slot beyond them is
+  // nothing MeshMaster needs a row for.
+  const int shown = slotsOnBoard();
+  for (int s = 0; s < shown; s++) {
     const observer::SlotView v = link_.view(s);
     HeartbeatObserverSlot& hb = hbSlots_[s];
     hb = HeartbeatObserverSlot();
@@ -182,8 +191,15 @@ bool Observer::describeObserver(HeartbeatObserver& out) {
   out.iata = iata_[0] != '\0' ? iata_ : nullptr;
   out.hasSlots = true;
   out.slots = hbSlots_;
-  out.slotCount = observer::kSlots;
+  out.slotCount = shown;
   return true;
+}
+
+bool Observer::slotShown(int slot) const {
+  if (slot < 0 || slot >= observer::kSlots) return false;
+  if (slot < slotsOnBoard()) return true;
+  const char* preset = view_.slot[slot].preset;
+  return preset != nullptr && preset[0] != '\0' && std::strcmp(preset, observer::kPresetNone) != 0;
 }
 
 void Observer::describe(char* out, size_t cap) const {
@@ -192,10 +208,15 @@ void Observer::describe(char* out, size_t cap) const {
   size_t n = 0;
   slots[0] = '\0';
   for (int s = 0; s < observer::kSlots; s++) {
+    if (!slotShown(s)) continue;
     const observer::ResolvedSlot r = observer::resolveSlot(view_.slot[s]);
     const observer::SlotView v = link_.view(s);
+    // A slot the board refuses (Board.h) resolves, but its connection is off with the reason.
+    const char* refusal = observer::slotRefusal(s, link_.board());
+    const bool active = r.active && refusal == nullptr;
+    const char* why = r.active ? refusal : r.why;
     const int w = std::snprintf(slots + n, sizeof slots - n, "%sslot %d %s%s%s%s", s > 0 ? ", " : "", s + 1, r.name,
-                                r.active ? " " : " (", r.active ? observer::slotStateName(v.state) : r.why, r.active ? "" : ")");
+                                active ? " " : " (", active ? observer::slotStateName(v.state) : why, active ? "" : ")");
     if (w < 0) break;
     n += static_cast<size_t>(w);
     if (n >= sizeof slots) break;

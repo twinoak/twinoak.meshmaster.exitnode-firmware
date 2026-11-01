@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "console/Parser.h"
+#include "observer/Board.h"
 #include "settings/Keys.h"
 
 #ifndef PROJECT_DIR
@@ -308,7 +309,7 @@ TEST(Refusals, TheObserverKeysHoldTheObserverFirmwaresShapes) {
   EXPECT_STREQ("mqtt1.preset: none | meshview | meshmapper | custom (get mqtt.presets)", parseLine("set mqtt1.preset analyzer-us").error);
   EXPECT_STREQ("mqtt2.preset: none | meshview | meshmapper | custom (get mqtt.presets)", parseLine("set mqtt2.preset MeshView").error);
   EXPECT_TRUE(parseLine("set mqtt1.preset none").ok);
-  EXPECT_TRUE(parseLine("set mqtt2.preset custom").ok);
+  EXPECT_TRUE(parseLine("set mqtt2.preset custom").ok);  // the host's profile is the V4's (observer/Board.cpp): two slots
   // mqttN.server: TLS only.
   EXPECT_STREQ("mqtt1.server: the scheme must be wss:// or mqtts:// (TLS is verified; ws:// and mqtt:// are not taken)",
                parseLine("set mqtt1.server ws://192.168.1.50:9001/mqtt").error);
@@ -468,6 +469,24 @@ TEST(Readme, TheProvisioningSessionIsAcceptedLineForLine) {
 }
 
 // PlatformIO's googletest integration links no gtest_main, so every test file brings its own.
+// A slot the board has no memory for takes no preset but `none` (task p1.8-31, observer/Board.h):
+// one slot on a Heltec V3, two on a V4. The refusal is one line with the reason, the same line
+// `get mqtt.status` prints for a slot 2 an older image stored; `none` is always taken, so a V3
+// that was given a slot 2 can be told to forget it.
+TEST(Set, ASlotTheBoardHasNoMemoryForTakesNoPresetButNone) {
+  mm::observer::useBoardProfile(&mm::observer::kHeltecV3);
+  EXPECT_STREQ("mqtt2.preset: this board has memory for one broker; a V4 carries two", parseLine("set mqtt2.preset meshmapper").error);
+  EXPECT_STREQ("mqtt2.preset: this board has memory for one broker; a V4 carries two", parseLine("set mqtt2.preset custom").error);
+  EXPECT_TRUE(parseLine("set mqtt2.preset none").ok);
+  EXPECT_TRUE(parseLine("set mqtt1.preset meshmapper").ok) << "slot 1 takes any preset on a V3";
+  EXPECT_TRUE(parseLine("set mqtt2.server wss://broker.example.net:443/mqtt").ok) << "only the preset is refused";
+  mm::observer::useBoardProfile(&mm::observer::kHeltecV4);
+  EXPECT_TRUE(parseLine("set mqtt2.preset meshmapper").ok);
+  EXPECT_TRUE(parseLine("set mqtt2.preset custom").ok);
+  mm::observer::useBoardProfile(nullptr);
+  EXPECT_EQ(2, mm::observer::boardProfile().slots) << "the host builds with the V4's profile";
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

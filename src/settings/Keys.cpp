@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "observer/Board.h"
 #include "observer/Presets.h"
 
 namespace mm {
@@ -344,11 +345,27 @@ bool validateValue(const KeyDef& key, const char* value, char* err, size_t errCa
       return false;
     }
 
-    case ValueKind::Preset:
-      if (observer::isPresetName(value)) return true;
-      std::snprintf(msg, sizeof msg, "%s: none | meshview | meshmapper | custom (get mqtt.presets)", key.name);
-      say(err, errCap, msg);
-      return false;
+    case ValueKind::Preset: {
+      if (!observer::isPresetName(value)) {
+        std::snprintf(msg, sizeof msg, "%s: none | meshview | meshmapper | custom (get mqtt.presets)", key.name);
+        say(err, errCap, msg);
+        return false;
+      }
+      // A slot this board has no memory for (observer/Board.h: one on a Heltec V3, two on a V4)
+      // takes no preset but `none`, and says why in one line (task p1.8-31).
+      const int slot = (std::strncmp(key.name, "mqtt", 4) == 0 && std::isdigit(static_cast<unsigned char>(key.name[4])) != 0 &&
+                        key.name[5] == '.')
+                           ? key.name[4] - '1'
+                           : -1;
+      if (slot >= 0 && std::strcmp(value, observer::kPresetNone) != 0) {
+        if (const char* why = observer::slotRefusal(slot, observer::boardProfile())) {
+          std::snprintf(msg, sizeof msg, "%s: %s", key.name, why);
+          say(err, errCap, msg);
+          return false;
+        }
+      }
+      return true;
+    }
   }
   say(err, errCap, "unknown value kind");
   return false;
