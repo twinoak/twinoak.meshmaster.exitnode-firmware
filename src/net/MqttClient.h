@@ -13,22 +13,27 @@
 //                  with neither is refused here, because esp-tls would then not verify at all,
 //                  and the hostname is checked against the certificate as esp-tls does by
 //                  default. test/test_tls_policy greps this file like every other.
-//   its own task   esp-mqtt runs each connection in a task of its own (6 KB of stack, the
-//                  core's default), so the TLS handshake, the keepalive and the writes never
-//                  block the loop task the mesh and the agent run on. A publish here is an
-//                  enqueue into esp-mqtt's outbox and returns at once; the outbox is read back
-//                  so the state machine can bound it.
+//   its own task   esp-mqtt runs each connection in a task of its own (kTaskStackBytes of
+//                  stack, set here with its arithmetic), so the TLS handshake, the keepalive
+//                  and the writes never block the loop task the mesh and the agent run on. A
+//                  publish here is an enqueue into esp-mqtt's outbox and returns at once; the
+//                  outbox is read back so the state machine can bound it. The lowest the stack
+//                  ever got is read on that task at every event and printed by get mqtt.status
+//                  (stackLowWater), so the bench can say whether a smaller stack would do.
 //   events         esp-mqtt reports on its own task; they are kept in a small ring under a
 //                  spinlock and handed to the state machine one per loop() pass, as a kind and
 //                  one short reason - a CONNACK code's meaning, an esp-tls error's name - and
 //                  never a byte of what was sent or received.
 //   closing        close() destroys the client, which stops its task (esp-mqtt joins it) and
-//                  frees the TLS context and the buffers: the ~40 KB a connection holds goes back
+//                  frees the TLS context and the buffers: what a connection holds (about 63 KB
+//                  of internal heap on a Heltec V3, measured - src/observer/Board.h) goes back
 //                  to the heap, which is the point when the uplink is short of it. The join can
 //                  take as long as the client's current network operation, ten seconds at most.
 //
-// Board-only. Sizes: the receive buffer is small (this client subscribes to nothing; a CONNACK
-// and a PUBACK are a few bytes), the send buffer holds the largest message whole.
+// Board-only. Sizes (task p1.8-31, the arithmetic in the .cpp): the receive buffer is small
+// (this client subscribes to nothing; a CONNACK and a PUBACK are a few bytes), the send buffer
+// holds the largest thing ever sent whole - the CONNECT with its token and its will, which is
+// larger than a packet message - and the task's stack is esp-mqtt's default, set explicitly.
 
 #pragma once
 
@@ -56,6 +61,12 @@ class MqttClient : public observer::Client {
 
   bool isOpen() const { return client_ != nullptr; }
 
+  // The task's stack (bytes), and the least of it that was ever free since the client was
+  // opened - read on esp-mqtt's own task at every event; 0 until the first event. The bench's
+  // figure for whether the stack could be smaller.
+  static constexpr uint32_t kTaskStackBytes = 6144;
+  uint32_t stackLowWater() const { return stackLowWater_; }
+
   // esp-mqtt's callback lands here, on esp-mqtt's task: `event` is an esp_mqtt_event_handle_t.
   void onEvent(void* event);
 
@@ -71,6 +82,7 @@ class MqttClient : public observer::Client {
 
   esp_mqtt_client_handle_t client_ = nullptr;
   bool connected_ = false;
+  volatile uint32_t stackLowWater_ = 0;
   portMUX_TYPE mux_;
   Pending pending_[kPendingCap];
   int pendingHead_ = 0;

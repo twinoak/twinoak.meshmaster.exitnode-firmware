@@ -12,21 +12,12 @@
 #include <agent/Log.h>
 
 #include "TlsRoots.h"
+#include "platform/TlsHeap.h"
 
 // The ESP32 core's certificate bundle: the Mozilla roots as libmbedtls.a of the arduino-esp32
 // framework carries them (CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL in its sdkconfig).
 // The symbol is the blob's start; WiFiClientSecure::setCACertBundle() takes it as is.
 extern const uint8_t kCoreCertBundle[] asm("_binary_x509_crt_bundle_start");
-
-// mbedtls's allocator as this core ships it: MBEDTLS_PLATFORM_MEMORY is on and its standard
-// calloc and free are these two (mbedtls/esp_config.h: MBEDTLS_PLATFORM_STD_CALLOC/FREE), behind
-// the function pointers mbedtls_platform_set_calloc_free() sets. They are C symbols that the
-// core's esp_mem.h declares without an extern "C" - WiFiClientSecure.h pulls that header in
-// above, with C++ linkage - so, like the bundle above, they are reached by their assembler
-// names rather than through a declaration that would conflict with the core's.
-void* coreMbedtlsCalloc(size_t n, size_t size) asm("esp_mbedtls_mem_calloc");
-void coreMbedtlsFree(void* ptr) asm("esp_mbedtls_mem_free");
-#include <mbedtls/platform.h>
 
 namespace mm {
 
@@ -35,33 +26,14 @@ namespace {
 constexpr int kMbedtlsCertVerifyFailed = -0x2700;  // MBEDTLS_ERR_X509_CERT_VERIFY_FAILED
 constexpr size_t kBodyCap = 2048;                  // the config and heartbeat answers are a few hundred bytes
 
-// The lowest free heap seen during a call (task p1.8-30). While a call is in flight every
-// allocation mbedtls makes - the handshake's certificate chain, the two 16 KB content buffers,
-// the session's keys - passes through watchedCalloc() below, which reads the free heap right
-// after it: exact for mbedtls's share of the call, which is nearly all of it. The rest (lwIP's
-// segments, HTTPClient's Strings and its 1 KB chunk buffer) is caught by the four samples
-// request() and call() take, and by the board's minimum-ever: if that moved during the call,
-// the call is what moved it and the figure is exact for everything. The wrapper is installed
-// once, in begin(); the esp-mqtt tasks of the observer share the same mbedtls and so are
-// sampled too while a call is in flight, which is right - what is wanted is the free heap at
-// its lowest moment, whoever asked for the bytes - and why these two are volatile and the
-// comparison is not atomic: a lower figure lost to a race between two tasks is at worst one
-// sample, never a wrong one.
-volatile bool g_watching = false;
-volatile uint32_t g_lowest = 0xFFFFFFFFu;
-
-void noteFree() {
-  const uint32_t f = ESP.getFreeHeap();
-  if (f < g_lowest) g_lowest = f;
-}
-
-void* watchedCalloc(size_t n, size_t size) {
-  void* p = coreMbedtlsCalloc(n, size);
-  if (g_watching) noteFree();
-  return p;
-}
-
-void watchedFree(void* p) { coreMbedtlsFree(p); }
+// The lowest free heap seen during a call (task p1.8-30) is read from src/platform/TlsHeap.h's
+// wrapper of mbedtls's allocator, which every allocation mbedtls makes passes through - the
+// handshake's certificate chain, the two 16 KB content buffers, the session's keys - with a
+// read of the free heap right after it: exact for mbedtls's share of the call, which is nearly
+// all of it. The rest (lwIP's segments, HTTPClient's Strings and its 1 KB chunk buffer) is
+// caught by the four samples request() and call() take, and by the board's minimum-ever: if
+// that moved during the call, the call is what moved it and the figure is exact for everything.
+// Since task p1.8-31 the same wrapper is where a board with PSRAM puts its TLS buffers.
 
 // One of mbedtls' two TLS content buffers as one allocation (CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN
 // 16384 in this core's sdkconfig, plus its header room): what the largest free block has to hold
@@ -154,7 +126,7 @@ void AgentClient::begin(SettingsStore& settings, AgentClock& clock, WifiLink& wi
     http_->setUserAgent(String("meshmaster-agent/") + version_);
     http_->collectHeaders(kWantedHeaders, sizeof kWantedHeaders / sizeof kWantedHeaders[0]);
   }
-  mbedtls_platform_set_calloc_free(&watchedCalloc, &watchedFree);
+  tlsheap::begin();
   reconfigure();
 }
 
@@ -229,7 +201,7 @@ uplink::Attempt AgentClient::exchange(Root root) {
   const bool post = std::strcmp(p.method, "POST") == 0;
   const int code = post ? http_->POST(reinterpret_cast<uint8_t*>(const_cast<char*>(p.requestBody)), p.requestLen)
                         : http_->GET();
-  noteFree();  // the status line is in: the handshake, if there was one, is behind us
+  tlsheap::sample();  // the status line is in: the handshake, if there was one, is behind us
   if (code > 0) {
     // The body straight into the caller's buffer: writeToStream() reads a Content-Length or a
     // chunked body alike, and the sink below takes what fits in bodyCap and drops the rest, which
@@ -239,7 +211,7 @@ uplink::Attempt AgentClient::exchange(Root root) {
     // code cannot wipe, the same shape as the .NET agent's HttpClient.
     BodySink sink(p.body, p.bodyCap);
     http_->writeToStream(&sink);
-    noteFree();
+    tlsheap::sample();
     p.bodyLen = sink.length();
     p.body[p.bodyLen] = '\0';
     p.retryAfterS = parseRetryAfter(http_->header("Retry-After"));
@@ -332,8 +304,7 @@ bool AgentClient::call(const char* method, const char* endpoint, const char* req
   HeapCost cost;
   cost.freeBefore = ESP.getFreeHeap();
   const uint32_t minEverBefore = ESP.getMinFreeHeap();
-  g_lowest = cost.freeBefore;
-  g_watching = true;
+  tlsheap::watchBegin(cost.freeBefore);
 
   int tlsError = 0;
   int code = request(root_, method, path, requestBody, requestLen, body, bodyCap, bodyLen, tlsError, out);
@@ -347,9 +318,9 @@ bool AgentClient::call(const char* method, const char* endpoint, const char* req
     limiter_.took(millis());
     code = request(root_, method, path, requestBody, requestLen, body, bodyCap, bodyLen, tlsError, out);
   }
-  g_watching = false;
+  const uint32_t lowestSeen = tlsheap::watchEnd();
   cost.freeAfter = ESP.getFreeHeap();
-  cost.lowest = g_lowest < cost.freeAfter ? g_lowest : cost.freeAfter;
+  cost.lowest = lowestSeen < cost.freeAfter ? lowestSeen : cost.freeAfter;
   const uint32_t minEverAfter = ESP.getMinFreeHeap();
   if (minEverAfter < minEverBefore) cost.lowest = minEverAfter;  // the call moved the board's minimum: exact
   cost.atEpoch = clock_->now();

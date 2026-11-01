@@ -17,10 +17,11 @@
 //   waiting-for-clock   the clock is not set. A token carries `iat` and `exp`, and a packet
 //                       message carries the wall clock, so nothing is sent before there is one
 //                       (the observer firmware's jwtClockAvailable, MQTTConnectionPolicy.h:221).
-//   waiting-for-heap    free heap or the largest free block is under the reserve that leaves the
-//                       uplink its own TLS handshake (kHeapReserve*, below); or the uplink's call
-//                       just failed for want of memory and this slot gave way for ten minutes.
-//                       Re-checked every kHeapRecheckMs.
+//   waiting-for-heap    the heap could not take this slot and the uplink's next call on top of
+//                       it (gateNeed, below: the board's figures, what the uplink's last call
+//                       dipped, the floor and the margin); or the uplink's call just failed for
+//                       want of memory, or dipped under the floor, and this slot gave way for
+//                       ten minutes. Re-checked every kHeapRecheckMs.
 //   connecting          the client was opened with the token (or username and password) and
 //                       the roots; waiting for the broker's answer, kConnectTimeoutMs at most.
 //   connected           publishing: a retained status at once and every kStatusIntervalMs, and
@@ -30,8 +31,10 @@
 //
 // Two connections share one board, so a second slot does not open while the first is still in
 // its handshake (two handshakes at once is twice the peak), and the highest slot is the one
-// that gives way when the uplink's call fails for want of memory: the radio first, then the
-// MeshMaster uplink, then the observer (tasks/phase-1.7/27).
+// that gives way when the uplink's call fails for want of memory, or - since task p1.8-31 -
+// when a call that went through dipped the heap under kHeapFloorBytes: the radio first, then
+// the MeshMaster uplink, then the observer (tasks/phase-1.7/27, tasks/phase-1.8/31). How many
+// slots a board opens at all is Board.h's: one on a Heltec V3, two on a V4.
 //
 // What is published, as the observer firmware does (agessaman/MeshCore observer-firmware at
 // d664d89d): every received packet as a `packets` message, QoS 0, not retained
@@ -54,6 +57,7 @@
 
 #include <agent/Log.h>
 
+#include "Board.h"
 #include "Config.h"
 #include "Dialect.h"
 #include "Token.h"
@@ -120,10 +124,13 @@ class Client {
 struct Environment {
   uint32_t (*millis)() = nullptr;        // monotonic, wraps
   uint32_t (*epoch)() = nullptr;         // UNIX seconds, 0 while there is no time
-  uint32_t (*freeHeap)() = nullptr;      // bytes free now
-  uint32_t (*largestBlock)() = nullptr;  // the largest allocation possible now
+  uint32_t (*freeHeap)() = nullptr;      // bytes of internal heap free now
+  uint32_t (*largestBlock)() = nullptr;  // the largest internal allocation possible now
+  uint32_t (*freePsram)() = nullptr;     // bytes of PSRAM free now; nullptr or 0 = none (a V3)
+  uint32_t (*largestPsram)() = nullptr;  // the largest PSRAM allocation possible now
   uint32_t (*random)() = nullptr;        // for the backoff's jitter
   const char* caPem = nullptr;           // the carried roots, src/agent/TlsRoots.h's kCarriedRootsPem
+  const BoardProfile* board = nullptr;   // nullptr = boardProfile(), the one this image is built for
 };
 
 // The status message, made by whoever knows the board (Observer.h on the board, the test's
@@ -143,26 +150,43 @@ using ReportLine = void (*)(void* ctx, LogLevel level, const char* line);
 
 // ---- the policy's numbers -------------------------------------------------------------------
 
-// A TLS connection on this board: the observer firmware's own figure for one WSS slot
-// (MQTT_IMPLEMENTATION.md, "about 40 KB of internal heap per TLS/WSS connection";
-// MQTTConnectionPolicy.h:228) - mbedtls' two content buffers of CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN
-// (16 384 each in this core's sdkconfig, not asymmetric) and the handshake's working set.
-constexpr uint32_t kTlsConnectionBytes = 40 * 1024;
-// One of those content buffers, as one allocation: what the largest free block must hold.
+// The gate (task p1.8-31). What one slot costs and what the uplink's call dips are the board's
+// own figures (Board.h: measured on a Heltec V3 on 28 October 2026, derived for the V4), not the
+// observer firmware's 40 KB that task 27 borrowed. A slot opens while
+//
+//   free internal heap >= board.slotInternalBytes + uplink dip + kHeapFloorBytes + kGateMarginBytes
+//
+// where the uplink dip is what the uplink's last call dipped the internal heap - freeBefore
+// less lowest, read from task p1.8-30's cost record through onUplinkCall() - or, before any
+// call has been measured on this boot, the board's conservative constant; and the largest free
+// block holds one TLS content buffer (on a V4 the buffers are PSRAM's: that heap is checked
+// instead, and the internal block only has to hold the handshake's largest internal allocation).
+// After a slot is open the gate keeps watching: every uplink call's lowest free heap is read,
+// and one under kHeapFloorBytes closes the highest slot for kHeapYieldMs, counted as *gave way*.
+//
+// One of mbedtls's two content buffers as one allocation (CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN
+// 16 384 in this core's sdkconfig, not asymmetric, plus its header room): what the heap holding
+// the buffers must be able to allocate at all.
 constexpr uint32_t kTlsBufferBytes = 16 * 1024 + 1024;
-// What a slot leaves untouched for the uplink: its own handshake and a margin for the HTTP
-// client's body buffers and the heap's own fragmentation. Not measured on a board - nothing
-// measured on a board says what the uplink's handshake takes (the [Thomas] item of
-// tasks/phase-1.6/FOLLOWUPS.md) - so it is the observer firmware's figure plus a fifth, written
-// as a constant a measurement can move.
-constexpr uint32_t kUplinkReserveBytes = kTlsConnectionBytes + 8 * 1024;
-// A slot opens only while this much is free: its own connection and the uplink's reserve...
-constexpr uint32_t kHeapReserveFree = kTlsConnectionBytes + kUplinkReserveBytes;
-// ...and the largest block holds two content buffers, its own and one left for the uplink.
-constexpr uint32_t kHeapReserveLargest = 2 * kTlsBufferBytes;
+// On a board with PSRAM, mbedtls allocations of this size and over go there (src/platform/
+// TlsHeap.cpp), which is the core's own line for malloc (CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL
+// 4096); what stays internal is smaller than this, so this is what the largest internal block
+// must hold there.
+constexpr uint32_t kPsramThresholdBytes = 4096;
+// What WiFi and the radio need to survive a call: not measured. The WiFi driver takes its
+// dynamic receive buffers from the internal heap as frames arrive (CONFIG_ESP32_WIFI_DYNAMIC_RX_
+// BUFFER_NUM 32 of about 1.6 KB, a few in flight at a time), lwIP its segments for the open
+// connections, the uplink's HTTP client its 1 KB chunk buffer and the reply's String, and the
+// console and the log a line each; 16 KB holds a handful of each twice over. The bench of 28 October saw a call
+// go through with 3 088 bytes free, so this floor is above survival and below comfort, and it is
+// the one constant the bench walk of this pile is most likely to move.
+constexpr uint32_t kHeapFloorBytes = 16 * 1024;
+// The gate's margin over the arithmetic: the heap's fragmentation and the slot's own outbox
+// while a call is in flight. Not measured; one allocation of the PSRAM threshold's size.
+constexpr uint32_t kGateMarginBytes = 4096;
 
 constexpr uint32_t kHeapRecheckMs = 5000;         // how often waiting-for-heap looks again
-constexpr uint32_t kHeapYieldMs = 10 * 60 * 1000; // how long a slot stays down after the uplink failed for memory
+constexpr uint32_t kHeapYieldMs = 10 * 60 * 1000; // how long a slot stays down after it gave way to the uplink
 constexpr uint32_t kFirstBackoffMs = 5000;        // the task: 5 s doubling to ten minutes
 constexpr uint32_t kMaxBackoffMs = 10 * 60 * 1000;
 constexpr uint32_t kStableMs = 120 * 1000;        // up this long clears the backoff (MQTTConnectionPolicy.h:12)
@@ -239,6 +263,12 @@ class Connections {
   // and stays down kHeapYieldMs (the task's rule), and is counted.
   void onUplinkMemoryFailure();
 
+  // The uplink made a call (task p1.8-30's cost record: free internal heap before it, the lowest
+  // seen during it, free after it). The gate remembers what the call dipped for its next look,
+  // and if the lowest went under kHeapFloorBytes while a slot was up or opening, the highest
+  // such slot closes and stays down kHeapYieldMs, counted as *gave way* like a memory failure.
+  void onUplinkCall(uint32_t freeBefore, uint32_t lowest, uint32_t freeAfter);
+
   // Every pass of the main loop: events, timers, the queue.
   void loop();
 
@@ -249,9 +279,21 @@ class Connections {
   int connectedSlots() const;
   uint32_t connectFailures() const;  // refusals and errors over both slots, for the status message
 
+  // The board's profile (Board.h): how many slots it opens and the gate's figures.
+  const BoardProfile& board() const;
+  // How much internal heap a slot needs free to open right now: the board's slot cost, the
+  // uplink's dip (measured on this boot, else the board's constant), the floor and the margin.
+  uint32_t gateNeedBytes() const;
+  // What the uplink's call dips, as the gate uses it now, and whether that was measured on this
+  // boot (true) or is the board's constant (false).
+  uint32_t uplinkDipBytes() const { return uplinkMeasured_ ? uplinkDip_ : board().uplinkDipBytes; }
+  bool uplinkDipMeasured() const { return uplinkMeasured_; }
+
   SlotView view(int slot) const;
   // One line for `mqtt.status`: "slot 1 meshview: connected since 12:03:14, 120 published, 0 dropped".
   void describe(int slot, char* out, size_t cap) const;
+  // The memory line of `mqtt.status`: the rule with the board's figures and the heap as it is now.
+  void describeGate(char* out, size_t cap) const;
 
  private:
   struct Slot {
@@ -284,6 +326,9 @@ class Connections {
   void enter(Slot& s, SlotState state);
   void tryToOpen(int i);
   bool heapAllows(Slot& s);
+  // The highest slot that is up or opening closes and stays down kHeapYieldMs, with `why` as its
+  // last error and `logWhy` on the log; true when there was one.
+  bool yieldHighest(const char* why, const char* logWhy);
   void closeAndBackOff(int i, const char* why, bool refused);
   void pollEvents(int i);
   void serveConnected(int i);  // a connected slot's pass: the backoff's reset, the renewal, the status, the queue
@@ -302,6 +347,11 @@ class Connections {
   void* reportCtx_ = nullptr;
   bool linkUp_ = false;
   bool enabled_ = false;
+  // What the uplink's last call dipped the internal heap (freeBefore less lowest), once one
+  // has been measured on this boot; the board's constant stands in before that.
+  uint32_t uplinkDip_ = 0;
+  bool uplinkMeasured_ = false;
+  uint32_t lastUplinkLowest_ = 0;  // the lowest free heap of the last call, for the memory line
   char publicKeyHex_[kPublicKeyHexLen + 1] = {0};
   char owner_[kPublicKeyHexLen + 1] = {0};
   char email_[64] = {0};

@@ -115,6 +115,17 @@ void Connections::configure(const ObserverSettings& settings, bool enabled, cons
     } else {
       r.why = "the observer is off";
     }
+    // A slot this board has no memory for (Board.h: one on a V3, two on a V4) is off with the
+    // reason whenever something is stored in it - by the console of an older image, or by hand.
+    // An empty one stays "preset is none", which is not a fault.
+    const char* refusal = slotRefusal(i, board());
+    const char* stored = settings.slot[i].preset;
+    if (refusal != nullptr && stored != nullptr && stored[0] != '\0' && std::strcmp(stored, kPresetNone) != 0) {
+      const char* keep = r.name;
+      r = ResolvedSlot();
+      r.name = keep;
+      r.why = refusal;
+    }
     char topicStatus[kTopicCap] = {0};
     char topicPackets[kTopicCap] = {0};
     if (r.active) {
@@ -230,17 +241,41 @@ void Connections::onPacketMessage(const char* json, size_t len) {
 
 // ---- memory -----------------------------------------------------------------------------------
 
-bool Connections::heapAllows(Slot& s) {
-  const uint32_t free = env_.freeHeap != nullptr ? env_.freeHeap() : 0xFFFFFFFFu;
-  const uint32_t largest = env_.largestBlock != nullptr ? env_.largestBlock() : 0xFFFFFFFFu;
-  if (free >= kHeapReserveFree && largest >= kHeapReserveLargest) return true;
-  std::snprintf(s.lastError, sizeof s.lastError, "heap %lu free, largest block %lu; needs %lu and %lu",
-                static_cast<unsigned long>(free), static_cast<unsigned long>(largest),
-                static_cast<unsigned long>(kHeapReserveFree), static_cast<unsigned long>(kHeapReserveLargest));
-  return false;
+const BoardProfile& Connections::board() const { return env_.board != nullptr ? *env_.board : boardProfile(); }
+
+uint32_t Connections::gateNeedBytes() const {
+  return board().slotInternalBytes + uplinkDipBytes() + kHeapFloorBytes + kGateMarginBytes;
 }
 
-void Connections::onUplinkMemoryFailure() {
+// The gate (Connection.h, "The gate"): the internal heap holds this slot, the uplink's next call
+// on top of it, the floor and the margin; the largest block holds what the slot's largest single
+// allocation is on this board; and on a board with PSRAM, that heap holds the slot's share too.
+bool Connections::heapAllows(Slot& s) {
+  const BoardProfile& b = board();
+  const uint32_t free = env_.freeHeap != nullptr ? env_.freeHeap() : 0xFFFFFFFFu;
+  const uint32_t largest = env_.largestBlock != nullptr ? env_.largestBlock() : 0xFFFFFFFFu;
+  const uint32_t need = gateNeedBytes();
+  const uint32_t needLargest = b.psram ? kPsramThresholdBytes : kTlsBufferBytes;
+  if (free < need || largest < needLargest) {
+    std::snprintf(s.lastError, sizeof s.lastError, "heap %lu free, largest block %lu; needs %lu and %lu",
+                  static_cast<unsigned long>(free), static_cast<unsigned long>(largest), static_cast<unsigned long>(need),
+                  static_cast<unsigned long>(needLargest));
+    return false;
+  }
+  if (b.psram) {
+    const uint32_t freePs = env_.freePsram != nullptr ? env_.freePsram() : 0;
+    const uint32_t largestPs = env_.largestPsram != nullptr ? env_.largestPsram() : 0;
+    if (freePs < b.slotPsramBytes || largestPs < kTlsBufferBytes) {
+      std::snprintf(s.lastError, sizeof s.lastError, "psram %lu free, largest block %lu; needs %lu and %lu",
+                    static_cast<unsigned long>(freePs), static_cast<unsigned long>(largestPs),
+                    static_cast<unsigned long>(b.slotPsramBytes), static_cast<unsigned long>(kTlsBufferBytes));
+      return false;
+    }
+  }
+  return true;
+}
+
+bool Connections::yieldHighest(const char* why, const char* logWhy) {
   const uint32_t now = env_.millis();
   for (int i = kSlots - 1; i >= 0; i--) {
     Slot& s = slots_[i];
@@ -249,12 +284,35 @@ void Connections::onUplinkMemoryFailure() {
     s.stats.heapYields++;
     s.holdUntil = now + kHeapYieldMs;
     s.lastHeapCheckAt = now;
-    copyText(s.lastError, sizeof s.lastError, "gave way to the uplink, whose call failed for want of memory");
+    copyText(s.lastError, sizeof s.lastError, why);
     enter(s, SlotState::WaitingForHeap);
-    report(LogLevel::Warn, "observer: slot %d %s: closed for %lu min, the MeshMaster call failed for want of memory (%lu time(s))",
-           i + 1, s.cfg.name, static_cast<unsigned long>(kHeapYieldMs / 60000), static_cast<unsigned long>(s.stats.heapYields));
-    return;
+    report(LogLevel::Warn, "observer: slot %d %s: closed for %lu min, %s (gave way %lu time(s))", i + 1, s.cfg.name,
+           static_cast<unsigned long>(kHeapYieldMs / 60000), logWhy, static_cast<unsigned long>(s.stats.heapYields));
+    return true;
   }
+  return false;
+}
+
+void Connections::onUplinkMemoryFailure() {
+  yieldHighest("gave way to the uplink, whose call failed for want of memory",
+               "the MeshMaster call failed for want of memory");
+}
+
+void Connections::onUplinkCall(uint32_t freeBefore, uint32_t lowest, uint32_t freeAfter) {
+  (void)freeAfter;
+  // What the call dipped, for the gate's next look. The last call is the one the next is most
+  // like: a reused connection dips a little, a handshake a lot, and the gate follows.
+  uplinkDip_ = freeBefore > lowest ? freeBefore - lowest : 0;
+  uplinkMeasured_ = true;
+  lastUplinkLowest_ = lowest;
+  if (lowest >= kHeapFloorBytes) return;
+  char why[kReasonCap];
+  std::snprintf(why, sizeof why, "gave way to the uplink, whose call dipped to %lu free, under the floor of %lu",
+                static_cast<unsigned long>(lowest), static_cast<unsigned long>(kHeapFloorBytes));
+  char logWhy[kReasonCap];
+  std::snprintf(logWhy, sizeof logWhy, "the MeshMaster call dipped to %lu free, under the floor of %lu",
+                static_cast<unsigned long>(lowest), static_cast<unsigned long>(kHeapFloorBytes));
+  yieldHighest(why, logWhy);
 }
 
 // ---- the token -------------------------------------------------------------------------------
@@ -638,6 +696,33 @@ void Connections::describe(int slot, char* out, size_t cap) const {
                 static_cast<unsigned long>(v.stats.connects), static_cast<unsigned long>(v.stats.refusals),
                 static_cast<unsigned long>(v.stats.errors), static_cast<unsigned long>(v.stats.renewals),
                 static_cast<unsigned long>(v.stats.heapYields), v.lastError[0] != '\0' ? v.lastError : "none");
+}
+
+void Connections::describeGate(char* out, size_t cap) const {
+  if (out == nullptr || cap == 0) return;
+  const BoardProfile& b = board();
+  const uint32_t free = env_.freeHeap != nullptr ? env_.freeHeap() : 0;
+  const uint32_t largest = env_.largestBlock != nullptr ? env_.largestBlock() : 0;
+  char psram[112] = {0};
+  if (b.psram) {
+    const uint32_t freePs = env_.freePsram != nullptr ? env_.freePsram() : 0;
+    const uint32_t largestPs = env_.largestPsram != nullptr ? env_.largestPsram() : 0;
+    std::snprintf(psram, sizeof psram, "; and psram >= %lu with a %lu block (now %lu and %lu): the TLS buffers",
+                  static_cast<unsigned long>(b.slotPsramBytes), static_cast<unsigned long>(kTlsBufferBytes),
+                  static_cast<unsigned long>(freePs), static_cast<unsigned long>(largestPs));
+  }
+  char lowest[48] = {0};
+  if (uplinkMeasured_) {
+    std::snprintf(lowest, sizeof lowest, ", its last call's lowest %lu", static_cast<unsigned long>(lastUplinkLowest_));
+  }
+  std::snprintf(out, cap,
+                "%s opens %d slot(s) while free heap >= %lu (one slot %lu + the uplink's dip %lu %s + floor %lu + margin %lu) "
+                "and the largest block >= %lu (now %lu and %lu)%s; a call under the floor%s closes the highest slot for %lu min",
+                b.name, b.slots, static_cast<unsigned long>(gateNeedBytes()), static_cast<unsigned long>(b.slotInternalBytes),
+                static_cast<unsigned long>(uplinkDipBytes()), uplinkMeasured_ ? "measured" : "assumed",
+                static_cast<unsigned long>(kHeapFloorBytes), static_cast<unsigned long>(kGateMarginBytes),
+                static_cast<unsigned long>(b.psram ? kPsramThresholdBytes : kTlsBufferBytes), static_cast<unsigned long>(free),
+                static_cast<unsigned long>(largest), psram, lowest, static_cast<unsigned long>(kHeapYieldMs / 60000));
 }
 
 }  // namespace observer

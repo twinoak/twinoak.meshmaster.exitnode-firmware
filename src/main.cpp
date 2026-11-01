@@ -59,6 +59,7 @@
 #include "net/WifiLink.h"
 #include "observer/Observer.h"
 #include "platform/Esp32Platform.h"
+#include "platform/TlsHeap.h"
 #include "settings/Store.h"
 #include "ui/DisplayLines.h"
 #include "ui/Oled.h"
@@ -84,6 +85,7 @@ mm::Observer observer;  // the observer dialect over this board's frames (task p
 mm::MqttClient mqttSlot1;  // the clients the observer's two slots run on: esp-mqtt, one task each, verified TLS
 mm::MqttClient mqttSlot2;
 uint32_t uplinkMemoryFailuresSeen = 0;  // AgentClient::memoryFailures() as last handed to the observer
+uint32_t uplinkCallsSeen = 0;           // KeepAlive's call count as last handed to the observer's gate (task p1.8-31)
 
 ArduinoMillis ms_clock;
 StdRNG fast_rng;
@@ -104,9 +106,28 @@ uint32_t clockForLog() { return agentClock.now(); }
 
 // What the observer's connections read of this board (observer/Connection.h, Environment).
 uint32_t millisNow() { return millis(); }
-uint32_t heapFree() { return ESP.getFreeHeap(); }
+uint32_t heapFree() { return ESP.getFreeHeap(); }  // internal heap: MALLOC_CAP_INTERNAL in this core's Esp.cpp
 uint32_t heapLargestBlock() { return ESP.getMaxAllocHeap(); }
+uint32_t psramFree() { return ESP.getFreePsram(); }  // 0 on a board without PSRAM
+uint32_t psramLargestBlock() { return ESP.getMaxAllocPsram(); }
 uint32_t randomBits() { return esp_random(); }
+
+// What the uplink's calls tell the observer (src/observer/Connection.h): a call that failed for
+// want of memory, and - since task p1.8-31 - every call's cost, so the gate reads what a call
+// dips and a call under the floor takes the highest slot down. From the main loop and from the
+// job pump alike, so that a heartbeat made inside a long job is read as soon as it is made.
+void handUplinkToObserver() {
+  if (server.memoryFailures() != uplinkMemoryFailuresSeen) {
+    uplinkMemoryFailuresSeen = server.memoryFailures();
+    observer.onUplinkMemoryFailure();
+  }
+  const uint32_t calls = server.line().counters().calls;
+  if (calls != uplinkCallsSeen) {
+    uplinkCallsSeen = calls;
+    const mm::AgentClient::HeapCost& c = server.lastCost();
+    if (c.any) observer.onUplinkCall(c.freeBefore, c.lowest, c.freeAfter);
+  }
+}
 
 // ---- the radio ------------------------------------------------------------------------------
 
@@ -232,6 +253,10 @@ void printStatus(Stream& out) {
   if (o.attempted && o.heapAfter != 0) {
     out.printf("; after the tls call %lu", static_cast<unsigned long>(o.heapAfter));
   }
+  if (mm::tlsheap::psramInUse()) {
+    out.printf("; psram free %lu, largest block %lu", static_cast<unsigned long>(ESP.getFreePsram()),
+               static_cast<unsigned long>(ESP.getMaxAllocPsram()));
+  }
   out.print("\r\n");
   // The kept connection and what a call costs (task p1.8-30): the figures task 31 sets the
   // observer's gate from.
@@ -244,19 +269,46 @@ void printStatus(Stream& out) {
 void printWifi(Stream& out) { wifi.scan(out); }
 
 // `get mqtt.status`: one line per broker slot - preset or host, state, since, published,
-// dropped, last error - and the memory rule the slots live under.
+// dropped, last error - and the memory rule the slots live under: this board's figures (task
+// p1.8-31, src/observer/Board.h), what the uplink has done to the heap, where the TLS buffers
+// are, and the least stack the clients' tasks ever had.
 void printMqttStatus(Stream& out) {
-  char line[320];
+  char line[400];
   observer.describe(line, sizeof line);
   out.printf("observer  %s\r\n", line);
   for (int s = 0; s < mm::observer::kSlots; s++) {
+    if (!observer.slotShown(s)) continue;
     observer.describeSlot(s, line, sizeof line);
     out.printf("%s\r\n", line);
   }
-  out.printf("memory    a slot opens while free heap >= %lu and the largest block >= %lu (now %lu and %lu); the uplink's %lu memory failure(s) so far\r\n",
-             static_cast<unsigned long>(mm::observer::kHeapReserveFree), static_cast<unsigned long>(mm::observer::kHeapReserveLargest),
-             static_cast<unsigned long>(ESP.getFreeHeap()), static_cast<unsigned long>(ESP.getMaxAllocHeap()),
-             static_cast<unsigned long>(server.memoryFailures()));
+  observer.describeGate(line, sizeof line);
+  out.printf("memory    %s\r\n", line);
+  out.printf("uplink    %lu memory failure(s) so far, %lu call(s)", static_cast<unsigned long>(server.memoryFailures()),
+             static_cast<unsigned long>(server.line().counters().calls));
+  const mm::AgentClient::HeapCost& c = server.lastCost();
+  if (c.any) {
+    out.printf("; the last %lu free before, lowest %lu during, %lu after", static_cast<unsigned long>(c.freeBefore),
+               static_cast<unsigned long>(c.lowest), static_cast<unsigned long>(c.freeAfter));
+  }
+  out.print("\r\n");
+  if (mm::tlsheap::psramInUse()) {
+    out.printf("tls       buffers of %u bytes and over in psram: %lu allocation(s) routed there, %lu fell back to internal heap\r\n",
+               static_cast<unsigned>(mm::tlsheap::kPsramFromBytes), static_cast<unsigned long>(mm::tlsheap::psramRouted()),
+               static_cast<unsigned long>(mm::tlsheap::psramFallbacks()));
+  } else {
+    out.println("tls       buffers in internal heap (this board has no psram)");
+  }
+  const mm::MqttClient* const clients[mm::observer::kSlots] = {&mqttSlot1, &mqttSlot2};
+  for (int s = 0; s < observer.slotsOnBoard(); s++) {
+    const uint32_t low = clients[s]->stackLowWater();
+    if (low == 0) {
+      out.printf("stack     slot %d task: %lu bytes; nothing measured yet\r\n", s + 1,
+                 static_cast<unsigned long>(mm::MqttClient::kTaskStackBytes));
+    } else {
+      out.printf("stack     slot %d task: %lu bytes, the least ever free %lu\r\n", s + 1,
+                 static_cast<unsigned long>(mm::MqttClient::kTaskStackBytes), static_cast<unsigned long>(low));
+    }
+  }
 }
 
 // `mesh`: what the radio has heard. The names are printed here and in no log line - this is the
@@ -390,8 +442,10 @@ void pumpDuringAJob() {
   console.loop();
   oled.loop();
   // And the observer's queues and events (task p1.7-27): the frames heard during a long job go
-  // to the brokers as they are heard, rather than piling up in a two-kilobyte queue.
+  // to the brokers as they are heard, rather than piling up in a two-kilobyte queue - and what
+  // the uplink's calls inside the job cost (task p1.8-31).
   observer.setLinkUp(wifi.connected());
+  handUplinkToObserver();
   observer.loop();
   // And the heartbeat that fell due while the job was waiting for the budget (task 06): a claim
   // is run to the end before the loop gets its turn back, and a board that is working hard is
@@ -542,6 +596,8 @@ void setup() {
   observerEnv.epoch = &clockForLog;
   observerEnv.freeHeap = &heapFree;
   observerEnv.largestBlock = &heapLargestBlock;
+  observerEnv.freePsram = &psramFree;
+  observerEnv.largestPsram = &psramLargestBlock;
   observerEnv.random = &randomBits;
   observerEnv.caPem = mm::kCarriedRootsPem;
   observer.begin(settings, identity_ok ? &the_mesh.self_id : nullptr, identity_ok ? public_key_hex : nullptr,
@@ -583,13 +639,11 @@ void loop() {
   agent.loop();
 
   // The observer's broker connections: events, timers and queues, never a wait (the clients run
-  // on tasks of their own). The uplink comes first: a call of its that failed for want of memory
-  // takes the highest slot down for ten minutes (src/observer/Connection.h).
+  // on tasks of their own). The uplink comes first: a call of its that failed for want of memory,
+  // or dipped the heap under the floor, takes the highest slot down for ten minutes
+  // (src/observer/Connection.h).
   observer.setLinkUp(wifi.connected());
-  if (server.memoryFailures() != uplinkMemoryFailuresSeen) {
-    uplinkMemoryFailuresSeen = server.memoryFailures();
-    observer.onUplinkMemoryFailure();
-  }
+  handUplinkToObserver();
   observer.loop();
 
   console.loop();

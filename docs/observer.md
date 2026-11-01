@@ -29,9 +29,13 @@ where it is written down.
 Measured on 28 October with `v0.4.0`: a V3 has about 136 KB free with no broker,
 one broker connection costs about 63 KB, and the MeshMaster uplink's call dips
 about 80 KB — so with one broker up, a call took the board to 3 KB free, and a
-second broker never gets memory to connect (it stays *waiting-for-heap*). Pile
-1.8 makes one slot on a V3 the rule and refuses `mqtt2` there; a V4 can carry
-both.
+second broker never gets memory to connect (it stays *waiting-for-heap*). Since
+task p1.8-31 **a V3 has one slot and a V4 two** (`src/observer/Board.h`): on a V3
+`set mqtt2.preset meshmapper` is refused with
+`error: mqtt2.preset: this board has memory for one broker; a V4 carries two`, a
+slot 2 an older image stored is shown off with the same words, and `get
+mqtt.status` shows one slot. The guide's MeshMapper line is therefore the one
+line that does not take on a V3; on a V4 it does ([*What it costs*](#what-it-costs-and-the-order-of-priority)).
 
 The Danish observer guide, as the console of this firmware takes it. `set` takes
 effect at once — no `reboot` is needed for any line here, though the guide's
@@ -116,34 +120,67 @@ PEM:
 
 ## What it costs, and the order of priority
 
-**The radio first, the MeshMaster uplink second, the observer last.** A Heltec V3
-has 320 KB of RAM and no PSRAM; a TLS connection takes about 40 KB of heap
-(the observer firmware's figure for one WSS slot, `MQTT_IMPLEMENTATION.md`),
-and so did the uplink's own handshake every time it called meshmaster.dk - until
-task p1.8-30 kept one connection between calls, so that the handshake is paid
-once per connection and `status`'s `uplink` line says what a call costs now
-([`console.md`](console.md)); task 31 sets the figures below from it. So:
+**The radio first, the MeshMaster uplink second, the observer last.** The
+figures are this firmware's own, measured on the bench, not the observer
+firmware's (`src/observer/Board.h`, where each one says where it comes from):
 
-- A slot connects only while **free heap is at least 88 KB and the largest free
-  block at least 34 KB** (`src/observer/Connection.h`: its own 40 KB, the
-  uplink's 40 KB and 8 KB over; two TLS content buffers of 16 KB). Below that it
-  waits (`waiting-for-heap`) and looks again every five seconds.
+| | Heltec V3 | Heltec V4 |
+|---|---|---|
+| internal heap free, idle, no slot | 136 580 (28 Oct 2026, `v0.4.0`, after a MeshMaster call) | not measured; the same core, so about the same |
+| one slot costs | **63 564** internal (measured 28 Oct 2026: 136 580 → 73 016 with MeshView up) | **30 796** internal + **40 960** PSRAM (derived: the V3's figure less the two 16 KB TLS content buffers, which go to PSRAM; not measured on a V4) |
+| the uplink's call dips | **81 116** (measured 28 Oct 2026, a handshake per call: 136 580 → 55 464); *the board replaces this with what its own last call dipped, once it has made one* | 48 348 (derived the same way; replaced the same way) |
+| the floor a call must stay above | 16 384 (not measured: what WiFi, lwIP and the HTTP client need in flight, twice over) | the same |
+| the gate's margin | 4 096 | the same |
+| **slots the gate will open** | **1** | **2** |
+| where the TLS buffers are | internal heap | PSRAM (every mbedtls allocation of 4 KB and over, through a hook on its allocator - `src/platform/TlsHeap.cpp`) |
+
+So:
+
+- A slot connects only while **free internal heap is at least one slot + the
+  uplink's dip + the floor + the margin**, and the largest free block holds one
+  TLS content buffer (17 KB) on a V3 or the handshake's largest internal
+  allocation (4 KB) on a V4, whose PSRAM must in turn hold the slot's 40 KB and a
+  17 KB block. With the figures above and no call measured yet that is 165 KB on
+  a V3 - more than the board has, on purpose: the dip of a handshake per call is
+  the conservative figure, and the board swaps in **what its own last call
+  dipped** (`status`'s `uplink` line, *lowest during*) as soon as it has one. A
+  call over the kept connection dips a few KB; the gate then asks for about
+  63.5 + a few + 16 + 4 KB, which a V3 at rest has. Below the figure a slot waits
+  (`waiting-for-heap`) and looks again every five seconds; `get mqtt.status`'s
+  `memory` line prints the whole sum and which dip is in force.
 - Two slots never open at once: the second waits for the first's handshake.
-- **When the uplink's call fails for want of memory** while a slot is up — mbedtls
-  said an allocation failed, or the largest free block after the failure could
-  not hold a TLS buffer — the **highest slot closes and stays down ten minutes**,
-  and `get mqtt.status` counts how often (`gave way N time(s)`).
+- **The gate keeps watching.** Every MeshMaster call's lowest free heap is read
+  (task p1.8-30 measures it); a call that **dipped under the floor** while a slot
+  was up - it went through, but nearly did not - closes the **highest slot for
+  ten minutes**, exactly as a call that **failed for want of memory** does
+  (mbedtls said an allocation failed, or the largest free block after the failure
+  could not hold a TLS buffer). `get mqtt.status` counts both as `gave way N
+  time(s)`, and the slot's `last error` says which it was and the figures. A
+  handshake call on a V3 with a slot up is the case that trips it: the kept
+  connection makes those rare (the server closes an idle one after about two
+  minutes), and the bench walk of pile 1.8 is where `min ever` says whether one
+  slot on a V3 truly fits.
+- **A board has the slots its memory allows**: one on a V3, two on a V4. On a V3
+  `set mqtt2.preset` takes `none` and nothing else, with the reason; a slot 2
+  stored by `v0.4.0` is off with the same reason. A custom ESP-IDF build with
+  smaller TLS buffers is what a second slot on a V3 would take, and that is not
+  this pile's.
 - The client runs on its own task: a publish is an enqueue, and the mesh loop and
-  the agent loop never wait on a broker. Between the radio and the client is a
-  queue of 2 KB per slot — about three packet messages — oldest dropped and
-  counted when it fills; a slot that is not connected drops at once and hoards
-  nothing. The brokers see the packets a connected node hears, not a backlog.
+  the agent loop never wait on a broker. Its sizes are set with their arithmetic
+  in `src/net/MqttClient.cpp`: a 512-byte receive buffer (nothing is subscribed),
+  a 1 792-byte send buffer (the CONNECT with its 768-byte token and its 768-byte
+  will, whole - larger than any packet message) and a 6 144-byte task stack
+  (esp-mqtt's default, with the lowest it ever got printed by `get mqtt.status`
+  so the bench can say whether a smaller one would do). Between the radio and the
+  client is a queue of 2 KB per slot — about three packet messages — oldest
+  dropped and counted when it fills; a slot that is not connected drops at once
+  and hoards nothing. The brokers see the packets a connected node hears, not a
+  backlog. The queue is static RAM, not heap, so it stays: shrinking it would
+  free nothing the gate counts.
 - Static RAM: the connections and their queues are about 7.6 KB of the image's
-  RAM (52 % of the V3's 320 KB after this task, 49.8 % before); the TLS contexts
-  and esp-mqtt's tasks are heap, taken when a slot connects and given back when it
-  closes. The figure that matters — free heap with WiFi, the uplink and two WSS
-  connections up on a V3 — is the bench's, and `status`'s `heap` line is where to
-  read it.
+  RAM (52.7 % of the V3's 320 KB after task 31); the TLS contexts and esp-mqtt's
+  tasks are heap, taken when a slot connects and given back when it closes.
+  `status`'s `heap` line (and on a V4 its `psram` figures) is where to read it.
 
 ## What the console shows
 
@@ -152,8 +189,19 @@ once per connection and `status`'s `uplink` line says what a call costs now
 observer  slot 1 meshview connected, slot 2 meshmapper connected; iata AAR, origin "MeshMaster-7F3A"; 412 packet message(s) made, 0 did not fit; 2 of 2 slot(s) connected (get mqtt.status)
 slot 1 meshview (wss://mqtt.meshview.dk:443/mqtt): connected since 12:03:20, root ISRG Root X1/X2; 413 published, 0 dropped, 0 queued; 1 connects, 0 refusal(s), 0 error(s), 0 renewal(s), gave way 0 time(s); last error: none
 slot 2 meshmapper (wss://mqtt.meshmapper.net:443/mqtt): connected since 12:03:26, root ISRG Root X1/X2; 409 published, 4 dropped, 0 queued; 1 connects, 0 refusal(s), 0 error(s), 0 renewal(s), gave way 0 time(s); last error: none
-memory    a slot opens while free heap >= 90112 and the largest block >= 34816 (now 121304 and 65524); the uplink's 0 memory failure(s) so far
+memory    heltec_v4 opens 2 slot(s) while free heap >= 56856 (one slot 30796 + the uplink's dip 5580 measured + floor 16384 + margin 4096) and the largest block >= 4096 (now 121304 and 65524); and psram >= 40960 with a 17408 block (now 1894320 and 1835008): the TLS buffers, its last call's lowest 115724; a call under the floor closes the highest slot for 10 min
+uplink    0 memory failure(s) so far, 41 call(s); the last 121304 free before, lowest 115724 during, 121180 after
+tls       buffers of 4096 bytes and over in psram: 9 allocation(s) routed there, 0 fell back to internal heap
+stack     slot 1 task: 6144 bytes, the least ever free 2328
+stack     slot 2 task: 6144 bytes, the least ever free 2312
 ```
+
+That is a V4. A V3 prints one slot, `heltec_v3 opens 1 slot(s) while free heap >=
+89624 (one slot 63564 + the uplink's dip 5580 measured + floor 16384 + margin
+4096) and the largest block >= 17408 (now …)`, no `psram` figures, `tls buffers in
+internal heap (this board has no psram)` and one `stack` line; and if an older
+image left a slot 2 in it, `slot 2 meshmapper: off (this board has memory for
+one broker; a V4 carries two)`.
 
 **Read line by line**, because every number in it answers a question the bench
 asks:
@@ -165,9 +213,12 @@ asks:
 | `… : <state> since <time>` | the state word and when it was entered, by this board's clock. The seven words are below; `backing off since …, next attempt in N s` and `waiting for heap since …, looks again in N s` carry the wait as well |
 | `root ISRG Root X1/X2` | which CA store verified this connection — the two roots this firmware carries, or `the core's bundle` for a custom broker whose chain ends elsewhere. Never *unverified*: there is no such state |
 | `N published, N dropped, N queued` | **published** is what the broker took, packets and status alike; **dropped** is packet messages this slot threw away — its 2 KB queue was full, or it was not connected; **queued** is what is waiting in that queue right now. `dropped` climbing while `published` does not is a slot that is down, not a slot that is slow |
-| `N connects, N refusal(s), N error(s), N renewal(s), gave way N time(s)` | sessions the broker accepted; CONNECTs it refused; transport failures and lost connections; tokens made again before they expired (about one a day per slot); and how often this slot closed so the MeshMaster uplink could have the heap. **`gave way` above 0 on a healthy board is the reserve being too tight** — the constants are in `src/observer/Connection.h` |
+| `N connects, N refusal(s), N error(s), N renewal(s), gave way N time(s)` | sessions the broker accepted; CONNECTs it refused; transport failures and lost connections; tokens made again before they expired (about one a day per slot); and how often this slot closed so the MeshMaster uplink could have the heap — after a call of the uplink's that failed for want of memory, or one that went through but dipped under the floor. **`gave way` climbing on a healthy board is the board being too small for the slot and a handshake at once**: the slot's `last error` says which call did it and the figures, and `src/observer/Board.h` and `Connection.h` (the floor) are where the constants are |
 | `last error: <phrase>` | the last refusal or failure, one phrase and its numbers (`bad username or password (CONNACK 4)`, `tls handshake failed (tls -0x7780, errno 104)`), or `none`. This is the line to copy verbatim into a bench note; it is also the one the heartbeat carries, so MeshMaster's card shows the same words |
-| `memory  …` | the two thresholds a slot opens above, and the heap as it is **now** — free, and the largest block — followed by how many times the uplink's own call has failed for want of memory. If `largest block` is under the second figure, the second slot is waiting and the line above says so |
+| `memory  …` | the board, how many slots it opens, and the sum a slot opens above — one slot, the uplink's dip (`measured` from this board's last call, or `assumed` from the table above until it has made one), the floor, the margin — then the block the largest allocation needs, the heap as it is **now** (free, and the largest block), on a V4 the same for PSRAM, the last call's lowest free heap, and the rule that closes a slot. If `now` is under the sum, a slot is waiting and its line says so |
+| `uplink  …` | how often the uplink's call has failed for want of memory, how many calls it has made, and what the last one cost (`status`'s `uplink` line has the same, with the kept connection) |
+| `tls  …` | where the TLS buffers are: PSRAM on a V4 (with how many allocations went there and how many had to fall back to internal heap - a V4 with fallbacks is a V4 whose PSRAM is full, which should not happen), the internal heap on a V3 |
+| `stack  …` | each slot's task stack and the least of it that was ever free since the slot opened, read on the task itself; the bench's figure for whether the stack could be smaller |
 
 A slot's state is one of `off`, `waiting-for-wifi`, `waiting-for-clock` (a token
 carries an issue time; nothing is sent before SNTP or the server set the clock),

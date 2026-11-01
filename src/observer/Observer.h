@@ -72,6 +72,9 @@ class Observer : public RxTap, public observer::StatusSource, public IHeartbeatO
   // The MeshMaster uplink's call failed for want of memory (AgentClient::memoryFailures moved):
   // the highest slot gives way for ten minutes.
   void onUplinkMemoryFailure();
+  // The uplink made a call (AgentClient::lastCost): the gate reads what it dipped, and a call
+  // under the floor takes the highest slot down for ten minutes (task p1.8-31).
+  void onUplinkCall(uint32_t freeBefore, uint32_t lowest, uint32_t freeAfter) { link_.onUplinkCall(freeBefore, lowest, freeAfter); }
 
   bool enabled() const { return enabled_; }
   const observer::ObserverSettings& settings() const { return view_; }
@@ -100,6 +103,14 @@ class Observer : public RxTap, public observer::StatusSource, public IHeartbeatO
   void describe(char* out, size_t cap) const;
   // One line per slot for `mqtt.status` (Connections::describe).
   void describeSlot(int slot, char* out, size_t cap) const { link_.describe(slot, out, cap); }
+  // The memory line of `mqtt.status`: the gate's rule with this board's figures (Connections::describeGate).
+  void describeGate(char* out, size_t cap) const { link_.describeGate(out, cap); }
+
+  // How many slots this board opens (observer/Board.h: one on a V3, two on a V4), and whether
+  // slot `slot` is shown at all - the board's own, or one beyond them with a preset stored in
+  // it, which is shown off with the reason rather than hidden.
+  int slotsOnBoard() const { return link_.board().slots; }
+  bool slotShown(int slot) const;
 
   int slotsConfigured() const { return link_.configuredSlots(); }
   int slotsConnected() const { return link_.connectedSlots(); }

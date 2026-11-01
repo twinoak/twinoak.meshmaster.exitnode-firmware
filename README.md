@@ -229,7 +229,7 @@ frames    rx 3 (advert 2, grp-txt 1, txt 0, ack 0, path 0, trace 0, other 0), tx
 wifi      off, wifi.ssid is unset
 time      no time (sntp not started, no wifi)
 server    not configured (meshmaster.token unset)
-observer  off: no slot configured (set mqtt1.preset ...); slot 1 none (preset is none), slot 2 none (preset is none); 3 frame(s) heard while off
+observer  off: no slot configured (set mqtt1.preset ...); slot 1 none (preset is none); 3 frame(s) heard while off
 heap      free 203980, min ever 200772, largest block 110580
 log       level info, frames off, oled on
 > set wifi.ssid Twinoak
@@ -286,7 +286,7 @@ time      2026-09-28T12:03:14Z (sntp)
 server    https://meshmaster.dk: config ok at 12:03:14, agent 17 "Window at Grenaa", transport onboard, budget 2/min gap 20 s, poll 30 s, root ISRG Root X1
 heartbeat last at 12:03:16, 4 answered, poll 120 s; 20 observation(s) posted, 3 waiting, 0 dropped
 jobs      2 run, 3 transaction(s); last job 12346 telemetry ok after 1 tx
-observer  off: no slot configured (set mqtt1.preset ...); slot 1 none (preset is none), slot 2 none (preset is none); 32 frame(s) heard while off
+observer  off: no slot configured (set mqtt1.preset ...); slot 1 none (preset is none); 32 frame(s) heard while off
 heap      free 160104, min ever 152280, largest block 90112; after the tls call 160104
 log       level info, frames off, oled on
 > mesh
