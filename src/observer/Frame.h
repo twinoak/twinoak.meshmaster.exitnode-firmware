@@ -4,7 +4,7 @@
 // all of them in the two header bytes and the path, none of them in the payload. Nothing here
 // looks inside the payload, and nothing here writes a byte of it anywhere.
 //
-// The layout is MeshCore's at the pin, mesh::Packet::readFrom (src/Packet.cpp:65-85 at d9296435)
+// The layout is MeshCore's at the pin, mesh::Packet::readFrom (src/Packet.cpp:65-85 at 81dbae59)
 // and Dispatcher::tryParsePacket (src/Dispatcher.cpp:148-190): a header byte; four bytes of
 // transport codes when the route says so; the path_len byte, whose top two bits are the hash size
 // minus one and whose low six are the hop count; the path; the payload to the end of the frame.

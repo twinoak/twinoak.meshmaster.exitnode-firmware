@@ -314,7 +314,7 @@ TEST(Claim, AJobThisFirmwareCannotRunIsRecognisedBeforeAnythingIsSent) {
 // The three types any login is answered, at every class the server may send them at - and
 // `neighbours` is one of them since task p1.2-10. The firmware this project pins checks no
 // permission at all on REQ_TYPE_GET_NEIGHBOURS (examples/simple_repeater/MyMesh.cpp:276 at
-// d9296435, against :262's `sender->isAdmin()` for the access list), and meshmaster.dk's task
+// 81dbae59, against :262's `sender->isAdmin()` for the access list), and meshmaster.dk's task
 // p4.7-94 now sends the job at class `guest` for a pair made at the guest door - which this
 // board answered `unsupported` before, where the Pi agent answered the list
 // (EXIT-NODES §7's table, "the binary neighbours request answers any login at d9296435").

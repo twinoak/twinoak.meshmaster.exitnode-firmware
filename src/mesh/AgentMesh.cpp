@@ -372,7 +372,7 @@ SendResult AgentMesh::dispatch(mesh::Packet* pkt, size_t clearBytes) {
 SendResult AgentMesh::sendLogin(const char* password, uint32_t& tag) {
   if (!peerSet_) return SendResult::Failed;
   // The tag, then the password's bytes - at most fifteen, as BaseChatMesh::sendLogin sends
-  // them (src/helpers/BaseChatMesh.cpp:572-591 at d9296435). With no password it is the four
+  // them (src/helpers/BaseChatMesh.cpp:603-622 at 81dbae59). With no password it is the four
   // bytes of the tag and nothing after them, which is the ACL login: `MyMesh::handleLoginReq`
   // reads data[0] of what follows the timestamp, the datagram's plaintext is zero-padded to a
   // cipher block, so the empty string arrives as the empty string and the repeater answers from
@@ -382,7 +382,7 @@ SendResult AgentMesh::sendLogin(const char* password, uint32_t& tag) {
   // **A login reply carries no tag of ours** (found by the host harness, task p1.1-08; the same
   // fix is on that branch). `handleRequest` reflects the sender's timestamp back as the reply's
   // first four bytes, but `handleLoginReq` writes the **repeater's** `getCurrentTimeUnique()` there
-  // instead (simple_repeater/MyMesh.cpp:129-131 at d9296435). So the timestamp below is what the
+  // instead (simple_repeater/MyMesh.cpp:129-131 at 81dbae59). So the timestamp below is what the
   // repeater judges a replay by and nothing else; `tag` is left 0, which is how awaitReply() is
   // told to take the next RESPONSE from this peer whatever its first four bytes - as the .NET
   // agent does, since PUSH_CODE_LOGIN_SUCCESS carries no tag either. Before this, every login
@@ -423,8 +423,8 @@ SendResult AgentMesh::sendCli(const char* text, bool sensitive, uint32_t& timest
   const size_t len = std::strlen(text);
   // Mesh::createDatagram refuses a plaintext past MAX_PACKET_PAYLOAD - MAC - (block - 1).
   if (len == 0 || len + 5u > MAX_PACKET_PAYLOAD - 16u - 15u) return SendResult::Failed;
-  // The shape BaseChatMesh::sendMessage gives a CLI line (src/helpers/BaseChatMesh.cpp:442-470
-  // at d9296435): the sender timestamp, a flags byte of attempt 0 and TXT_TYPE_CLI_DATA in the
+  // The shape BaseChatMesh::sendMessage gives a CLI line (src/helpers/BaseChatMesh.cpp:473-501
+  // at 81dbae59): the sender timestamp, a flags byte of attempt 0 and TXT_TYPE_CLI_DATA in the
   // upper bits, then the text. The repeater runs it when the timestamp is above the last it saw
   // from this key, answers nothing to an equal one, and drops a lower one as a replay. The
   // timestamp is drawn here, from the one series every tag and every line of this board come
@@ -605,7 +605,7 @@ void AgentMesh::onTraceRecv(mesh::Packet* pkt, uint32_t tag, uint32_t, uint8_t f
 
 namespace {
 // A direct send on an empty path is a zero-hop send: ROUTE_TYPE_DIRECT and path_len 0, which is
-// what Mesh's own zero-hop send sets (Mesh.cpp:717-726 at d9296435) - and it goes through the one
+// what Mesh's own zero-hop send sets (Mesh.cpp:717-726 at 81dbae59) - and it goes through the one
 // direct send this file has, so it carries no transport code (test/test_flood_scope holds that).
 const uint8_t kNoPath[1] = {0};
 }  // namespace

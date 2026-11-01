@@ -79,7 +79,7 @@ void formatClientVersion(const char* firmwareVersion, char* out, size_t cap) {
 }
 
 float packetScore(float snr, int sf, int packetLen) {
-  // RadioLibWrappers.cpp:221-228, "based on Semtech datasheets": the SNR below which a frame at
+  // RadioLibWrappers.cpp:224-231, "based on Semtech datasheets": the SNR below which a frame at
   // this spreading factor has no chance. SF 12 is the table's last row and MeshCore's own limit
   // (radio.sf is 5..12), so a factor past it is answered as one below 7 is.
   static const float kSnrThreshold[] = {-7.5f, -10.0f, -12.5f, -15.0f, -17.5f, -20.0f};

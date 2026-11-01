@@ -33,7 +33,7 @@
 
 namespace mm {
 
-// The sizes a reply is held in. These are MeshCore's at the pin (MeshCore.h at d9296435:
+// The sizes a reply is held in. These are MeshCore's at the pin (MeshCore.h at 81dbae59:
 // MAX_PACKET_PAYLOAD 184, MAX_PATH_SIZE 64) written as the library's own numbers, and the link
 // protocol's too - LINK-PROTOCOL §6.1 caps a path at 64 bytes. AgentMesh.h asserts that
 // MeshCore's fit inside them.
@@ -84,7 +84,7 @@ struct MeshReply {
 // What a send came to. The words are MeshCore's MSG_SEND_* and mean the same thing.
 enum class SendResult : uint8_t { Failed, Flood, Direct };
 
-// The request types of examples/simple_repeater/MyMesh.cpp at d9296435 that the runner sends.
+// The request types of examples/simple_repeater/MyMesh.cpp at 81dbae59 that the runner sends.
 // kReqTypeGetAccessList (0x05) is beside its parser in mesh/ReplyCodec.h.
 constexpr uint8_t kReqTypeGetStatus = 0x01;
 constexpr uint8_t kReqTypeGetTelemetry = 0x03;
@@ -136,7 +136,7 @@ class IMesh {
   virtual const char* floodScope() const { return nullptr; }
 
   // Scoped or unscoped for the **next** flood, told per send and never per job (the companion's
-  // own `send_unscoped`, examples/companion_radio/MyMesh.cpp at d9296435). A direct send ignores
+  // own `send_unscoped`, examples/companion_radio/MyMesh.cpp at 81dbae59). A direct send ignores
   // it, and so does a mesh whose scope is `*` or nullptr - there is nothing to drop. The rule
   // that decides which send gets which is agent/FloodScope.h's and lives in the job runner.
   virtual void setFloodMode(FloodMode mode) { (void)mode; }
@@ -177,7 +177,7 @@ class IMesh {
 
   // One CLI line as a TXT_MSG datagram of type CLI data, on the admin session. The mesh draws
   // the sender timestamp - the one the repeater judges replays by, which must be strictly above
-  // the last one it saw from this key (MyMesh::onPeerDataRecv at d9296435 answers an equal one
+  // the last one it saw from this key (MyMesh::onPeerDataRecv at 81dbae59 answers an equal one
   // with nothing and does not run the command) - from its unique-time series, puts it in the
   // packet and hands it back in `timestamp`; a retry calls again and gets a fresh one. The reply
   // is a TXT_MSG of the repeater's own and is awaited with awaitText(). `sensitive` is a line

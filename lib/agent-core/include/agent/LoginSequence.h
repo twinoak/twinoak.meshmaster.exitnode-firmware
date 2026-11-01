@@ -5,7 +5,7 @@
 // `JobRunner::ensureSession` is the .NET agent's `EnsureSessionAsync`: the material of the job's
 // class once, and once more when the first try got no reply. Refused is `unauthorized`, silence
 // twice is `unreachable` - and on stock firmware a password the repeater does not know is silence
-// (`handleLoginReq`, examples/simple_repeater/MyMesh.cpp:89-141 at d9296435, is `return 0` to a
+// (`handleLoginReq`, examples/simple_repeater/MyMesh.cpp:89-141 at 81dbae59, is `return 0` to a
 // non-blank password that is neither of its two), so a wrong password and a dead repeater look the
 // same from here. That matters in exactly one place: a job handed the **new** candidate of an
 // `unverified` credential rotation, where the server's fallback to the old candidate is keyed to
