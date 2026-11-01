@@ -43,14 +43,15 @@ std::string setReply(const mm::KeyDef& key) {
 
 // ---- the keys -------------------------------------------------------------------------------
 
-TEST(Keys, TheTableHasTheTwentyEightKeysTheTasksAskFor) {
-  // The twelve of phase 1, and the sixteen of the observer (task p1.7-26), in `get`'s order.
-  const char* expected[] = {"wifi.ssid",      "wifi.pass",      "meshmaster.url", "meshmaster.token", "radio.freq",
-                            "radio.bw",       "radio.sf",       "radio.cr",       "radio.tx",         "log.level",
-                            "log.frames",     "display.timeout", "mqtt.origin",   "mqtt.iata",        "mqtt.owner",
-                            "mqtt.email",     "mqtt1.preset",   "mqtt1.server",   "mqtt1.audience",   "mqtt1.topic",
-                            "mqtt1.username", "mqtt1.password", "mqtt2.preset",   "mqtt2.server",     "mqtt2.audience",
-                            "mqtt2.topic",    "mqtt2.username", "mqtt2.password"};
+TEST(Keys, TheTableHasTheThirtyKeysTheTasksAskFor) {
+  // The twelve of phase 1, the two of the flood scope (task p1.8-32) and the sixteen of the
+  // observer (task p1.7-26), in `get`'s order.
+  const char* expected[] = {"wifi.ssid",      "wifi.pass",      "meshmaster.url",  "meshmaster.token", "radio.freq",
+                            "radio.bw",       "radio.sf",       "radio.cr",        "radio.tx",         "log.level",
+                            "log.frames",     "display.timeout", "flood.scope",    "flood.unscoped",   "mqtt.origin",
+                            "mqtt.iata",      "mqtt.owner",     "mqtt.email",      "mqtt1.preset",     "mqtt1.server",
+                            "mqtt1.audience", "mqtt1.topic",    "mqtt1.username",  "mqtt1.password",   "mqtt2.preset",
+                            "mqtt2.server",   "mqtt2.audience", "mqtt2.topic",     "mqtt2.username",   "mqtt2.password"};
   ASSERT_EQ(kKeyCount, static_cast<int>(sizeof expected / sizeof expected[0]));
   for (int i = 0; i < kKeyCount; i++) {
     EXPECT_STREQ(expected[i], kKeys[i].name);
@@ -130,6 +131,8 @@ TEST(Keys, EveryKeyAcceptsAValidValueAndSetIsAcceptedForIt) {
       {"log.level", "debug"},
       {"log.frames", "on"},
       {"display.timeout", "300"},
+      {"flood.scope", "dk-aarhus"},
+      {"flood.unscoped", "never"},
       {"mqtt.origin", "Window at Grenaa"},
       {"mqtt.iata", "AAR"},
       {"mqtt.owner", "0123456789ABCDEF0123456789abcdef0123456789ABCDEF0123456789abcdef"},
@@ -485,6 +488,38 @@ TEST(Set, ASlotTheBoardHasNoMemoryForTakesNoPresetButNone) {
   EXPECT_TRUE(parseLine("set mqtt2.preset custom").ok);
   mm::observer::useBoardProfile(nullptr);
   EXPECT_EQ(2, mm::observer::boardProfile().slots) << "the host builds with the V4's profile";
+}
+
+// `set flood.scope` takes a region name the firmware's own region names allow, `*`, or nothing
+// (task p1.8-32; src/mesh/TransportScope.h holds the rule against RegionMap::is_name_char at the
+// pin). A leading `#` is accepted and dropped, because that is how MeshCore writes one.
+TEST(Set, AFloodScopeIsARegionNameOrNothingAtAll) {
+  EXPECT_TRUE(parseLine("set flood.scope dk").ok);
+  EXPECT_TRUE(parseLine("set flood.scope dk-aarhus").ok);
+  EXPECT_TRUE(parseLine("set flood.scope *").ok);
+
+  const ParseResult hashed = parseLine("set flood.scope #dk");
+  ASSERT_TRUE(hashed.ok);
+  EXPECT_STREQ("dk", hashed.command.value) << "the # is the key's arithmetic, not the setting's";
+
+  for (const char* bad : {"set flood.scope dk aarhus", "set flood.scope dk.aarhus", "set flood.scope dk+1",
+                          "set flood.scope $private", "set flood.scope ##dk"}) {
+    const ParseResult r = parseLine(bad);
+    EXPECT_FALSE(r.ok) << bad;
+    if (!r.ok) {
+      EXPECT_EQ(std::string(r.error).rfind("flood.scope: ", 0), 0u) << r.error;
+    }
+  }
+  EXPECT_FALSE(parseLine("set flood.scope aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").ok) << "thirty-one characters";
+  EXPECT_TRUE(parseLine("set flood.scope aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").ok) << "thirty";
+
+  EXPECT_TRUE(parseLine("set flood.unscoped retry").ok);
+  EXPECT_TRUE(parseLine("set flood.unscoped never").ok);
+  EXPECT_STREQ("flood.unscoped: retry | never", parseLine("set flood.unscoped off").error);
+
+  EXPECT_EQ(describe(*mm::findKey("flood.scope"), nullptr), "flood.scope unset (dk)");
+  EXPECT_EQ(describe(*mm::findKey("flood.unscoped"), nullptr), "flood.unscoped unset (retry)");
+  EXPECT_EQ(describe(*mm::findKey("flood.scope"), "*"), "flood.scope *");
 }
 
 int main(int argc, char** argv) {

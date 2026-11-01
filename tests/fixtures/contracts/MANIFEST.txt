@@ -1,5 +1,5 @@
 # The contract fixtures of the .NET agent, copied - never edited here.
-# source: twinoak/meshmaster.dk/tests/fixtures/contracts at commit 67c2a4c87dbd0a17c21b498751dd28d736cd867d
+# source: twinoak/meshmaster.dk/tests/fixtures/contracts at commit 42e4d45145eb9c64bda89f7b4c98288fd71a12c4
 # written by tools/sync-fixtures.ps1; see README.md in this directory
 #
 # sha256                                                           bytes  name
@@ -9,7 +9,9 @@
 4716835472f634990290eaca0692a8fe9a49911330ab2dfdb74068f882b16c98      46  AdvertRequestResult.json
 486664f1a504c8df318c3385f693b8944142ce1fc19856d739e41addd5abc10b      50  AgentBudget.json
 26c224b258135d329aecd0df24994acc0a238466b0ede9d5365100e48eb0edc3     186  AgentConfig.json
+d2fbe1ade4e5076051135b53cf71bcb2468df285d167096822e10583a066b07b      92  AgentFlood.json
 7536f7d030b008d05c6b3c253bd0d6581d22f9d2309933842b90edf5c036a68f     544  AgentHeartbeat.json
+2c8443fa07a2b147d501f1299422fe7a650de2958074fc02b50851d284cc3313     644  AgentHeartbeatFlood.json
 a7389b66dbacf0b120fef712c51b073f6c0d6942b291e09d50d32005de2425ca     260  AgentHeartbeatNoKey.json
 2991fa2724df8d42187922d9cd8a56a768cfe1fcd9d999009366c52ad02657c5     495  AgentHeartbeatNoWake.json
 082d3883487506e3910dfd63a822dc9b7b78a766fe0ed26226e4f268e1c628e1     936  AgentHeartbeatObserver.json

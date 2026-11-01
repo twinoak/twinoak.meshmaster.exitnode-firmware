@@ -89,6 +89,7 @@
 #include <agent/Airtime.h>
 #include <agent/ConfigApply.h>
 #include <agent/ConfigRead.h>
+#include <agent/FloodScope.h>
 #include <agent/IJobExtension.h>
 #include <agent/IMesh.h>
 #include <agent/IPlatform.h>
@@ -304,6 +305,19 @@ class JobRunner {
   // One line for `status`.
   void describe(char* out, size_t cap) const;
 
+  // ------------------------------------------------------------------ the flood scope
+
+  // `flood.unscoped` on the console: whether the second flood of a transaction drops the scope
+  // (agent/FloodScope.h; meshmaster.dk's D-47). The scope itself is the mesh's (IMesh::floodScope)
+  // and is set where the mesh is.
+  void setFloodRetry(UnscopedRetry retry) { flood_.setRetry(retry); }
+  // What the heartbeat's `flood` object carries: the three counts, per flooded transaction since
+  // boot, and whether the unscoped retry is on **and** there is a scope to drop for one send.
+  const FloodCounts& floodCounts() const { return flood_.counts(); }
+  bool floodUnscopedRetry() const { return flood_.unscopedRetryFor(mesh_ == nullptr ? nullptr : mesh_->floodScope()); }
+  // `status`'s `flood` line: the scope this mesh floods in and the counts since boot.
+  void describeFlood(char* out, size_t cap) const;
+
  private:
   // What one job is while it runs.
   struct Context {
@@ -450,6 +464,24 @@ class JobRunner {
   // when it was Arduino's.
   uint32_t millis() const { return platform_->millis(); }
 
+  // ---- the flood scope, around every send that may flood (agent/FloodScope.h) ----
+  //
+  // One flooded transaction is one retry loop, and the three calls below are the whole of it:
+  // `FloodTransaction` is the loop's own lifetime (nestable - a re-login inside a request's retry
+  // floods inside the transaction already running), `scopeTheNextSend` tells the mesh which shape
+  // to use and `noteSend` records what the send came to. A reply is `flood_.answered()`.
+  struct FloodTransaction {
+    explicit FloodTransaction(FloodPolicy& policy) : policy_(policy) { policy_.begin(); }
+    ~FloodTransaction() { policy_.end(); }
+    FloodTransaction(const FloodTransaction&) = delete;
+    FloodTransaction& operator=(const FloodTransaction&) = delete;
+    FloodPolicy& policy_;
+  };
+  FloodMode scopeTheNextSend();
+  void noteSend(SendResult sent, FloodMode mode);
+  // The words a job's log line prints for a send: `direct`, `flood, scope dk`, `flood, unscoped`.
+  void describeSend(SendResult sent, FloodMode mode, char* out, size_t cap) const;
+
   IMesh* mesh_ = nullptr;
   IUplink* server_ = nullptr;
   IPlatform* platform_ = nullptr;
@@ -460,6 +492,8 @@ class JobRunner {
 
   AirtimeGate gate_;
   SessionStore sessions_;
+  // The flood scope's rule and its counts (agent/FloodScope.h, task p1.8-32).
+  FloodPolicy flood_;
   // The wake's ledger, or null: AgentLoop::begin lends it (setMeter).
   UplinkMeter* meter_ = nullptr;
 

@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "mesh/TransportScope.h"
 #include "observer/Board.h"
 #include "observer/Presets.h"
 
@@ -42,6 +43,12 @@ const KeyDef kKeys[kKeyCount] = {
     {"log.level", "log_level", ValueKind::Level, "info", 0, 0, 0, 0, "error | warn | info | debug"},
     {"log.frames", "log_frames", ValueKind::OnOff, "off", 0, 0, 0, 0, "on | off: one line per received frame, header only, never the payload"},
     {"display.timeout", "disp_timeout", ValueKind::Int, "0", 0, 86400, 0, 0, "seconds the OLED stays lit after a button press, 0..86400; 0 never turns it off, 300 is what this firmware did before"},
+    // The flood scope (task p1.8-32; meshmaster.dk's D-47). The default is the Danish standard's
+    // region, which every repeater that follows it holds with flood allowed; `*` is what an
+    // installation outside that standard sets. A leading `#` is accepted and dropped
+    // (normalizeValue), because that is how MeshCore writes a hashtag region's name.
+    {"flood.scope", "flood_scope", ValueKind::Region, "dk", 0, 0, 1, kRegionNameCap, "the region every flood carries: a region name (dk, dk-aarhus) or * for no scope at all"},
+    {"flood.unscoped", "flood_unscop", ValueKind::Retry, "retry", 0, 0, 0, 0, "retry | never: whether the second flood of a transaction drops the scope, while unscoped floods are still forwarded"},
     // The observer (task p1.7-26, src/observer/): the names are the observer firmware's, the sizes
     // its MQTTPrefs buffers' (MQTTPrefsStorage.h:68-95 at d664d89d: origin 32, iata 8, owner 65,
     // email 64, host 64, username 32, password 64, topic 96, audience 64), less one for the NUL.
@@ -366,13 +373,40 @@ bool validateValue(const KeyDef& key, const char* value, char* err, size_t errCa
       }
       return true;
     }
+
+    case ValueKind::Region:
+      // The firmware's own region-name characters (RegionMap::is_name_char at the pin), thirty
+      // of them at most, with `*` for *no scope at all* and a leading `#` accepted and dropped.
+      // A private region (`$name`) is refused: its key is in the node's own keystore and cannot
+      // be derived, and this setting takes names and never keys (src/mesh/TransportScope.h).
+      if (isFloodScopeValue(value)) return true;
+      std::snprintf(msg, sizeof msg,
+                    "%s: a region name of at most %u characters (letters, digits and -; a leading # is dropped) or * "
+                    "for no scope; a private region ($name) is not taken",
+                    key.name, static_cast<unsigned>(kRegionNameCap));
+      say(err, errCap, msg);
+      return false;
+
+    case ValueKind::Retry:
+      if (std::strcmp(value, "retry") == 0 || std::strcmp(value, "never") == 0) return true;
+      std::snprintf(msg, sizeof msg, "%s: retry | never", key.name);
+      say(err, errCap, msg);
+      return false;
   }
   say(err, errCap, "unknown value kind");
   return false;
 }
 
 void normalizeValue(const KeyDef& key, char* value) {
-  if (value == nullptr || key.kind != ValueKind::Iata) return;
+  if (value == nullptr) return;
+  // A region typed with the `#` MeshCore writes it with is stored without one: the key is made
+  // from `#` and the name, so the `#` is the arithmetic's and not the setting's.
+  if (key.kind == ValueKind::Region) {
+    const char* bare = floodScopeBareName(value);
+    if (bare != value) std::memmove(value, bare, std::strlen(bare) + 1);
+    return;
+  }
+  if (key.kind != ValueKind::Iata) return;
   for (char* p = value; *p; p++) *p = static_cast<char>(std::toupper(static_cast<unsigned char>(*p)));
 }
 

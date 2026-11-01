@@ -291,6 +291,22 @@ jobs:
           optional. The Danish observer guide's lines (`set mqtt1.preset custom`, …) work as typed too,
           except its MeshMapper line on a V3.
 
+          **The flood scope**: nothing to type. `set flood.scope dk` is the default — the Danish
+          standard's region, which every repeater that follows it forwards — and it needs typing only
+          to change it:
+
+          ```
+          get flood.scope
+          set flood.scope dk-aarhus
+          set flood.scope *
+          ```
+
+          A *flood* is what the board sends when it has no path to a repeater: a login, and path
+          discovery. Each one now carries the region's transport code, and the second try of a
+          transaction drops it, for the repeaters that have no region map yet. `*` is every flood
+          with no scope at all, and `set flood.unscoped never` turns off that second try.
+          `status`'s `flood` line counts which shape was answered.
+
           Every command and setting: `docs/console.md` and `docs/observer.md` in the repository.
           EOF
           } > NOTES.md

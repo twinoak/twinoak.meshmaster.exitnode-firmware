@@ -4,13 +4,15 @@
 // ObservationBatch.json **byte for byte**, for the inputs MeshMaster.Contracts' own round-trip
 // tests wrote those fixtures from. A difference is a bug in the firmware, not a second dialect.
 //
-// Three heartbeat fixtures, because the record has three shapes an exit node really sends: the
+// Four heartbeat fixtures, because the record has four shapes an exit node really sends: the
 // one that proposes a check-in interval and a wake cap, the one that proposes neither - which is
 // what this board sends - and, since meshmaster.dk's task p4.17-140 and this repository's task
 // p1.7-28, the one that also carries the `observer` object, which is what this board sends once
-// a slot of the community's MQTT maps is configured on its console (D-46). The second is a file
-// of meshmaster.dk's since its task p4.15-131; before it, this suite held that shape by cutting
-// the first file's bytes (task p1.6-24).
+// a slot of the community's MQTT maps is configured on its console (D-46). The fourth is the
+// `flood` object of meshmaster.dk's task p4.20-151 and this repository's task p1.8-32 (D-47),
+// which every board that has a flood scope sends. The second is a file of meshmaster.dk's since
+// its task p4.15-131; before it, this suite held that shape by cutting the first file's bytes
+// (task p1.6-24).
 //
 // ObservationBatch had no fixture until meshmaster.dk's task p4.3-71 wrote one, and this test
 // held the batch to the record in src/MeshMaster.Contracts/Envelopes.cs instead. The file is
@@ -238,6 +240,82 @@ TEST(Observer, AnAgentWithNoObserverWritesTheHeartbeatItWroteBefore) {
   const std::string json = heartbeatJson(hb);
   EXPECT_EQ(noWake, json);
   EXPECT_EQ(std::string::npos, json.find("observer"));
+}
+
+// ---- the flood scope (task p1.8-32; meshmaster.dk's D-47 and its task p4.20-151) --------------
+
+// `AgentHeartbeatFlood.json` is AgentHeartbeat.json with the `flood` object appended, as the
+// observer file is with its own: the same sample, carrying the scope, whether the unscoped retry
+// is on, and the three counts of flooded transactions.
+TEST(Flood, TheSameInputMakesTheDotNetFixtureByteForByte) {
+  const std::string fixture = readFixture("AgentHeartbeatFlood.json");
+  ASSERT_FALSE(fixture.empty())
+      << "tests/fixtures/contracts/AgentHeartbeatFlood.json is missing - run tools/sync-fixtures.ps1";
+
+  mm::HeartbeatFlood flood;
+  flood.scope = "dk";
+  flood.unscopedRetry = true;
+  flood.answeredScoped = 41;
+  flood.answeredUnscoped = 3;
+  flood.unanswered = 2;
+
+  const mm::ErrorCounter errors[] = {{"uplink", 0}};
+  mm::Heartbeat hb = theFixturesSample(errors, 1);
+  hb.hasNextCheckInS = true;
+  hb.nextCheckInS = 3600;
+  hb.hasMaxTransactionsThisWake = true;
+  hb.maxTransactionsThisWake = 12;
+  hb.flood = &flood;
+
+  EXPECT_EQ(fixture, heartbeatJson(hb));
+
+  // The same sample, and the object on its own is a file of its own which the heartbeat holds
+  // verbatim (tests/fixtures/contracts/README.md).
+  const std::string withWake = readFixture("AgentHeartbeat.json");
+  ASSERT_FALSE(withWake.empty());
+  EXPECT_EQ(withWake.substr(0, withWake.size() - 1), fixture.substr(0, withWake.size() - 1))
+      << "AgentHeartbeatFlood.json is no longer AgentHeartbeat.json plus the flood object";
+  const std::string object = readFixture("AgentFlood.json");
+  ASSERT_FALSE(object.empty());
+  EXPECT_NE(std::string::npos, fixture.find(object)) << "the heartbeat does not hold AgentFlood.json";
+}
+
+// The one that matters for every exit node built before the field existed: **no scope reported,
+// no member, and the body does not move by a byte**.
+TEST(Flood, AnAgentThatSaysNothingAboutScopeWritesTheHeartbeatItWroteBefore) {
+  const std::string noWake = readFixture("AgentHeartbeatNoWake.json");
+  ASSERT_FALSE(noWake.empty());
+
+  const mm::ErrorCounter errors[] = {{"uplink", 0}};
+  const mm::Heartbeat hb = theFixturesSample(errors, 1);
+  EXPECT_EQ(nullptr, hb.flood) << "the default is to carry no flood object";
+  const std::string json = heartbeatJson(hb);
+  EXPECT_EQ(noWake, json);
+  EXPECT_EQ(std::string::npos, json.find("flood"));
+}
+
+// `scope` is the one optional member: null is *the companion's own*, which on the wire is the
+// absence of the member inside an object that is present. The bool and the three counts are the
+// record's non-nullable members and are written whatever they are.
+TEST(Flood, ANullScopeIsTheAbsenceOfTheMemberAndNotAnEmptyString) {
+  mm::HeartbeatFlood flood;  // scope nullptr, retry off, every count 0
+  mm::Heartbeat hb;
+  hb.agentVersion = "v";
+  hb.at = 0;
+  hb.hasJobTypes = false;
+  hb.hasBudget = false;
+  hb.flood = &flood;
+  const std::string json = heartbeatJson(hb);
+  EXPECT_NE(std::string::npos,
+            json.find("\"flood\":{\"unscopedRetry\":false,\"answeredScoped\":0,\"answeredUnscoped\":0,"
+                      "\"unanswered\":0}}"))
+      << json;
+  // `unscopedRetry` holds the letters of "scope", so the member and not the word.
+  EXPECT_EQ(std::string::npos, json.find("\"scope\""));
+
+  flood.scope = "*";
+  const std::string unscoped = heartbeatJson(hb);
+  EXPECT_NE(std::string::npos, unscoped.find("\"flood\":{\"scope\":\"*\",\"unscopedRetry\":false")) << unscoped;
 }
 
 // A slot that is off names neither preset nor broker and has no clock behind it, so four of the

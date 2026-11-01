@@ -69,6 +69,7 @@
 // answer: trace                 cite: fixture trace-data.hex
 // answer: trace                 cite: fw companion-v1.17.1 d9296435 src/Mesh.cpp:42-67 Mesh::onRecvPacket -- a TRACE states its hash size as an exponent in the flags byte and carries one SNR a hop, the final one measured on the packet home
 // answer: discovery             cite: fw companion-v1.17.1 d9296435 examples/companion_radio/MyMesh.cpp:1602-1630 MyMesh::handleCmdFrame -- path discovery is a flooded base-telemetry request, so what answers it is the telemetry reply and a path return
+// answer: flood-scope           cite: fw repeater-v1.17.1 d9296435 examples/simple_repeater/MyMesh.cpp:556-567 MyMesh::onRecvPacket -- a scoped flood is matched against the region map and an unscoped one against the wildcard, and a flood with no region behind it is forwarded by nobody (allowPacketForward, same file 434-443)
 //
 // ---- end of the manifest ---------------------------------------------------------------------
 
@@ -127,6 +128,9 @@ struct Send {
   std::string text;     // Cli only
   bool sensitive = false;
   bool answered = false;  // a reply was delivered for this send
+  // Which shape a flood went out in (IMesh::setFloodMode, task p1.8-32); false for a direct send
+  // and for a mesh whose scope is `*`.
+  bool scoped = false;
 
   const char* kindName() const {
     switch (kind) {
@@ -189,6 +193,19 @@ class FakeMesh : public mm::IMesh {
   void setFirmware(const std::string& ver) { firmware_ = ver; }
   void setBoardName(const std::string& board) { board_ = board; }
   void setRegionListing(const std::string& listing) { regionListing_ = listing; }
+  // The flood scope this mesh reports (IMesh::floodScope): a region's name, `*`, or the empty
+  // string for a mesh that says **nothing** about scope, which answers nullptr as the interface's
+  // own default does - and which is this fake's own default, so that every suite written before
+  // task p1.8-32 sends the heartbeat it always sent. A test of the scope says `setFloodScope("dk")`
+  // and gets what the board's key table falls back to.
+  void setFloodScope(const std::string& scope) { floodScope_ = scope; }
+  // answer: flood-scope - which shape of flood reaches this repeater at all. A repeater with no
+  // region map drops a `dk` flood it would have forwarded unscoped, and a mesh of repeaters
+  // running `flood.max.unscoped=0` never carries an unscoped one. Both reach it by default.
+  void setFloodsReaching(bool scoped, bool unscoped) {
+    scopedReaches_ = scoped;
+    unscopedReaches_ = unscoped;
+  }
   void setRegionDefault(const std::string& scope) { regionDefault_ = scope; }
   void setNeighbours(std::vector<NeighbourEntry> list) { neighbours_ = std::move(list); }
   void setRepeaterClock(uint32_t epoch) { repeaterNow_ = epoch; }
@@ -244,6 +261,15 @@ class FakeMesh : public mm::IMesh {
     return n;
   }
   int logins() const { return count(Send::Kind::Login); }
+  // The shape of every flood that went out, in order: true scoped, false unscoped. A direct send
+  // contributes nothing.
+  std::vector<bool> floodShapes() const {
+    std::vector<bool> out;
+    for (const Send& s : sends_) {
+      if (!s.direct) out.push_back(s.scoped);
+    }
+    return out;
+  }
   int requests() const { return count(Send::Kind::Request); }
   int cliLines() const { return count(Send::Kind::Cli); }
   int requestsOf(uint8_t reqType) const {
@@ -290,6 +316,9 @@ class FakeMesh : public mm::IMesh {
   void forgetSends() { sends_.clear(); }
 
   // ------------------------------------------------------------------ IMesh
+
+  const char* floodScope() const override { return floodScope_.empty() ? nullptr : floodScope_.c_str(); }
+  void setFloodMode(mm::FloodMode mode) override { nextMode_ = mode; }
 
   void setRing(mm::ObservationRing* ring) override { ring_ = ring; }
   mm::ObservationRing* ring() const { return ring_; }
@@ -555,6 +584,9 @@ class FakeMesh : public mm::IMesh {
     s.kind = kind;
     s.atMs = platform_.millis();
     s.direct = alwaysDirect || (!alwaysFlood && havePath_);
+    // What the mesh was last told, as this mesh's own scope allows it: `*` and "nothing at all"
+    // have no scope to carry, so every flood of theirs is unscoped.
+    s.scoped = !s.direct && floodScope_ != "*" && !floodScope_.empty() && nextMode_ == mm::FloodMode::Scoped;
     s.tag = tag;
     sends_.push_back(s);
     counters_.tx++;
@@ -567,7 +599,15 @@ class FakeMesh : public mm::IMesh {
       silentSends_--;
       return false;
     }
+    if (!floodReaches()) return false;
     return addressed();
+  }
+  // answer: flood-scope - a flood whose scope this repeater's region map does not hold with
+  // flood allowed is never seen by it, and neither is an unscoped one on a mesh that stopped
+  // forwarding those. From here that is a silence, exactly as being off the air is.
+  bool floodReaches() const {
+    if (sends_.empty() || sends_.back().direct) return true;  // direct routing is not scoped
+    return sends_.back().scoped ? scopedReaches_ : unscopedReaches_;
   }
   // A job begun for another key reaches nobody: there is one repeater on this mesh.
   bool addressed() const { return peerSet_ && peer_ == key_; }
@@ -965,6 +1005,10 @@ class FakeMesh : public mm::IMesh {
   std::string firmware_ = "v1.17.1 (Build: 27 Sep 2025)";
   std::string board_ = "Heltec";
   std::string regionListing_ = "* F\n dk F\n";
+  std::string floodScope_;
+  mm::FloodMode nextMode_ = mm::FloodMode::Scoped;
+  bool scopedReaches_ = true;
+  bool unscopedReaches_ = true;
   std::string regionDefault_ = "dk";
   uint32_t repeaterNow_ = 1790000000;
   uint32_t lastRepeaterUnique_ = 0;

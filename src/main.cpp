@@ -164,6 +164,23 @@ void applyLogSettings() {
   the_mesh.setFrameLog(std::strcmp(buf, "on") == 0);
 }
 
+// The flood scope (task p1.8-32; meshmaster.dk's D-47): which region every flood of this board
+// carries, and whether a flooded transaction's second try drops it. Two objects read it - the
+// mesh computes the region's transport key and puts the codes on its floods
+// (src/mesh/AgentMesh.h), the runner owns the rule and the counts (agent/FloodScope.h) - and
+// this is the one place either is told. Re-read on every `set flood.*` and on `erase confirm`,
+// so no reboot is part of changing a scope.
+void applyFloodSettings() {
+  char buf[mm::kMaxValueLen + 1];
+  settings.effective(*mm::findKey("flood.scope"), buf, sizeof buf);
+  the_mesh.setFloodScope(buf);
+  settings.effective(*mm::findKey("flood.unscoped"), buf, sizeof buf);
+  jobs.setFloodRetry(std::strcmp(buf, "never") == 0 ? mm::UnscopedRetry::Never : mm::UnscopedRetry::Retry);
+  LOG_I("flood: scope %s, %s", the_mesh.floodScope(),
+        std::strcmp(buf, "never") == 0 ? "every flood scoped (flood.unscoped never)"
+                                       : "the second flood of a transaction unscoped");
+}
+
 // `display.timeout`: how long the panel stays lit after a button press, 0 never turning it off,
 // which is the default (src/ui/Oled.h). Re-read on every `set display.*`, so no reboot is part
 // of changing it.
@@ -243,6 +260,10 @@ void printStatus(Stream& out) {
   out.printf("heartbeat %s\r\n", line);
   jobs.describe(line, sizeof line);
   out.printf("jobs      %s\r\n", line);
+  // The flood scope and what each shape has earned (task p1.8-32): the number that says whether
+  // the unscoped try is still worth its airtime.
+  jobs.describeFlood(line, sizeof line);
+  out.printf("flood     %s\r\n", line);
 
   observer.describe(line, sizeof line);
   out.printf("observer  %s\r\n", line);
@@ -267,6 +288,17 @@ void printStatus(Stream& out) {
 }
 
 void printWifi(Stream& out) { wifi.scan(out); }
+
+// The one key whose value alone does not say what it does: `get flood.scope` prints the region's
+// transport key - the SHA-256 of `#name`, public by construction (meshmaster.dk's D-47) - and the
+// transport code of the example payload of src/mesh/TransportScope.h, so that two boards given
+// the same scope can be held against each other without a repeater in the middle.
+void printKeyNote(const mm::KeyDef& key, Stream& out) {
+  if (std::strcmp(key.name, "flood.scope") != 0) return;
+  char line[220];
+  the_mesh.describeFloodScope(line, sizeof line);
+  out.printf("scope     %s\r\n", line);
+}
 
 // `get mqtt.status`: one line per broker slot - preset or host, state, since, published,
 // dropped, last error - and the memory rule the slots live under: this board's figures (task
@@ -472,6 +504,8 @@ void onSettingChanged(const mm::KeyDef& key) {
     applyLogSettings();
   } else if (std::strncmp(key.name, "display.", 8) == 0) {
     applyDisplaySettings();
+  } else if (std::strncmp(key.name, "flood.", 6) == 0) {
+    applyFloodSettings();  // the mesh's key and the runner's rule, re-read together
   } else if (std::strncmp(key.name, "mqtt", 4) == 0) {
     observer.reconfigure();  // mqtt.* and mqttN.*: the observer re-reads every one of its keys
   }
@@ -480,6 +514,7 @@ void onSettingChanged(const mm::KeyDef& key) {
 void onErased() {
   applyLogSettings();
   applyDisplaySettings();
+  applyFloodSettings();
   observer.reconfigure();
   server.reconfigure();
   agent.reconfigure();
@@ -583,6 +618,9 @@ void setup() {
   // the mesh in this process, the WiFi client, and Arduino on this ESP32. The Heltec sets no job
   // extension (IJobExtension.h).
   jobs.begin(the_mesh, server, platform, &pumpDuringAJob);
+  // The flood scope, before any job can put a packet on the air: the mesh's key and the runner's
+  // rule (task p1.8-32).
+  applyFloodSettings();
   agent.begin(server, platform, the_mesh, jobs, identity);
   agent.setIdentity(public_key_hex[0] != 0 ? public_key_hex : nullptr);
   // The observer: off until a slot is configured, and then the dialect over every frame the
@@ -617,7 +655,7 @@ void setup() {
   mm::ConsoleHost host = {&printStatus,  &printMesh,    &printServer, &printJobs,
                           &printSessions, &printErrors,  &printReboots, &printDump,
                           &printWifi,     &doReboot,     &onSettingChanged, &onErased,
-                          &printMqttStatus};
+                          &printMqttStatus, &printKeyNote};
   console.begin(Serial, settings, host);
   board.onBootComplete();
 }

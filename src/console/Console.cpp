@@ -96,6 +96,7 @@ void Console::help() {
   io_->printf("  erase %s       forget every setting; the identity stays\r\n", kEraseWord);
   io_->println("  get mqtt.presets    the broker presets an mqttN.preset can name");
   io_->println("  get mqtt.status     the observer's broker slots (one on a V3, two on a V4): state, since, published, dropped, last error");
+  io_->println("  get flood.scope     the region every flood carries, its transport key and the code of an example payload");
   io_->println("keys:");
   for (const KeyDef& k : kKeys) {
     io_->printf("  %-18s %s\r\n", k.name, k.help);
@@ -150,6 +151,7 @@ void Console::runLine() {
       settings_->get(*r.command.key, stored, sizeof stored);
       describeValue(*r.command.key, stored, out, sizeof out);
       io_->printf("%s\r\n", out);
+      if (host_.keyNote) host_.keyNote(*r.command.key, *io_);
       return;
     }
     case Verb::GetAll:

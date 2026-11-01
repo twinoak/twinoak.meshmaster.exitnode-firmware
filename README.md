@@ -229,6 +229,7 @@ frames    rx 3 (advert 2, grp-txt 1, txt 0, ack 0, path 0, trace 0, other 0), tx
 wifi      off, wifi.ssid is unset
 time      no time (sntp not started, no wifi)
 server    not configured (meshmaster.token unset)
+flood     scope dk, answered scoped 0 / unscoped 0 / none 0 since boot; the second flood of a transaction goes unscoped
 observer  off: no slot configured (set mqtt1.preset ...); slot 1 none (preset is none); 3 frame(s) heard while off
 heap      free 203980, min ever 200772, largest block 110580
 log       level info, frames off, oled on
@@ -255,6 +256,8 @@ radio.tx unset (22)
 log.level unset (info)
 log.frames unset (off)
 display.timeout unset (0)
+flood.scope unset (dk)
+flood.unscoped unset (retry)
 mqtt.origin unset
 mqtt.iata unset
 mqtt.owner unset
@@ -286,6 +289,7 @@ time      2026-09-28T12:03:14Z (sntp)
 server    https://meshmaster.dk: config ok at 12:03:14, agent 17 "Window at Grenaa", transport onboard, budget 2/min gap 20 s, poll 30 s, root ISRG Root X1
 heartbeat last at 12:03:16, 4 answered, poll 120 s; 20 observation(s) posted, 3 waiting, 0 dropped
 jobs      2 run, 3 transaction(s); last job 12346 telemetry ok after 1 tx
+flood     scope dk, answered scoped 2 / unscoped 0 / none 0 since boot; the second flood of a transaction goes unscoped
 observer  off: no slot configured (set mqtt1.preset ...); slot 1 none (preset is none); 32 frame(s) heard while off
 heap      free 160104, min ever 152280, largest block 90112; after the tls call 160104
 log       level info, frames off, oled on
@@ -325,6 +329,51 @@ echoes as asterisks, and is printed by nothing afterwards; the two `error:`
 lines are what a wrong value gets. Every `set` takes effect at once, so no
 reboot is part of provisioning. The session above is replayed by the native
 tests against the parser, reply for reply.
+
+### Flood scope
+
+Nothing to type: **`flood.scope` is `dk` out of the box**, which is the Danish
+standard's region, and only an installation outside that standard changes it.
+
+A *flood* is what this board sends when it has no path to a repeater — a login,
+and path discovery — and nothing else; the direct-routed traffic that is most of
+what MeshMaster sends is unaffected, because a repeater only checks the scope of
+a flood. A stock repeater forwards an **unscoped** flood only while its wildcard
+region allows flood and only for `flood.max.unscoped` hops (15 under the Danish
+standard today, and the firmware's own comment names the day it is 0, where such
+a flood dies at the first hop). A **scoped** flood is forwarded only by a
+repeater whose region map holds that scope — `dk` on every repeater that follows
+the standard, and *not* on one with no region map at all. So the first flood of a
+transaction carries `dk` and the second drops it, and `status` counts which one
+was answered:
+
+```console
+> get flood.scope
+flood.scope unset (dk)
+scope     dk: key 4a447e7539b0418bd14cf28aa8241529 (sha-256 of "#dk", first 16 bytes; public by construction), example payload -> transport code 0x234b
+> set flood.scope dk-aarhus
+ok flood.scope
+> set flood.scope *
+ok flood.scope
+> set flood.unscoped never
+ok flood.unscoped
+```
+
+`*` is every flood with no transport code at all; `never` turns off the unscoped
+second try, for the day unscoped floods stop being forwarded. A scope is a
+region **name** and never a key — a public region's key is the first sixteen
+bytes of SHA-256 over `#name`, so it is public by construction and `get` prints
+it — and a private region (`$name`) is refused. `status`'s `flood` line is the
+whole of it:
+
+```
+flood     scope dk, answered scoped 41 / unscoped 3 / none 2 since boot; the second flood of a transaction goes unscoped
+```
+
+That `unscoped 3` is the point: it is what says, in numbers rather than by
+guess, the day the second try has stopped finding anything. The same figures go
+to meshmaster.dk in the heartbeat, which shows them and configures nothing — the
+scope is set here and nowhere else (meshmaster.dk's D-47).
 
 ## What the display says
 

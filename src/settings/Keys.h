@@ -9,6 +9,12 @@
 // are typed once, kept in NVS, and printed by no command - `get` says "set" or "unset" for them
 // and never the value (README.md, "Rails that hold in every task").
 //
+// Since task p1.8-32 it holds the two flood-scope keys, `flood.scope` and `flood.unscoped`
+// (meshmaster.dk's D-47): what region every flood of this board carries, and whether a flooded
+// transaction's second try drops it. The names are this firmware's own - the .NET agent's two
+// settings of the same decision are `floodScope` and `floodUnscoped` in its config file - and
+// what they mean is src/mesh/TransportScope.h.
+//
 // Since task p1.7-26 the table also holds the observer's keys, under the names the observer
 // firmware (agessaman/MeshCore, observer-firmware) gives them where it has one: mqtt.iata,
 // mqtt.owner, mqtt.email, mqtt.origin and two slots of mqttN.preset, .server, .audience, .topic,
@@ -38,6 +44,8 @@ enum class ValueKind : uint8_t {
   BrokerUrl,  // wss://host[:port][/path] or mqtts://host[:port] - TLS only, bounded (mqttN.server)
   Topic,   // an MQTT topic template: printable ASCII, no space, no + or # wildcard, bounded (mqttN.topic)
   Preset,  // none | meshview | meshmapper | custom (src/observer/Presets.h)
+  Region,  // a flood scope: a region name the firmware's region names allow, or `*` (src/mesh/TransportScope.h)
+  Retry,   // retry | never: whether a flooded transaction's second try drops the scope
 };
 
 struct KeyDef {
@@ -55,7 +63,7 @@ struct KeyDef {
 // The longest value any key accepts, and the buffer size a caller needs for one.
 constexpr size_t kMaxValueLen = 128;
 
-constexpr int kKeyCount = 28;
+constexpr int kKeyCount = 30;
 extern const KeyDef kKeys[kKeyCount];
 
 // The key called `name`, or nullptr. Exact, case-sensitive match - and one alias: `wifi.pwd`, the

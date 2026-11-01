@@ -42,6 +42,7 @@
 #include <agent/ReplyCodec.h>
 
 #include "mesh/MeshCoreHeaders.h"
+#include "mesh/TransportScope.h"
 
 namespace mm {
 
@@ -80,9 +81,14 @@ class AgentMesh : public mesh::Mesh, public IMesh {
 
   AgentMesh(mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc,
             mesh::PacketManager& mgr, mesh::MeshTables& tables)
-      : mesh::Mesh(radio, ms, rng, rtc, mgr, tables) {}
+      : mesh::Mesh(radio, ms, rng, rtc, mgr, tables) {
+    setFloodScope(floodScope_);  // the default's key, so that a mesh nobody configured still scopes
+  }
 
   // ------------------------------------------------------------------ IMesh
+
+  const char* floodScope() const override { return floodScope_; }
+  void setFloodMode(FloodMode mode) override { floodMode_ = mode; }
 
   void setRing(ObservationRing* ring) override { ring_ = ring; }
   const MeshCounters& counters() const override { return counters_; }
@@ -132,6 +138,17 @@ class AgentMesh : public mesh::Mesh, public IMesh {
 
   void setFrameLog(bool on) { frameLog_ = on; }
   bool frameLog() const { return frameLog_; }
+
+  // `flood.scope`: a region's name (a leading `#` already dropped by the key table) or `*`.
+  // Computes the region's transport key once, here, and keeps it: every flood of a scoped mesh
+  // hashes the packet under it (mesh/TransportScope.h). A value the key table would not have
+  // taken is treated as `*`, because a flood with a key made of nonsense is a flood no repeater
+  // forwards and an unscoped one at least still travels.
+  void setFloodScope(const char* value);
+  // What `get flood.scope` prints beside the name: the key, as 32 lowercase hex characters (it is
+  // the SHA-256 of `#name` and public by construction - meshmaster.dk's D-47 says so), and the
+  // transport code of the example payload of mesh/TransportScope.h.
+  void describeFloodScope(char* out, size_t cap) const;
 
   // The observer's tap (RxTap above): every frame the dispatcher accepts, as bytes. nullptr is
   // no tap, and then logRxRaw stashes nothing.
@@ -190,6 +207,12 @@ class AgentMesh : public mesh::Mesh, public IMesh {
   // `clearBytes` is how much of the payload is printed as hex before the stars: 0 is the whole
   // frame, kLoginPayloadClearBytes a login with a password, kDatagramClearBytes a `password` line.
   SendResult dispatch(mesh::Packet* pkt, size_t clearBytes = 0);
+  // The one place a flood of this board goes out, scoped or not (task p1.8-32): the companion's
+  // own `sendFloodScoped` (examples/companion_radio/MyMesh.cpp ~L489-497 at d9296435) - code 0
+  // from the scope over this packet, code 1 left 0 - or `ROUTE_TYPE_FLOOD` with no codes at all
+  // when the scope is `*` or this send was told `Unscoped`. A **direct** send never goes through
+  // here and carries no transport code: MeshCore's `sendDirect` has no overload that takes any.
+  SendResult floodOut(mesh::Packet* pkt);
   bool await(Awaiting what, uint32_t tag, uint32_t timeoutMs, void (*pump)());
   void takeResponse(const uint8_t* data, size_t len);
   void takeText(const uint8_t* data, size_t len);
@@ -204,6 +227,15 @@ class AgentMesh : public mesh::Mesh, public IMesh {
   HeardAdvert recent_[kRecent];
   int recentCount_ = 0;
   bool frameLog_ = false;
+
+  // The flood scope (task p1.8-32): the name as `status` and the heartbeat print it, the region's
+  // transport key computed once from it, and the shape the **next** flood goes out in, which the
+  // job runner sets per send (agent/FloodScope.h). `dk` until `setFloodScope` says otherwise, so
+  // that a board whose settings could not be read still floods the Danish standard's scope.
+  char floodScope_[kRegionNameCap + 2] = "dk";
+  uint8_t floodScopeKey_[kTransportKeyBytes] = {0};
+  bool floodScopeUnscoped_ = false;
+  FloodMode floodMode_ = FloodMode::Scoped;
 
   // The observer's tap and the frame stashed for it between logRxRaw and logRx (RxFrame above).
   RxTap* tap_ = nullptr;
