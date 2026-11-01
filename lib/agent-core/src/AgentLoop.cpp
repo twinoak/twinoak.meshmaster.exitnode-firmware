@@ -224,6 +224,22 @@ void AgentLoop::buildHeartbeat(Heartbeat& hb) {
     observer_ = HeartbeatObserver();
     if (observerProvider_->describeObserver(observer_)) hb.observer = &observer_;
   }
+  // The flood scope (task p1.8-32; meshmaster.dk's D-47): the scope is the mesh's own
+  // (IMesh::floodScope) and the three counts are the runner's, per flooded transaction since
+  // boot. A mesh that says nothing about scope writes **no object at all** - its floods go out in
+  // whatever its radio holds, which is what every exit node did before the field existed - and
+  // its heartbeat is byte for byte what it was.
+  hb.flood = nullptr;
+  if (const char* scope = mesh_->floodScope()) {
+    flood_ = HeartbeatFlood();
+    flood_.scope = scope;
+    flood_.unscopedRetry = jobs_->floodUnscopedRetry();
+    const FloodCounts& counts = jobs_->floodCounts();
+    flood_.answeredScoped = counts.answeredScoped;
+    flood_.answeredUnscoped = counts.answeredUnscoped;
+    flood_.unanswered = counts.unanswered;
+    hb.flood = &flood_;
+  }
 }
 
 // The board's own link, proven: the link up *and* a time that came off the network. An RTC that

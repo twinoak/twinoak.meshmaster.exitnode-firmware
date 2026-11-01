@@ -34,6 +34,11 @@ struct ConsoleHost {
   void (*settingChanged)(const KeyDef& key);  // after a successful `set`, so it takes effect live
   void (*erased)();                            // after `erase confirm`
   void (*mqttStatus)(Stream& out);             // `get mqtt.status`: one line per broker slot (task p1.7-27)
+  // A second line for a key whose value alone does not say what it does: `get flood.scope` prints
+  // the region's transport key and the code of an example payload, so that two boards given the
+  // same scope can be compared (task p1.8-32). nullptr, or a key with nothing to add, prints one
+  // line as every other key does.
+  void (*keyNote)(const KeyDef& key, Stream& out);
 };
 
 class Console {

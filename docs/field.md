@@ -58,6 +58,13 @@ serial console over the network and no captive portal
 7. **`server`** and **`errors`**: the heartbeat, when the next one is due, and
    every counter at zero.
 
+**Nothing to type about the flood scope** (task p1.8-32): `flood.scope` is `dk`
+out of the box, which is the Danish standard's region, and a board outside that
+standard is the only one that needs `set flood.scope <region>` or
+`set flood.scope *`. `get flood.scope` prints the region and the transport key
+it derives, and `status`'s `flood` line counts which shape of flood was
+answered — [`console.md`](console.md) has both.
+
 Nothing is stored anywhere else, and no reboot is part of provisioning: every
 `set` takes effect at once.
 
@@ -300,6 +307,13 @@ hand on it. On the seventh day, with a cable:
 - `dump` — the last four kilobytes, for the record.
 - `mesh` — the repeaters still heard, at the hop counts they were heard at on
   day one.
+- `flood` on `status` — the three counts of flooded transactions (task
+  p1.8-32). On a settled board most of them are `scoped`, because every
+  repeater MeshMaster knows a path to is reached **directly** and a flood only
+  happens when it does not. `unscoped N` is the one to read: it is how often the
+  second, scope-less try was the one that answered, which means a repeater out
+  there has no region map yet. `none` climbing is a repeater nobody can reach in
+  either shape, and `discover` on its page is the next step.
 
 ## 9. Updating a board that is already in the field
 

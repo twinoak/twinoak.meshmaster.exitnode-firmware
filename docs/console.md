@@ -19,7 +19,7 @@ test, so it is the session the console accepts, line for line.
 | `set <key> <value>` | store a setting in NVS; it takes effect at once (see below). The value is the rest of the line, trimmed; a WiFi name with spaces is fine |
 | `get <key>` | print one setting. `wifi.pass` and `meshmaster.token` print `set` or `unset` and never the value |
 | `get` | print every setting, one per line, in the order of the table below; an unset key shows its fallback in brackets |
-| `status` | firmware, board and reset reason, the public key, the radio and its frame counters, WiFi, time and where it came from, the server's last answer, the heartbeat, the observer (its two slots and their states, or why it is off, how many packet messages it has made and how many slots are connected), the heap, and the uplink's kept connection with what the last call cost (task p1.8-30, below) |
+| `status` | firmware, board and reset reason, the public key, the radio and its frame counters, WiFi, time and where it came from, the server's last answer, the heartbeat, the flood scope and what each shape has earned (task p1.8-32, below), the observer (its two slots and their states, or why it is off, how many packet messages it has made and how many slots are connected), the heap, and the uplink's kept connection with what the last call cost (task p1.8-30, below) |
 | `mesh` | the adverts heard: how many, how many are waiting to be posted and how many the ring dropped, and the last five with their names, roles, hops, SNR and RSSI |
 | `server` | the exit node's loop: the last heartbeat and the next, the last observation batch, the job counters, and the four error counters the heartbeat itself carries |
 | `jobs` | the airtime budget in force and what it has spent, how many claims were made, the thirteen job types this firmware advertises, and the last ten jobs with their outcome, their transaction count and when they ended |
@@ -30,6 +30,7 @@ test, so it is the session the console accepts, line for line.
 | `wifi` | a blocking scan (a few seconds): every network with channel, RSSI and security, then the link's state |
 | `reboot` | restart; the reason is noted so that `reboots` after it says *asked for on the console* |
 | `erase confirm` | forget every setting. The identity is not a setting and stays, so the exit node keeps its key on meshmaster.dk. Without the word, `erase` refuses and says what the word is |
+| `get flood.scope` | the region every flood carries, and a second line with the region's transport key and the code of a fixed example payload, so two boards can be compared (task p1.8-32, below) |
 | `get mqtt.presets` | the broker presets an `mqttN.preset` can name — `meshview`, `meshmapper`, `custom`, `none` — with each one's broker and sign-in (task p1.7-26) |
 | `get mqtt.status` | the observer's broker slots — one on a Heltec V3, two on a V4 (task p1.8-31) — one line each: preset or host, state (`waiting-for-wifi`, `waiting-for-clock`, `waiting-for-heap`, `connecting`, `connected`, `backing-off`), since when, published, dropped, queued, connects, refusals, errors, token renewals, how often it gave way to the uplink, and the last error — then the memory rule the slots live under with this board's figures and what the heap is now, what the uplink's last call cost, where the TLS buffers are (PSRAM on a V4) and the least stack each slot's task ever had (task p1.7-27, [`observer.md`](observer.md)). On a V3, `set mqtt2.preset` takes `none` and nothing else: `error: mqtt2.preset: this board has memory for one broker; a V4 carries two` |
 
@@ -60,6 +61,8 @@ the same key: redacted on echo, `set` or `unset` in `get`.
 | `log.level` | `error`, `warn`, `info`, `debug` | `info` |
 | `log.frames` | `on`, `off`: one log line per frame, both directions. A frame of a job in flight - the login, the request, a CLI line and its reply, a trace - is printed as hex, header, path and payload; a login that carries a password, and the `password` line of a rotation and the reply that echoes it, are printed with their encrypted bodies as one `*` per byte, which is the .NET agent's redaction of `CMD_SEND_LOGIN` and of a sensitive CLI line; an advert and the mesh's own chat are the header line only, never their bytes | `off` |
 | `display.timeout` | seconds, 0..86400: how long the OLED stays lit after a button press | `0`: it never turns off. `300` is the five minutes this firmware did before task p1.2-09 |
+| `flood.scope` | the region every flood carries: a region name of at most 30 characters (the firmware's own region-name characters — letters, digits and `-`; a leading `#` is accepted and dropped), or `*` for no transport code at all. A private region (`$name`) is refused: the setting takes names, never keys | `dk`, the Danish standard's region |
+| `flood.unscoped` | `retry`, `never`: whether the **second** flood of a transaction drops the scope, which is one try at the shape a repeater with no region map still forwards | `retry`, while unscoped floods are forwarded at all |
 | `mqtt.origin` | 1..31 characters: the observer's name in what it publishes | `MeshMaster-` and the first four characters of the key |
 | `mqtt.iata` | three letters, any case typed, stored uppercase: the region the brokers file this node under — `AAL`, `AAR`, `BLL`, `ODE`, `CPH` or `RNN` in Denmark | none: no slot on the default topic publishes until it is set |
 | `mqtt.owner` | the owner's public key, 64 hex digits, named in the sign-in token | none: the token names no owner |
@@ -162,6 +165,50 @@ backoff in between outlasts it, and the next call handshakes again - one
 `uplink: handshake` line, and not a failure. The two figures are what task 31
 sets the observer's gate from.
 
+### The `flood` line of `status`, and `get flood.scope`
+
+```
+flood     scope dk, answered scoped 41 / unscoped 3 / none 2 since boot; the second flood of a transaction goes unscoped
+```
+
+A *flood* is what this board sends when it holds no path to a repeater — a
+login, and path discovery — and nothing else. Since task p1.8-32 every one of
+them carries a **transport code** for the region `flood.scope` names
+(meshmaster.dk's D-47), which is what a repeater matches its region map against
+before it forwards one; the first flood of a transaction is scoped and the
+second drops the scope, while `flood.unscoped` is `retry`. Direct-routed
+traffic, which is most of what MeshMaster sends, is untouched: a repeater only
+checks the scope of a flood.
+
+The three counts are **per flooded transaction** since boot — a transaction
+being one retry loop: a login's two tries, a request and its retry, a discover's
+flooded login and the path-discovery request after it — and each transaction
+moves exactly one of them, by which of its floods was answered. A transaction
+that never flooded moves none, which is every transaction of a board whose
+repeaters all have paths. `unscoped` is the number the whole thing exists for:
+it says, in figures, whether the second try still finds anything. The clause
+after the counts is the rule in force: *the second flood of a transaction goes
+unscoped*, *every flood is scoped (flood.unscoped never)*, or *every flood goes
+out with no transport code (flood.scope \*)*.
+
+`get flood.scope` prints a second line with the region's key and a code to
+compare boards by:
+
+```
+> get flood.scope
+flood.scope unset (dk)
+scope     dk: key 4a447e7539b0418bd14cf28aa8241529 (sha-256 of "#dk", first 16 bytes; public by construction), example payload -> transport code 0x234b
+```
+
+The key is the first sixteen bytes of SHA-256 over `#` and the name
+(`TransportKeyStore::getAutoKeyFor` at the pin), so it is public by
+construction and printing it gives nothing away — a *private* region (`$name`),
+whose key lives in a node's own keystore, is refused by `set` for exactly that
+reason. The example payload is fixed so that the code is comparable: payload
+type 0 and the eight bytes `00 01 02 03 04 05 06 07`
+(`src/mesh/TransportScope.h`). Two boards given the same scope print the same
+two values; a board that prints others is not flooding the same region.
+
 At `log.level debug` there is one line per heartbeat reply and one per advert
 heard - the key's first four bytes, the role, the hops and the SNR, and never
 the name, which is read on demand with `mesh`:
@@ -192,7 +239,10 @@ command (`restore: cli 'setperm <own key> 1': ok`, then `the ACL entry of this
 exit node's key is back at read-only, as granted; the session is now read-only
 (task 60)`). A password is never an argument of any of those lines.
 
-A login is tried twice: `login (admin) try 1: no reply (flood)`, then `try 2`,
+A login is tried twice: `login (admin) try 1: no reply (flood, scope dk)`, then
+`try 2: … (flood, unscoped)` — the word beside `direct` or `flood` is the
+*shape* the packet went out in, which since task p1.8-32 names the flood scope
+(below),
 and two silences are `unreachable`. Stock firmware answers a password it does
 not know with the same silence a repeater off the air gives, and in one place
 that matters: a job handed the **new** candidate of an unverified credential
@@ -432,3 +482,19 @@ server comes back. What the four lines say is a pure function of a struct
     guest once the pair is active - fills. On a repeater that *does* have a guest
     password the same `discover` is `no reply` twice and `unreachable`, which is
     the right answer and not a fault.
+20. The flood scope (task p1.8-32). `get flood.scope` prints `dk` and the key
+    `4a447e7539b0418bd14cf28aa8241529` with the example code `0x234b`; a second
+    board prints the same two. Then a **flooded** login: press *Discover* for a
+    repeater this exit node holds no path to, or `set` a wrong path and let one
+    go stale. The job's log reads `flooded login, for the path its reply comes
+    back along: … (flood, scope dk)`, and `status`'s `flood` line moves by one -
+    `answered scoped 1` when the repeater's region map holds `dk`, `answered
+    unscoped 1` when it does not and the second try got through, `none 1` when
+    neither did. A repeater that follows the Danish standard (`region` on its own
+    console lists `dk` with `F`) answers the scoped try; one with an empty region
+    map answers only the unscoped one, which is what `unscoped` counts and the
+    reason the retry exists. `set flood.unscoped never` and repeat on the
+    repeater with no region map: both tries now say `flood, scope dk` and the
+    count is `none`. `set flood.scope *` and repeat: every line says
+    `flood, unscoped`, and the exit node's page on meshmaster.dk shows the scope
+    and the three counts within a heartbeat.

@@ -170,18 +170,23 @@ JobRunner::LoginResult JobRunner::loginOnce(const ClaimedJob& job, Context& ctx,
   if (!spend(job, ctx)) return LoginResult::Timeout;
   const uint32_t started = millis();
   uint32_t tag = 0;
+  const FloodMode mode = scopeTheNextSend();
   const SendResult sent = mesh_->sendLogin(material, tag);
+  noteSend(sent, mode);
   if (sent == SendResult::Failed) {
     g_log.add("%s: the packet could not be built", what);
     return LoginResult::Failed;
   }
+  char shape[48];
+  describeSend(sent, mode, shape, sizeof shape);
   if (!mesh_->awaitReply(tag, loginWaitMs(job), pump_)) {
     // Stock firmware answers a login it will not take with **silence** (`handleLoginReq`
     // returns 0): a key its ACL does not hold on a blank login, a password that is neither of
     // its two on a password login. It cannot be told from a repeater that is off the air.
-    g_log.add("%s: no reply (%s)", what, sent == SendResult::Direct ? "direct" : "flood");
+    g_log.add("%s: no reply (%s)", what, shape);
     return LoginResult::NoReply;
   }
+  flood_.answered();
   if (!ctx.hasRtt) {
     ctx.hasRtt = true;
     ctx.rttMs = static_cast<int>(millis() - started);
@@ -218,7 +223,7 @@ JobRunner::LoginResult JobRunner::loginOnce(const ClaimedJob& job, Context& ctx,
   ctx.sessionRole = granted;
   ctx.sessionWasFresh = true;
   g_log.add("%s: logged in as %s%s%s (%s)", what, permissionName(granted), level, login.legacy ? " (a legacy reply)" : "",
-            sent == SendResult::Direct ? "direct" : "flood");
+            shape);
   return LoginResult::Ok;
 }
 
@@ -302,6 +307,10 @@ Outcome JobRunner::ensureSession(const ClaimedJob& job, Context& ctx) {
   // agent/LoginSequence.h's, on a host; this puts its logins on the air.
   const bool probes = probesBetweenTries(job.credentialCandidate, material);
   LoginOnTheAir exchange(*this, job, ctx, material);
+  // The two tries and the probe between them are **one** flooded transaction: the first flood of
+  // it is scoped, the second unscoped while `flood.unscoped` is `retry`, and one of the three
+  // counts moves when it ends (agent/FloodScope.h).
+  const FloodTransaction transaction(flood_);
   const LoginVerdict verdict = loginSequence(exchange, probes);
   if (verdict.silentAfterReachable) {
     ctx.silentAfterReachable = true;
@@ -320,12 +329,15 @@ bool JobRunner::probeReachable(const ClaimedJob& job, Context& ctx) {
     return false;
   }
   uint32_t tag = 0;
+  const FloodMode mode = scopeTheNextSend();
   const SendResult sent = mesh_->sendLogin("", tag);
+  noteSend(sent, mode);
   if (sent == SendResult::Failed) {
     g_log.add("reachability probe (blank login): the packet could not be built");
     return false;
   }
-  const char* how = sent == SendResult::Direct ? "direct" : "flood";
+  char how[48];
+  describeSend(sent, mode, how, sizeof how);
   if (!mesh_->awaitReply(tag, loginWaitMs(job), pump_)) {
     g_log.add("reachability probe (blank login): no reply (%s)", how);
     g_log.add("the blank login was not answered either: nothing is known about the password - the repeater is off "
@@ -333,6 +345,7 @@ bool JobRunner::probeReachable(const ClaimedJob& job, Context& ctx) {
     LOG_I("jobs: job %lld: reachability probe (blank login): no reply; nothing is known about the password", job.id);
     return false;
   }
+  flood_.answered();
   // No session is stored from this reply, whatever it says: the next job is a candidate job and
   // logs in afresh, and a session another login opened would make its verdict a lie.
   const MeshReply& reply = mesh_->reply();
@@ -363,6 +376,7 @@ template <typename Send>
 Outcome JobRunner::exchange(const ClaimedJob& job, Context& ctx, const char* what, bool retry, bool text, Send send,
                             bool escape) {
   const int attempts = retry ? 2 : 1;
+  const FloodTransaction transaction(flood_);
   for (int attempt = 1; attempt <= attempts; attempt++) {
     // Set per attempt and not once: the re-login below puts the stage back to Login, so a job
     // that lost its session mid-request and could not get another reports `login`, and one that
@@ -371,21 +385,25 @@ Outcome JobRunner::exchange(const ClaimedJob& job, Context& ctx, const char* wha
     if (!spend(job, ctx, escape)) return Outcome::Timeout;
     const uint32_t started = millis();
     uint32_t tag = 0;
+    const FloodMode mode = scopeTheNextSend();
     const SendResult sent = send(tag);
+    noteSend(sent, mode);
     if (sent == SendResult::Failed) {
       g_log.add("%s try %d: the packet could not be built", what, attempt);
       return Outcome::Failed;
     }
+    char shape[48];
+    describeSend(sent, mode, shape, sizeof shape);
     const bool answered = text ? mesh_->awaitText(requestWaitMs(job), pump_) : mesh_->awaitReply(tag, requestWaitMs(job), pump_);
     if (answered) {
+      flood_.answered();
       ctx.hasRtt = true;
       ctx.rttMs = static_cast<int>(millis() - started);
-      g_log.add("%s try %d: ok (%s, %lu ms)", what, attempt, sent == SendResult::Direct ? "direct" : "flood",
-                static_cast<unsigned long>(ctx.rttMs));
+      g_log.add("%s try %d: ok (%s, %lu ms)", what, attempt, shape, static_cast<unsigned long>(ctx.rttMs));
       if (text) std::memcpy(g_cliReply, mesh_->reply().text, sizeof g_cliReply);
       return Outcome::Ok;
     }
-    g_log.add("%s try %d: no reply", what, attempt);
+    g_log.add("%s try %d: no reply (%s)", what, attempt, shape);
     if (attempt == 1 && retry && !ctx.sessionWasFresh && ctx.hasSession) {
       // An old session and no answer: the repeater may have rebooted and forgotten us.
       sessions_.invalidate(job.repeaterKey);
@@ -729,6 +747,12 @@ Outcome JobRunner::runDiscover(const ClaimedJob& job, Context& ctx, size_t& data
   // the server sends at that class since its task p4.7-94 (task p1.4-14) - it is the guest
   // password the claim carried, or, for a pair the door made at its empty form, the blank login
   // of the empty door itself, which a repeater with no guest password answers at guest.
+  //
+  // The whole handler is **one** flooded transaction (agent/FloodScope.h): a discover that floods
+  // twice - the login for the path its reply comes back along, and then the path-discovery
+  // request - sends the first scoped and the second unscoped while `flood.unscoped` is `retry`,
+  // and which of them was answered is what the counts on `status` are made of.
+  const FloodTransaction transaction(flood_);
   const char* material = loginMaterial(job);
   if (material != nullptr) {
     if (mesh_->hasPath()) {
@@ -769,20 +793,26 @@ Outcome JobRunner::runDiscover(const ClaimedJob& job, Context& ctx, size_t& data
     return Outcome::Timeout;
   }
   uint32_t tag = 0;
-  if (mesh_->sendDiscovery(tag) == SendResult::Failed) {
+  const FloodMode mode = scopeTheNextSend();
+  const SendResult sent = mesh_->sendDiscovery(tag);
+  noteSend(sent, mode);
+  if (sent == SendResult::Failed) {
     g_log.add("path discovery request: the packet could not be built");
     dataLen = writeDiscoverResult(false, nullptr, 0, nullptr, 0, nullptr, g_data, kDataCap);
     return Outcome::Failed;
   }
+  char shape[48];
+  describeSend(sent, mode, shape, sizeof shape);
   const uint32_t started = millis();
   if (mesh_->awaitReply(tag, requestWaitMs(job), pump_) && mesh_->hasPath()) {
+    flood_.answered();
     ctx.hasRtt = true;
     ctx.rttMs = static_cast<int>(millis() - started);
-    g_log.add("path discovery request, the last resort (some firmware never answers it): ok, %lu ms",
+    g_log.add("path discovery request, the last resort (some firmware never answers it): ok (%s, %lu ms)", shape,
               static_cast<unsigned long>(ctx.rttMs));
     return learned(job, ctx, LoginResult::NoReply, kPathSourceDiscovery, dataLen);
   }
-  g_log.add("path discovery request, the last resort (some firmware never answers it): no reply");
+  g_log.add("path discovery request, the last resort (some firmware never answers it): no reply (%s)", shape);
   dataLen = writeDiscoverResult(false, nullptr, 0, nullptr, 0, nullptr, g_data, kDataCap);
   return Outcome::Unreachable;
 }
@@ -1759,6 +1789,38 @@ void JobRunner::describe(char* out, size_t cap) const {
   std::snprintf(out, cap, "%lu run, %lu transaction(s); last job %lld %s %s after %d tx", static_cast<unsigned long>(ran_),
                 static_cast<unsigned long>(gate_.transmissions()), r.id, r.type, outcomeName(r.outcome),
                 r.transactions);
+}
+
+// ------------------------------------------------------------------ the flood scope
+
+FloodMode JobRunner::scopeTheNextSend() {
+  const FloodMode mode = flood_.modeForNextFlood(mesh_->floodScope());
+  mesh_->setFloodMode(mode);
+  return mode;
+}
+
+void JobRunner::noteSend(SendResult sent, FloodMode mode) { flood_.sent(sent == SendResult::Flood, mode); }
+
+void JobRunner::describeSend(SendResult sent, FloodMode mode, char* out, size_t cap) const {
+  FloodPolicy::describeSend(sent == SendResult::Direct, mode, mesh_->floodScope(), out, cap);
+}
+
+void JobRunner::describeFlood(char* out, size_t cap) const {
+  const char* scope = mesh_ == nullptr ? nullptr : mesh_->floodScope();
+  const FloodCounts& c = flood_.counts();
+  const char* rule;
+  if (scope == nullptr) {
+    rule = "this mesh says nothing about scope: whatever its radio holds decides";
+  } else if (floodScopeIsUnscoped(scope)) {
+    rule = "every flood goes out with no transport code (flood.scope *)";
+  } else if (flood_.retry() == UnscopedRetry::Retry) {
+    rule = "the second flood of a transaction goes unscoped";
+  } else {
+    rule = "every flood is scoped (flood.unscoped never)";
+  }
+  std::snprintf(out, cap, "scope %s, answered scoped %lu / unscoped %lu / none %lu since boot; %s",
+                scope == nullptr ? "none" : scope, static_cast<unsigned long>(c.answeredScoped),
+                static_cast<unsigned long>(c.answeredUnscoped), static_cast<unsigned long>(c.unanswered), rule);
 }
 
 #undef g_jobs

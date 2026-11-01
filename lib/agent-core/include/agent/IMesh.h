@@ -27,6 +27,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include <agent/FloodScope.h>
 #include <agent/Observations.h>
 #include <agent/ReplyCodec.h>
 
@@ -124,6 +125,21 @@ class IMesh {
     (void)jobType;
     return true;
   }
+
+  // ------------------------------------------------------------------ the flood scope
+
+  // The region every flood of this mesh goes out in (meshmaster.dk's D-47; task p1.8-32): a
+  // region's name, `*` for *no transport code at all*, or **nullptr for a mesh that says nothing
+  // about scope** - whatever its radio holds decides, which is every exit node built before the
+  // setting existed and what the heartbeat leaves the `flood` object out for. The string outlives
+  // the call; nothing copies it.
+  virtual const char* floodScope() const { return nullptr; }
+
+  // Scoped or unscoped for the **next** flood, told per send and never per job (the companion's
+  // own `send_unscoped`, examples/companion_radio/MyMesh.cpp at d9296435). A direct send ignores
+  // it, and so does a mesh whose scope is `*` or nullptr - there is nothing to drop. The rule
+  // that decides which send gets which is agent/FloodScope.h's and lives in the job runner.
+  virtual void setFloodMode(FloodMode mode) { (void)mode; }
 
   // ------------------------------------------------------------------ a job's exchanges
 

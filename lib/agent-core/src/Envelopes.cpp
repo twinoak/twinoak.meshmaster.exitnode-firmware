@@ -195,6 +195,28 @@ size_t writeHeartbeat(const Heartbeat& hb, char* out, size_t cap) {
     }
     w.endObject();
   }
+  // The flood scope, after the observer and in the record's order (D-47): nothing at all for an
+  // exit node that says nothing about scope. `scope` is left out when it is null, which on the
+  // wire is *the companion's own*; the bool and the three counts are the record's non-nullable
+  // members and are written whatever they are.
+  if (hb.flood != nullptr) {
+    const HeartbeatFlood& f = *hb.flood;
+    w.key("flood");
+    w.beginObject();
+    if (f.scope != nullptr) {
+      w.key("scope");
+      w.string(f.scope);
+    }
+    w.key("unscopedRetry");
+    w.boolean(f.unscopedRetry);
+    w.key("answeredScoped");
+    w.integer(f.answeredScoped);
+    w.key("answeredUnscoped");
+    w.integer(f.answeredUnscoped);
+    w.key("unanswered");
+    w.integer(f.unanswered);
+    w.endObject();
+  }
   w.endObject();
   return w.overflowed() ? 0 : w.length();
 }

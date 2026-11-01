@@ -292,6 +292,55 @@ const uint8_t* AgentMesh::sharedSecret() {
   return peerSecret_;
 }
 
+void AgentMesh::setFloodScope(const char* value) {
+  // The caller may be handing back this object's own buffer (the constructor does), so the value
+  // is read into a local before the member is written.
+  const bool named = isFloodScopeValue(value) && !floodScopeIsUnscoped(value);
+  const char* from = named ? floodScopeBareName(value) : kFloodScopeUnscoped;
+  char taken[kRegionNameCap + 2] = {0};
+  size_t n = 0;
+  while (from[n] != 0 && n + 1 < sizeof taken) {
+    taken[n] = from[n];
+    n++;
+  }
+  taken[n] = 0;
+  std::memcpy(floodScope_, taken, n + 1);
+  floodScopeUnscoped_ = floodScopeIsUnscoped(floodScope_);
+  if (floodScopeUnscoped_) {
+    std::memset(floodScopeKey_, 0, sizeof floodScopeKey_);
+  } else {
+    floodScopeKey(floodScope_, floodScopeKey_);
+  }
+}
+
+void AgentMesh::describeFloodScope(char* out, size_t cap) const {
+  if (floodScopeUnscoped_) {
+    std::snprintf(out, cap, "* : every flood goes out with no transport code at all");
+    return;
+  }
+  char hex[2 * kTransportKeyBytes + 1];
+  mesh::Utils::toHex(hex, floodScopeKey_, kTransportKeyBytes);
+  std::snprintf(out, cap,
+                "%s: key %s (sha-256 of \"#%s\", first %u bytes; public by construction), example payload -> "
+                "transport code 0x%04x",
+                floodScope_, hex, floodScope_, static_cast<unsigned>(kTransportKeyBytes),
+                exampleTransportCode(floodScopeKey_));
+}
+
+SendResult AgentMesh::floodOut(mesh::Packet* pkt) {
+  if (floodScopeUnscoped_ || floodMode_ == FloodMode::Unscoped) {
+    sendFlood(pkt, 0, kFloodPathHashSize);
+    return SendResult::Flood;
+  }
+  // The companion's `sendFloodScoped`: code 0 is the scope's code over this packet, code 1 is
+  // left 0 (upstream's own REVISIT - the sender's return region is not expressed yet).
+  uint16_t codes[2];
+  codes[0] = transportCodeFor(floodScopeKey_, pkt->getPayloadType(), pkt->payload, pkt->payload_len);
+  codes[1] = 0;
+  sendFlood(pkt, codes, 0, kFloodPathHashSize);
+  return SendResult::Flood;
+}
+
 SendResult AgentMesh::dispatch(mesh::Packet* pkt, size_t clearBytes) {
   if (pkt == nullptr) return SendResult::Failed;
   logFrame("tx", pkt, true, clearBytes);
@@ -299,8 +348,7 @@ SendResult AgentMesh::dispatch(mesh::Packet* pkt, size_t clearBytes) {
     sendDirect(pkt, outPath_, outPathLen_);
     return SendResult::Direct;
   }
-  sendFlood(pkt, 0, kFloodPathHashSize);
-  return SendResult::Flood;
+  return floodOut(pkt);
 }
 
 SendResult AgentMesh::sendLogin(const char* password, uint32_t& tag) {
@@ -392,8 +440,7 @@ SendResult AgentMesh::sendDiscovery(uint32_t& tag) {
   mesh::Packet* pkt = createDatagram(PAYLOAD_TYPE_REQ, peer_, sharedSecret(), temp, sizeof temp);
   if (pkt == nullptr) return SendResult::Failed;
   logFrame("tx", pkt, true);
-  sendFlood(pkt, 0, kFloodPathHashSize);
-  return SendResult::Flood;
+  return floodOut(pkt);
 }
 
 SendResult AgentMesh::sendTrace(const uint8_t* roundTripHashes, uint8_t hashBytes, uint8_t hashSize, uint32_t& tag) {

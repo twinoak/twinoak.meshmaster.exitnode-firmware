@@ -4,10 +4,12 @@
 //                  string? CompanionFirmware, RadioParameters? Radio, IReadOnlyList<string>? JobTypes,
 //                  AgentBudget? Budget, bool CompanionConnected, int QueueDepth,
 //                  IReadOnlyDictionary<string, long>? Errors, string? Board, int? NextCheckInS,
-//                  int? MaxTransactionsThisWake, AgentObserver? Observer)
+//                  int? MaxTransactionsThisWake, AgentObserver? Observer, AgentFlood? Flood)
 //   AgentObserver(string? Iata, IReadOnlyList<AgentObserverSlot>? Slots)
 //   AgentObserverSlot(int Slot, string? Preset, string? Host, string State, DateTime? Since,
 //                     long Published, long Dropped, string? LastError)
+//   AgentFlood(string? Scope, bool UnscopedRetry, long AnsweredScoped, long AnsweredUnscoped,
+//              long Unanswered)
 //   RadioParameters(double? FreqMHz, double? BwKHz, int? Sf, int? Cr)
 //   Observation(DateTime At, string Kind, string PublicKey, IReadOnlyList<string>? Path, int? Hops,
 //               double? Snr, double? Rssi, ObservationFields? Fields)
@@ -82,6 +84,22 @@ struct HeartbeatObserver {
   int slotCount = 0;
 };
 
+// The flood scope as the heartbeat reports it (AgentFlood; meshmaster.dk's D-47 and its task
+// p4.20-151). Like the observer above, this library knows nothing about what a scope *is*: it
+// writes the bytes a consumer fills in. MeshMaster keeps the newest object on the exit node's row,
+// shows one line of it and configures nothing - the scope is set where the exit node runs.
+//
+// `scope` nullptr is **the companion's own**: the exit node says nothing about scope and whatever
+// its radio holds decides. The serializer omits a null member, so on the wire that is the absence
+// of `scope` inside a `flood` object that is present, which is not the same as no `flood` at all.
+struct HeartbeatFlood {
+  const char* scope = nullptr;      // a region's name, "*", or nullptr: the member is left out
+  bool unscopedRetry = false;       // the second try of a flooded transaction drops the scope
+  long long answeredScoped = 0;     // always written, as the record's non-nullable longs are
+  long long answeredUnscoped = 0;
+  long long unanswered = 0;
+};
+
 struct Heartbeat {
   const char* agentVersion = "";
   const char* transport = "onboard";
@@ -131,6 +149,12 @@ struct Heartbeat {
   // heartbeat is byte for byte what it was. The object and every string in it must outlive the
   // call that posts the heartbeat; nothing here is copied.
   const HeartbeatObserver* observer = nullptr;
+
+  // The flood scope, after the observer as the record has it (D-47): nullptr for an exit node
+  // that says nothing about scope, which is every one built before the field existed, and then
+  // the heartbeat is byte for byte what it was. The object and its `scope` string must outlive
+  // the call that posts the heartbeat; nothing here is copied.
+  const HeartbeatFlood* flood = nullptr;
 };
 
 struct ObservationFields {

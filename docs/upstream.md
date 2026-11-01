@@ -22,7 +22,7 @@ only thing that can go wrong is that our own code no longer compiles against
 theirs, which is exactly the thing CI can tell us by itself.
 
 The price is that a consumer of the package does not get everything a checkout
-of MeshCore's own tree gets, and four things had to be arranged by hand. They
+of MeshCore's own tree gets, and five things had to be arranged by hand. They
 are the places a bump re-reads:
 
 | What | Where | Why |
@@ -30,6 +30,7 @@ are the places a bump re-reads:
 | the flag block | `platformio.ini`, `[esp32_base]`, `[env:heltec_v3]` and `[env:heltec_v4]` | MeshCore's `[arduino_base]`, `[esp32_base]`, `[sensor_base]` and `variants/heltec_v3/platformio.ini` and `variants/heltec_v4/platformio.ini` use paths relative to its own root, so they cannot be included from here; they are copied |
 | the library versions | `platformio.ini`, `[libs]` | pinned exactly, where upstream uses ranges |
 | `lib/ed25519` | `tools/pio/meshcore_private_libs.py` | MeshCore keeps it as a *private* library of its project, which a package consumer does not get; the sources are compiled straight out of the pinned checkout and the include path is a `-I` in `platformio.ini` |
+| rweather/Crypto's `SHA256.cpp`, `Hash.cpp`, `Crypto.cpp` in `[env:native]` | the same script, and `[env:native]`'s `lib_ignore` | since task p1.8-32 a flood scope's transport key and code are SHA-256 and HMAC-SHA256 of **this** library — the one MeshCore hashes with — and the host build needs them, but the library's own `RNG.cpp` includes `<Arduino.h>` and a host has none. So the native environment ignores the library and these three translation units are added to its build; the boards get the whole library from `lib_deps` as before |
 | `boards/heltec_v4.json` | `boards/` here, unedited (`boards/README.md`) | PlatformIO reads `boards_dir` before it clones a dependency, so a `board =` cannot name a file inside one. The V3 needs none - its board is PlatformIO's own `esp32-s3-devkitc-1`. A bump re-copies this file and `diff`s it |
 
 Everything else — `src/`, `variants/` — the package gives us, and
@@ -51,6 +52,7 @@ One file touches it, `src/mesh/AgentMesh.cpp`, and a bump re-reads these:
 | a request | `Mesh::createDatagram(PAYLOAD_TYPE_REQ, …)`, read by `MyMesh::handleRequest` (same file, 211-378); `REQ_TYPE_GET_ACCESS_LIST` (262-275) answers admin alone with `{pub_key[6], permissions}` per entry | a `REQ_TYPE_*` code, or the shape of a reply |
 | a CLI line | `Mesh::createDatagram(PAYLOAD_TYPE_TXT_MSG, …)` with `TXT_TYPE_CLI_DATA`, read by `MyMesh::onPeerDataRecv` (same file, 702-758): admin only, the sender timestamp must be **above** the last one seen (equal is a retry that runs nothing), and the reply is a `TXT_MSG` of the repeater's own with its own timestamp | the text type's bits, the replay rule, the 160-byte reply buffer of `CommonCLI::handleCommand`; `setperm` (1240-1261), `get`/`ver`/`board` and `region` (`src/helpers/CommonCLI.cpp:265-321`, `1036-1082`) |
 | path discovery | the flooded base-telemetry request the companion's `CMD_SEND_PATH_DISCOVERY_REQ` makes (`examples/companion_radio/MyMesh.cpp:1602-1630`), answered as a returned path | the request's bytes, or a firmware that answers it (none has yet) |
+| a flood's **scope** (task p1.8-32) | `Mesh::sendFlood(packet, transport_codes, …)` with the codes the companion's `sendFloodScoped` attaches (`examples/companion_radio/MyMesh.cpp:489-497`: code 0 the scope's over the packet, code 1 left 0), the key `TransportKeyStore::getAutoKeyFor` derives (SHA-256 over `#name`, first 16 bytes) and the code `TransportKey::calcTransportCode` computes (HMAC-SHA256 over the payload type and payload, two bytes, 0000 and FFFF reserved) — `src/helpers/TransportKeyStore.cpp`, read by `MyMesh::onRecvPacket` and `allowPacketForward` on the repeater side (`examples/simple_repeater/MyMesh.cpp:434-443`, `556-567`). The name's characters are `RegionMap::is_name_char`'s and its length `RegionEntry::name`'s `char[31]` (`src/helpers/RegionMap.{h,cpp}`) | any of those four: the two hash steps, the reservation, the name rule, or the `sendFlood` overload. `src/mesh/TransportScope.cpp` is the port and `test/test_flood_scope` holds it against **the pinned source on disk** as well as against the crypto, so a bump that moves one of them is a red test and not a silent change of scope |
 | a trace | `Mesh::createTrace` + `sendDirect`, answered in `Mesh::onRecvPacket`'s `PAYLOAD_TYPE_TRACE` arm | the flags byte's meaning (`1 << (flags & 3)`, which task p3.5-42 got wrong once) |
 | the replies | `onPeerDataRecv`, `onPeerPathRecv`, `onTraceRecv` | the arguments, or when they are called |
 | the parsers | `lib/agent-core/src/ReplyCodec.cpp`, against `RepeaterStats` (`examples/simple_repeater/MyMesh.h:44-60`) and the request handlers above | a field added in the middle of `RepeaterStats` rather than at its end |

@@ -487,6 +487,9 @@ class AgentLoop {
   // of buildHeartbeat(), because the Heartbeat it fills points at it and that struct outlives
   // the call (doHeartbeat and wakeHeartbeat both post after building).
   HeartbeatObserver observer_;
+  // And the flood scope's, for the same reason (task p1.8-32): the counts are the runner's and
+  // the scope is the mesh's, read at every heartbeat and written into this.
+  HeartbeatFlood flood_;
 
   ObservationRing ring_;
   Counters counters_;
