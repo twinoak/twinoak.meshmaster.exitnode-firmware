@@ -39,6 +39,9 @@ struct ConsoleHost {
   // same scope can be compared (task p1.8-32). nullptr, or a key with nothing to add, prints one
   // line as every other key does.
   void (*keyNote)(const KeyDef& key, Stream& out);
+  // `discover.scopes` (task p1.8-33): the neighbour table as it stands, and a cycle of the scope
+  // sweep started now. nullptr prints nothing.
+  void (*discoverScopes)(Stream& out);
 };
 
 class Console {

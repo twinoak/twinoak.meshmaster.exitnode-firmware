@@ -43,6 +43,7 @@
 
 #include "mesh/MeshCoreHeaders.h"
 #include "mesh/TransportScope.h"
+#include "observer/Neighbours.h"
 
 namespace mm {
 
@@ -75,7 +76,7 @@ class RxTap {
   ~RxTap() {}
 };
 
-class AgentMesh : public mesh::Mesh, public IMesh {
+class AgentMesh : public mesh::Mesh, public IMesh, public observer::NeighbourLink {
  public:
   static constexpr int kRecent = 5;  // what `mesh` prints: the last five, with their names
 
@@ -136,6 +137,35 @@ class AgentMesh : public mesh::Mesh, public IMesh {
 
   bool jobInFlight() const { return peerSet_; }
 
+  // ------------------------------------------------------------------ the neighbours (task p1.8-33)
+
+  // observer::NeighbourLink: what the scope sweep (src/observer/Neighbours.h) asks of this mesh.
+  // `busy()` is a job open at the runner (the hook, set by main.cpp to JobRunner::openJob) or a
+  // peer set here; the sweep sends nothing while either holds. The node discovery is one
+  // CTL_TYPE_NODE_DISCOVER_REQ for repeaters, direct on an empty path - what MeshCore's own
+  // zero-hop send does (Mesh.cpp:717-726 at d9296435: ROUTE_TYPE_DIRECT, path_len 0), through
+  // the one direct send this file has - and for `windowMs` the CTL_TYPE_NODE_DISCOVER_RESP frames
+  // are let through to onControlDataRecv and put in the table. A regions request is the login's
+  // anonymous datagram with the two other bytes of Neighbours.h, direct on an empty path, with
+  // the peer set for it so that its reply is decoded exactly as a job's is (searchPeersByHash),
+  // awaited for queryTimeoutMs() - the observer firmware's neighborDiscoverQueryTimeoutMs
+  // (examples/simple_repeater/MyMesh.cpp:1997-2001 at d664d89d) from this radio's figures - and
+  // the peer forgotten again. Synchronous: a claimed job waits for at most this one query.
+  bool busy() const override { return peerSet_ || (busyHook_ != nullptr && busyHook_()); }
+  bool sendDiscovery(uint32_t windowMs) override;
+  observer::QueryStatus queryRegions(const uint8_t key[observer::kNeighbourKeyLen], char* scopes, size_t cap) override;
+  uint32_t queryTimeoutMs() const override;
+
+  // Where zero-hop repeater adverts and discovery responses go (nullptr: nowhere).
+  void setNeighbourTable(observer::NeighbourTable* table) { table_ = table; }
+  // A job is open at the runner, from its claim to its end: the sweep's `busy()`.
+  void setBusyHook(bool (*hook)()) { busyHook_ = hook; }
+  // What a regions query pumps while it waits (the console, the OLED, the observer's connections).
+  void setPump(void (*pump)()) { pump_ = pump; }
+  uint32_t discoveryRequests() const { return discoveryRequests_; }
+  uint32_t discoveryResponses() const { return discoveryResponses_; }
+  uint32_t regionsQueries() const { return regionsQueries_; }
+
   void setFrameLog(bool on) { frameLog_ = on; }
   bool frameLog() const { return frameLog_; }
 
@@ -175,6 +205,11 @@ class AgentMesh : public mesh::Mesh, public IMesh {
   bool allowPacketForward(const mesh::Packet*) override { return false; }
   void onAdvertRecv(mesh::Packet* pkt, const mesh::Identity& id, uint32_t timestamp, const uint8_t* app_data,
                     size_t app_data_len) override;
+  // A zero-hop control frame, while a node discovery's window is open (Mesh::onRecvPacket's
+  // control arm, Mesh.cpp:70-76: direct, the type's high bit set, no hops - and plaintext, so
+  // nothing is decrypted for it): a repeater's discovery response with this request's tag goes
+  // into the neighbour table.
+  void onControlDataRecv(mesh::Packet* pkt) override;
   void logRxRaw(float snr, float rssi, const uint8_t raw[], int len) override;
   void logRx(mesh::Packet* pkt, int len, float score) override;
   void logTx(mesh::Packet*, int) override { counters_.tx++; }
@@ -258,6 +293,18 @@ class AgentMesh : public mesh::Mesh, public IMesh {
   bool waiting_ = false;
   Awaiting awaiting_ = Awaiting::None;
   bool sensitiveAwait_ = false;  // the text awaited answers a `password` line: its frame is starred
+
+  // The neighbours (task p1.8-33): the table, the runner's "a job is open" hook, the pump a
+  // query waits with, and the one node discovery that may be open - its tag, and until when its
+  // responses are taken (0: none, and a control frame is released like any other).
+  observer::NeighbourTable* table_ = nullptr;
+  bool (*busyHook_)() = nullptr;
+  void (*pump_)() = nullptr;
+  uint32_t discoverTag_ = 0;
+  uint32_t discoverUntil_ = 0;
+  uint32_t discoveryRequests_ = 0;
+  uint32_t discoveryResponses_ = 0;
+  uint32_t regionsQueries_ = 0;
 };
 
 }  // namespace mm

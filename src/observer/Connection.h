@@ -259,6 +259,23 @@ class Connections {
   // One packet message, already formatted (Dialect.h), for every slot that is configured.
   void onPacketMessage(const char* json, size_t len);
 
+  // The neighbours report (task p1.8-33; Dialect.h's formatNeighbours, built once by the
+  // Observer into a buffer that outlives this call). Offered once per cycle: when the gate says
+  // the heap can take it (heapAllowsReport), every connected slot whose topic has a {type} takes
+  // it **one at a time** - the next slot is handed it only when the previous one's outbox has
+  // drained, because the client copies a message into its outbox and this one is ten kilobytes
+  // - at QoS 0, retained where the preset allows (the status topic's rule; MQTTBridge.cpp:4372-4396
+  // at d664d89d, publishNeighbors). It is never published from inside a MeshMaster call: the
+  // uplink's calls are synchronous and this file's loop() never runs during one.
+  enum class ReportOffer : uint8_t { NoSlot, SkippedHeap, Queued };
+  ReportOffer offerNeighbours(const char* json, size_t len, char* why, size_t whyCap);
+  int neighboursPending() const;  // slots still to take the last report offered
+  int neighboursTaken() const;    // slots whose client took it
+  int neighboursFailed() const;   // slots that refused it, or went down before taking it
+  // The gate for a publish of `bytes`: free internal heap holds it, the uplink's next call,
+  // the floor and the margin, and the largest block holds the outbox's copy of it.
+  bool heapAllowsReport(size_t bytes, char* why, size_t cap) const;
+
   // The uplink's call failed for want of memory: the highest slot that is up or opening closes
   // and stays down kHeapYieldMs (the task's rule), and is counted.
   void onUplinkMemoryFailure();
@@ -301,6 +318,8 @@ class Connections {
     uint32_t configHash = 0;
     char topicStatus[kTopicCap] = {0};
     char topicPackets[kTopicCap] = {0};
+    char topicNeighbours[kTopicCap] = {0};  // "" when the slot's template has no {type}: no report goes there
+    bool reportPending = false;             // the last neighbours report offered is still to be handed to this slot
     SlotState state = SlotState::Off;
     uint32_t sinceMillis = 0;
     uint32_t sinceEpoch = 0;
@@ -333,6 +352,7 @@ class Connections {
   void pollEvents(int i);
   void serveConnected(int i);  // a connected slot's pass: the backoff's reset, the renewal, the status, the queue
   void pumpQueue(int i);
+  void pumpReport(int i);  // the neighbours report to this slot, when its outbox has drained
   void publishStatus(int i);
   bool makeSlotToken(int i, char* out, size_t cap);
   void queuePush(Slot& s, const char* json, size_t len);
@@ -352,6 +372,12 @@ class Connections {
   uint32_t uplinkDip_ = 0;
   bool uplinkMeasured_ = false;
   uint32_t lastUplinkLowest_ = 0;  // the lowest free heap of the last call, for the memory line
+  // The neighbours report last offered: the Observer's buffer (it outlives the hand-over), and
+  // how the slots took it.
+  const char* neighboursJson_ = nullptr;
+  size_t neighboursLen_ = 0;
+  int neighboursTaken_ = 0;
+  int neighboursFailed_ = 0;
   char publicKeyHex_[kPublicKeyHexLen + 1] = {0};
   char owner_[kPublicKeyHexLen + 1] = {0};
   char email_[64] = {0};

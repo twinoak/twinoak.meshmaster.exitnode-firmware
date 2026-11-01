@@ -262,6 +262,8 @@ mqtt.origin unset
 mqtt.iata unset
 mqtt.owner unset
 mqtt.email unset
+mqtt.neighbors unset (on)
+mqtt.neighbors.interval unset (24)
 mqtt1.preset unset (none)
 mqtt1.server unset
 mqtt1.audience unset

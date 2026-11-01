@@ -34,10 +34,21 @@
 #include "observer/Config.h"
 #include "observer/Connection.h"
 #include "observer/Dialect.h"
+#include "observer/Neighbours.h"
 #include "observer/Token.h"
 #include "settings/Store.h"
 
 namespace mm {
+
+// What the board measures for the status message's `stats` (task p1.8-33): the radio's noise
+// floor, the dispatcher's air-time counters and the battery, read by main.cpp from the objects
+// that have them. Each one with the dialect's own "unknown" sentinel (Dialect.h, StatusFields).
+struct BoardStats {
+  int noiseFloor = -999;
+  int txAirSecs = -1;
+  int rxAirSecs = -1;
+  int batteryMv = -1;
+};
 
 // Signer over the board's own identity: Ed25519 by mesh::LocalIdentity::sign (src/Identity.cpp:151-153
 // at d9296435), which is the call the observer firmware's JWTHelper makes.
@@ -65,7 +76,17 @@ class Observer : public RxTap, public observer::StatusSource, public IHeartbeatO
   // slot whose connection would change starts over; the others keep their sessions.
   void reconfigure();
 
-  // Every pass of the main loop: the connections' events, timers and queues.
+  // The neighbour sweep (task p1.8-33, observer/Neighbours.h): the mesh behind its seam and the
+  // jobs' airtime gate, which every request of the sweep waits for and is counted on.
+  void beginNeighbours(observer::NeighbourLink& link, AirtimeGate* gate);
+  // What the board measures for the status message (BoardStats above); nullptr leaves them out.
+  void setBoardStats(void (*fill)(BoardStats& out)) { boardStats_ = fill; }
+  // The report's `self.default_scope`: the mesh's flood scope (AgentMesh::floodScope, a string
+  // that outlives this object), `*` when unscoped. nullptr writes "*".
+  void setDefaultScope(const char* scope) { floodScope_ = scope; }
+
+  // Every pass of the main loop: the connections' events, timers and queues, and the sweep's
+  // next step - which may be one regions request and its wait, pumped through `pump` below.
   void loop();
   // WiFi's state, every pass (WifiLink::connected()).
   void setLinkUp(bool up);
@@ -105,6 +126,16 @@ class Observer : public RxTap, public observer::StatusSource, public IHeartbeatO
   void describeSlot(int slot, char* out, size_t cap) const { link_.describe(slot, out, cap); }
   // The memory line of `mqtt.status`: the gate's rule with this board's figures (Connections::describeGate).
   void describeGate(char* out, size_t cap) const { link_.describeGate(out, cap); }
+  // The `nbr:` line of `mqtt.status` (NeighbourSweep::describe).
+  void describeNeighbours(char* out, size_t cap) const { sweep_.describe(out, cap); }
+  // `discover.scopes`: a cycle now. False when one is already running (the line says which phase).
+  bool discoverScopes() { return sweep_.requestNow(); }
+  const observer::NeighbourTable& neighbourTable() const { return table_; }
+  observer::NeighbourTable& neighbourTable() { return table_; }  // the mesh's to fill (AgentMesh::setNeighbourTable)
+  const observer::NeighbourSweep& sweep() const { return sweep_; }
+  // The last report built, for the bench: "" until one was.
+  const char* lastNeighboursMessage() const { return neighbours_; }
+  size_t lastNeighboursLength() const { return neighboursLen_; }
 
   // How many slots this board opens (observer/Board.h: one on a V3, two on a V4), and whether
   // slot `slot` is shown at all - the board's own, or one beyond them with a preset stored in
@@ -122,6 +153,10 @@ class Observer : public RxTap, public observer::StatusSource, public IHeartbeatO
   void readSettings();
   const char* origin() const;
   static void reportLine(void* ctx, LogLevel level, const char* line);
+  // A cycle has finished: build the report from the sweep's snapshot and offer it to the slots.
+  void reportNeighbours();
+  // The hand-over of the last report has ended: record how it went.
+  void settleNeighbours();
 
   SettingsStore* settings_ = nullptr;
   IdentitySigner signer_;
@@ -158,6 +193,19 @@ class Observer : public RxTap, public observer::StatusSource, public IHeartbeatO
   uint32_t formatted_ = 0;
   uint32_t notFitting_ = 0;
   uint32_t heardWhileOff_ = 0;
+
+  // The neighbours (task p1.8-33): the table the mesh fills, the sweep over it, and the report
+  // built once per cycle into a buffer of its own - static, like the queues, so the gate counts
+  // nothing for it; the outbox's copy is what heapAllowsReport gates.
+  observer::NeighbourTable table_;
+  observer::NeighbourSweep sweep_;
+  char neighbours_[observer::kNeighboursMessageCap] = {0};
+  size_t neighboursLen_ = 0;
+  bool inSweep_ = false;         // the sweep's step is running: loop() re-entered from the query's pump skips it
+  bool reportOffered_ = false;   // a report is being handed to the slots: settle it when none is pending
+  observer::SweepSettings sweepSettings_;  // mqtt.neighbors and mqtt.neighbors.interval, as last read
+  const char* floodScope_ = nullptr;       // the mesh's, for self.default_scope
+  void (*boardStats_)(BoardStats& out) = nullptr;
 };
 
 }  // namespace mm

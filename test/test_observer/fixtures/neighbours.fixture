@@ -1,0 +1,20 @@
+# The neighbours message (task p1.8-33), written by hand from the observer firmware's source at
+# agessaman/MeshCore observer-firmware d664d89df66bdacc1319900a2e2d152fa31b9dc9:
+#   the field order     src/helpers/MQTTPayloadBuilder.cpp:216-242, buildNeighborsMessageBase, and
+#                       :244-258, addNeighborsMessageEntry - the order the ArduinoJson document is
+#                       filled in, which is the order it serialises
+#   the values          examples/simple_repeater/MyMesh.cpp:2184-2258, finishNeighborDiscover:
+#                       pubkey from mesh::Utils::toHex (uppercase), snr = entry.snr / 4.0f,
+#                       heard_secs_ago = now - heard_timestamp, scopes from the reply, status one of
+#                       the three words of :2039-2045
+#   the sample          MQTT_IMPLEMENTATION.md "Neighbors": MeshCore-HOWL, two neighbours at 9.75
+#                       and 12.5 dB, scopes "DEN,APRS" and "DEN"; the second's status is `timeout`
+#                       here so that both words appear
+#   self                :2003-2015, resetNeighborDiscoverJsonBudget: scopes from the node's own
+#                       region map (none on an exit node: ""), default_scope the default region's
+#                       name or "*" - `flood.scope`'s value here
+#   the numbers         ArduinoJson writes 9.75 as 9.75 and 12.5 as 12.5 (a double, shortest
+#                       round-trip form, no trailing zeros); the integers as integers; false as false
+# The test builds the fields in code (test_observer.cpp, Neighbours.TheFormatterWritesTheObserverFirmwaresBytes)
+# and holds the output to this line byte for byte.
+expected={"timestamp":"2024-01-01T12:00:00.000000+00:00","origin":"MeshCore-HOWL","origin_id":"A1B2C3D4E5F67890A1B2C3D4E5F67890A1B2C3D4E5F67890A1B2C3D4E5F67890","total_neighbors":2,"queried_neighbors":2,"truncated":false,"self":{"scopes":"","default_scope":"dk"},"neighbors":[{"pubkey":"0011223344556677001122334455667700112233445566770011223344556677","snr":9.75,"heard_secs_ago":42,"scopes":"DEN,APRS","status":"responded"},{"pubkey":"8899AABBCCDDEEFF8899AABBCCDDEEFF8899AABBCCDDEEFF8899AABBCCDDEEFF","snr":12.5,"heard_secs_ago":7,"scopes":"DEN","status":"timeout"}]}

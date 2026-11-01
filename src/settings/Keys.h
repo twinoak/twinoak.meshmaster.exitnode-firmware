@@ -63,7 +63,7 @@ struct KeyDef {
 // The longest value any key accepts, and the buffer size a caller needs for one.
 constexpr size_t kMaxValueLen = 128;
 
-constexpr int kKeyCount = 30;
+constexpr int kKeyCount = 32;
 extern const KeyDef kKeys[kKeyCount];
 
 // The key called `name`, or nullptr. Exact, case-sensitive match - and one alias: `wifi.pwd`, the

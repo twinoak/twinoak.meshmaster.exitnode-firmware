@@ -5,7 +5,14 @@
 namespace mm {
 namespace observer {
 
-const char* typeName(MessageType type) { return type == MessageType::Status ? "status" : "packets"; }
+const char* typeName(MessageType type) {
+  switch (type) {
+    case MessageType::Status: return "status";
+    case MessageType::Neighbours: return "neighbors";  // the observer firmware's spelling (MQTTTopicRouter.h:36)
+    case MessageType::Packets: break;
+  }
+  return "packets";
+}
 
 bool iataUsable(const char* iata) {
   // MQTTObserverValidation.h:15-24 (three ASCII letters or digits) and MQTTTopicRouter.h:68 (not "XXX").

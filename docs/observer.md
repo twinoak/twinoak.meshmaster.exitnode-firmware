@@ -83,6 +83,7 @@ To each configured slot's broker, and to nobody else:
 | `meshcore/{iata}/{device}/packets` | every packet the radio received — the frame's raw bytes as hex, its hash, type, route, lengths, SNR, RSSI, the rebroadcast score and the path — as the observer firmware's `packets` message, byte for byte | 0 | no |
 | `meshcore/{iata}/{device}/status` | `online`: the node's name and key, board, firmware, radio settings, uptime, heap, how many slots are up — at connect and every five minutes (the observer firmware's `mqtt.interval` default) | 1 | where the preset allows: meshmapper yes, meshview no (a custom slot's rule) |
 | the same topic, as the last will | `offline`, left by the broker when the connection is lost without a goodbye | 1 | as above |
+| `meshcore/{iata}/{device}/neighbors` | the repeaters this node hears at **zero hops**, each with its SNR, when it was last heard and the flood regions it answers a regions request with — MeshView's *Direct neighbours* — once every `mqtt.neighbors.interval` hours (24) while `mqtt.neighbors` is on, and after `discover.scopes` ([*Neighbours*](#neighbours), task p1.8-33) | 0 | as the status |
 
 `{device}` is this node's public key, 64 uppercase hex — the same string
 `status` prints and meshmaster.dk shows. Nothing in this firmware decodes a
@@ -99,6 +100,113 @@ Ed25519 key, the signature as 128 hex characters. Username `v1_<KEY>`, password
 the token. It is renewed five minutes before it expires, with a new session,
 because MQTT takes a password at CONNECT and nowhere after. The private key never
 leaves MeshCore's identity; nothing of a token is ever printed.
+
+## Neighbours
+
+MeshView's page for a node has a **Direct neighbours** section: the repeaters
+the node hears at zero hops, each with its SNR and the flood regions it is
+configured with. It is drawn from the `neighbors` message the observer firmware
+publishes once a day, and since task p1.8-33 an exit node publishes the same
+one, built the same way:
+
+- **The table.** A repeater's advert heard with **no hops** — the frame came
+  from its own radio, not through another repeater — puts it in a table of
+  twenty: its key, the SNR and RSSI the radio measured, when it was heard. A
+  twenty-first replaces the one heard longest ago. The table is a fixed array
+  (`src/observer/Neighbours.h`); nothing is allocated for it. Once per cycle it
+  is refreshed by a **node discovery** — one `CTL_TYPE_NODE_DISCOVER_REQ` for
+  repeaters, zero hop, the same request the repeater firmware's own
+  `discover.neighbors` sends — and sixty seconds of taking the answers.
+- **The scopes.** Then one anonymous **regions** request per neighbour, newest
+  first: the login's datagram with two other bytes, `{tag}{0x01}{0x00}`, sent
+  **direct on an empty path**, because a repeater answers it only when the
+  request was direct, and at most four times in three minutes. The reply is the
+  comma-separated names of the regions the repeater floods (`exportNamesTo` with
+  `REGION_DENY_FLOOD`), which is what its own console's `region` lists with `F`;
+  bounded to 256 characters, cut at valid UTF-8. A neighbour is `responded`,
+  `timeout` or `send_failed`, with the observer firmware's own timeout: the
+  repeater's response delay, its CAD window, one retry, and the air time of a
+  full packet twice, at this radio's settings — a few seconds at SF 8.
+- **The exit node's rules around it.** Nothing of the sweep goes on the air
+  while a job is open or in flight; a request waits for the **airtime gate the
+  jobs share** (`JobRunner::gate`) and is counted on it, so a sweep of twenty
+  neighbours at the default budget of two a minute takes about ten minutes and
+  a job claimed in the middle of it waits for the one query that is on the air
+  and nothing more — a query is synchronous and bounded by the timeout. The
+  frames of the sweep are decoded exactly as a job's are: the peer is set for
+  the query and forgotten after it, and every other frame is released as it
+  always was. The discovery's answers are the one new thing let through, for
+  the sixty seconds the window is open, and they are plaintext.
+- **The report.** `timestamp`, `origin`, `origin_id`, `total_neighbors`,
+  `queried_neighbors`, `truncated`, `self: { scopes: "", default_scope: <flood.scope> }`
+  — an exit node forwards no flood, so it has no regions of its own, which is
+  what a repeater with none says; its `default_scope` is `flood.scope`, or `*`
+  — and one entry per neighbour: `pubkey` (64 uppercase hex), `snr` (dB),
+  `heard_secs_ago`, `scopes`, `status`, sorted by recency, then SNR, then key,
+  at most twenty and at most 10 KB, byte for byte the observer firmware's field
+  order (`test/test_observer`, `fixtures/neighbours.fixture`). It is built once
+  into a buffer of its own (static, like the queues) and handed to each
+  connected slot **one at a time** — the next only when the previous one's
+  outbox has drained, because the client copies a message into its outbox and
+  this one is ten kilobytes — at QoS 0, retained where the preset allows (the
+  status topic's rule). It goes out only when the gate says the heap can take
+  the outbox's copy on top of the uplink's next call, the floor and the margin;
+  otherwise that cycle is **skipped** and `get mqtt.status` says so. It is never
+  published from inside a MeshMaster call: the uplink's calls are synchronous,
+  and the observer's loop never runs during one. CoreScope's ingestor (the
+  software behind MeshView) reads `self.scopes` as the node's own, a neighbour's
+  scopes only when its status is `responded`, drops a key that is not 64 hex
+  and a timestamp more than five minutes ahead of its clock — all of which this
+  report satisfies by construction.
+- **When.** Every `mqtt.neighbors.interval` hours (12..336, default 24) while
+  `mqtt.neighbors` is `on` — the default here; the observer firmware's is off,
+  but an exit node's observer is already opt-in slot by slot, and the report is
+  why one is on — and only when a broker slot is connected, because the report
+  has nowhere else to go. The first cycle runs five minutes after the sweep is
+  switched on, so the table has heard a round of adverts and the slots have had
+  their handshakes. `discover.scopes` runs one cycle now, whatever the setting
+  and the schedule say, and prints the table as it stands:
+
+  ```
+  > discover.scopes
+  neighbours 2 heard at zero hops (table of 20); nbr: next in 23h 12m, last ok 47m 50s ago, 2 neighbours, 2 responded
+    key           snr     rssi  heard       last cycle
+    8F1A2B3C4D5E   12.25   -71      38 s ago  responded: dk,dk-aarhus
+    C0FFEE0123AB    4.50   -98    1402 s ago  responded: *
+  cycle     starts now: 60 s of node discovery, then one regions request per neighbour on the airtime budget; the report goes to every connected slot (get mqtt.status: nbr)
+  ```
+
+  The cycle runs in the background of the main loop; the log says how it went
+  (`neighbours: node discovery sent …`, `neighbours: regions request to 8F1A: responded, scopes dk,dk-aarhus`,
+  `neighbours: report built (812 bytes, 2 neighbours, 2 responded), going to 1 slot(s)`,
+  `observer: slot 1 meshview: the neighbours report (812 bytes) is handed to the broker`),
+  and `get mqtt.status`'s `nbr:` line has the schedule and the last outcome.
+- **What it costs.** On the air: one zero-hop control packet and one anonymous
+  request per neighbour per cycle — twenty-one transactions a day at most, on
+  the jobs' own budget — and the repeaters' replies. In heap: nothing for the
+  table or the report; the outbox's copy of the report, up to 10 KB per slot
+  while the client sends it, which is what the gate checks before it is offered
+  (`get mqtt.status`'s `memory` line has the figures; the row *the neighbour
+  report's peak* in [*What it costs*](#what-it-costs-and-the-order-of-priority)).
+  In static RAM: the table (about 1 KB), the sweep's snapshot (about 6 KB, the
+  twenty entries with their scopes) and the report buffer (10 KB).
+- **Which repeaters answer.** Any stock MeshCore repeater at the pin this
+  firmware builds against: `handleAnonRegionsReq` is in its `MyMesh.cpp`,
+  answered only to a direct request and limited by `anon_limiter` to four in
+  three minutes. A repeater with no region map answers with nothing — an empty
+  `scopes`, status `responded` — which is what MeshView shows as no scopes. A
+  companion or a room server does not answer, and is not in the table either:
+  only a repeater's advert enters it.
+- **Two things that are not here**, by the task: RSSI in the report (the
+  observer firmware's `feat/neighbors-rssi` is not in the released dialect; the
+  console's table prints it) and a report on a slot whose custom topic has no
+  `{type}` — it would land on the packets topic, so that slot gets none.
+
+The status message, which MeshView showed with *—* for battery, noise floor and
+TX/RX, now carries `noise_floor` from the radio, `tx_air_secs` and `rx_air_secs`
+from the dispatcher's air-time counters, and `battery_mv` from the board's ADC
+when it reads a volt or more (a board on USB with nothing on that pin reads
+noise, which is left out).
 
 ## TLS
 
@@ -181,6 +289,14 @@ So:
   RAM (52.7 % of the V3's 320 KB after task 31); the TLS contexts and esp-mqtt's
   tasks are heap, taken when a slot connects and given back when it closes.
   `status`'s `heap` line (and on a V4 its `psram` figures) is where to read it.
+- **The neighbour report's peak** (task p1.8-33): the report is built into a
+  static 10 KB buffer and costs the heap nothing until it is handed to a
+  client, which copies it into its outbox — up to **10 KB of internal heap per
+  slot** while the client sends it, one slot at a time. Before it is offered,
+  the gate asks for *free heap ≥ the report + the uplink's dip + the floor + the
+  margin* and a block the copy fits in; below that the cycle is skipped and
+  `nbr:` says `skipped (heap)`. Not measured on a board yet: the bench walk of
+  pile 1.8 reads `status`'s `min ever` after a cycle.
 
 ## What the console shows
 
@@ -190,6 +306,7 @@ observer  slot 1 meshview connected, slot 2 meshmapper connected; iata AAR, orig
 slot 1 meshview (wss://mqtt.meshview.dk:443/mqtt): connected since 12:03:20, root ISRG Root X1/X2; 413 published, 0 dropped, 0 queued; 1 connects, 0 refusal(s), 0 error(s), 0 renewal(s), gave way 0 time(s); last error: none
 slot 2 meshmapper (wss://mqtt.meshmapper.net:443/mqtt): connected since 12:03:26, root ISRG Root X1/X2; 409 published, 4 dropped, 0 queued; 1 connects, 0 refusal(s), 0 error(s), 0 renewal(s), gave way 0 time(s); last error: none
 memory    heltec_v4 opens 2 slot(s) while free heap >= 56856 (one slot 30796 + the uplink's dip 5580 measured + floor 16384 + margin 4096) and the largest block >= 4096 (now 121304 and 65524); and psram >= 40960 with a 17408 block (now 1894320 and 1835008): the TLS buffers, its last call's lowest 115724; a call under the floor closes the highest slot for 10 min
+nbr: next in 22h 41m, last ok 1h 18m ago, 7 neighbours, 5 responded
 uplink    0 memory failure(s) so far, 41 call(s); the last 121304 free before, lowest 115724 during, 121180 after
 tls       buffers of 4096 bytes and over in psram: 9 allocation(s) routed there, 0 fell back to internal heap
 stack     slot 1 task: 6144 bytes, the least ever free 2328
@@ -216,6 +333,7 @@ asks:
 | `N connects, N refusal(s), N error(s), N renewal(s), gave way N time(s)` | sessions the broker accepted; CONNECTs it refused; transport failures and lost connections; tokens made again before they expired (about one a day per slot); and how often this slot closed so the MeshMaster uplink could have the heap — after a call of the uplink's that failed for want of memory, or one that went through but dipped under the floor. **`gave way` climbing on a healthy board is the board being too small for the slot and a handshake at once**: the slot's `last error` says which call did it and the figures, and `src/observer/Board.h` and `Connection.h` (the floor) are where the constants are |
 | `last error: <phrase>` | the last refusal or failure, one phrase and its numbers (`bad username or password (CONNACK 4)`, `tls handshake failed (tls -0x7780, errno 104)`), or `none`. This is the line to copy verbatim into a bench note; it is also the one the heartbeat carries, so MeshMaster's card shows the same words |
 | `memory  …` | the board, how many slots it opens, and the sum a slot opens above — one slot, the uplink's dip (`measured` from this board's last call, or `assumed` from the table above until it has made one), the floor, the margin — then the block the largest allocation needs, the heap as it is **now** (free, and the largest block), on a V4 the same for PSRAM, the last call's lowest free heap, and the rule that closes a slot. If `now` is under the sum, a slot is waiting and its line says so |
+| `nbr: …` | the neighbour report ([*Neighbours*](#neighbours)): when the next cycle runs (`next in 22h 41m`; `running (discovery, 42 s left)` or `running (query 3 of 7)` while one does; `due, waiting for a slot` when it is time but no broker is connected; `off (mqtt.neighbors off)`), how the last report went and how long ago (`ok`, `skipped (heap)`, `failed` — no slot took it — `no slot`, or `none yet`), how many repeaters are in the table now and how many of the last cycle's answered. `discover.scopes` prints the table itself |
 | `uplink  …` | how often the uplink's call has failed for want of memory, how many calls it has made, and what the last one cost (`status`'s `uplink` line has the same, with the kept connection) |
 | `tls  …` | where the TLS buffers are: PSRAM on a V4 (with how many allocations went there and how many had to fall back to internal heap - a V4 with fallbacks is a V4 whose PSRAM is full, which should not happen), the internal heap on a V3 |
 | `stack  …` | each slot's task stack and the least of it that was ever free since the slot opened, read on the task itself; the bench's figure for whether the stack could be smaller |

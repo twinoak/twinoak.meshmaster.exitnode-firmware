@@ -1037,6 +1037,134 @@ TEST(Log, AfterARunTheRingHoldsCountsAndReasonsAndNeverATokenAPasswordOrAPayload
   EXPECT_EQ(std::string::npos, all.find("DEADBEEF"));
 }
 
+// ---- the neighbours report (task p1.8-33) -------------------------------------------------------
+
+namespace {
+int neighboursPublished(const FakeClient& c) {
+  int n = 0;
+  for (const Published& p : c.published) {
+    if (p.topic.find("/neighbors") != std::string::npos) n++;
+  }
+  return n;
+}
+const Published* lastNeighbours(const FakeClient& c) {
+  for (auto it = c.published.rbegin(); it != c.published.rend(); ++it) {
+    if (it->topic.find("/neighbors") != std::string::npos) return &*it;
+  }
+  return nullptr;
+}
+}  // namespace
+
+TEST(Neighbours, TheReportGoesToEachConnectedSlotOneAtATimeQosZeroRetainedWhereThePresetAllows) {
+  Rig r;
+  r.settings.slot[1].preset = "meshmapper";
+  r.connectSlot1();
+  r.tick(kHeapRecheckMs);  // slot 2 waited for slot 1's handshake and looks again after the recheck
+  r.tick();
+  r.client[1].accept();
+  r.tick();
+  ASSERT_EQ(SlotState::Connected, r.state(1));
+
+  const std::string report = "{\"timestamp\":\"2026-10-26T12:00:00.000000+00:00\",\"neighbors\":[]}";
+  char why[kReasonCap] = {0};
+  // Slot 1's outbox still holds a packet message: nothing is handed over yet, to either slot -
+  // the second waits for the first, and the first for its own outbox to drain.
+  r.client[0].outbox = 100;
+  EXPECT_EQ(Connections::ReportOffer::Queued, r.link.offerNeighbours(report.c_str(), report.size(), why, sizeof why));
+  EXPECT_EQ(2, r.link.neighboursPending());
+  r.tick();
+  EXPECT_EQ(0, neighboursPublished(r.client[0]));
+  EXPECT_EQ(0, neighboursPublished(r.client[1]));
+  EXPECT_EQ(2, r.link.neighboursPending());
+  r.client[0].outbox = 0;
+  r.tick();
+  EXPECT_EQ(1, neighboursPublished(r.client[0]));
+  EXPECT_EQ(1, neighboursPublished(r.client[1]));
+  EXPECT_EQ(0, r.link.neighboursPending());
+  EXPECT_EQ(2, r.link.neighboursTaken());
+  EXPECT_EQ(0, r.link.neighboursFailed());
+
+  const Published* one = lastNeighbours(r.client[0]);
+  const Published* two = lastNeighbours(r.client[1]);
+  ASSERT_NE(nullptr, one);
+  ASSERT_NE(nullptr, two);
+  EXPECT_EQ("meshcore/AAR/" + r.pubHex + "/neighbors", one->topic);
+  EXPECT_EQ(report, one->payload);
+  EXPECT_EQ(0, one->qos);
+  EXPECT_FALSE(one->retain) << "meshview takes no retained message";
+  EXPECT_EQ(0, two->qos);
+  EXPECT_TRUE(two->retain) << "meshmapper does, as its status is";
+  EXPECT_NE(std::string::npos, logText().find("the neighbours report (") );
+  EXPECT_EQ(std::string::npos, logText().find("timestamp")) << "the report's bytes are never in the log";
+}
+
+TEST(Neighbours, TheReportIsSkippedWhenTheGateSaysNoAndTheReasonSaysWhy) {
+  Rig r;
+  r.connectSlot1();
+  const std::string report(5000, 'x');
+  // The gate for a publish: the outbox's copy, the uplink's next dip, the floor and the margin.
+  g_free = static_cast<uint32_t>(report.size()) + r.link.uplinkDipBytes() + kHeapFloorBytes + kGateMarginBytes - 1;
+  char why[kReasonCap] = {0};
+  EXPECT_EQ(Connections::ReportOffer::SkippedHeap, r.link.offerNeighbours(report.c_str(), report.size(), why, sizeof why));
+  EXPECT_NE(std::string::npos, std::string(why).find("heap ")) << why;
+  EXPECT_NE(std::string::npos, std::string(why).find("5000-byte report")) << why;
+  EXPECT_EQ(0, r.link.neighboursPending());
+  r.tick();
+  EXPECT_EQ(0, neighboursPublished(r.client[0]));
+  EXPECT_NE(std::string::npos, logText().find("the neighbours report is skipped this cycle"));
+  // One byte more, and it goes.
+  g_free += 1;
+  EXPECT_EQ(Connections::ReportOffer::Queued, r.link.offerNeighbours(report.c_str(), report.size(), why, sizeof why));
+  r.tick();
+  EXPECT_EQ(1, neighboursPublished(r.client[0]));
+  // The largest block alone holds it back too: the outbox's copy is one allocation.
+  g_largest = static_cast<uint32_t>(report.size()) + 255;
+  EXPECT_EQ(Connections::ReportOffer::SkippedHeap, r.link.offerNeighbours(report.c_str(), report.size(), why, sizeof why));
+}
+
+TEST(Neighbours, NoConnectedSlotIsNoReportAndASlotThatDropsBeforeTakingItCountsAsFailed) {
+  Rig r;
+  const std::string report = "{\"neighbors\":[]}";
+  char why[kReasonCap] = {0};
+  r.startSlot1();  // connecting, not connected
+  EXPECT_EQ(Connections::ReportOffer::NoSlot, r.link.offerNeighbours(report.c_str(), report.size(), why, sizeof why));
+  EXPECT_NE(std::string::npos, std::string(why).find("no connected slot")) << why;
+
+  r.client[0].accept();
+  r.tick();
+  ASSERT_EQ(SlotState::Connected, r.state(0));
+  r.client[0].outbox = 50;  // not drained: the hand-over waits
+  EXPECT_EQ(Connections::ReportOffer::Queued, r.link.offerNeighbours(report.c_str(), report.size(), why, sizeof why));
+  r.tick();
+  EXPECT_EQ(1, r.link.neighboursPending());
+  r.client[0].drop();
+  r.tick();
+  EXPECT_EQ(SlotState::BackingOff, r.state(0));
+  EXPECT_EQ(0, r.link.neighboursPending());
+  EXPECT_EQ(0, r.link.neighboursTaken());
+  EXPECT_EQ(1, r.link.neighboursFailed());
+  EXPECT_EQ(0, neighboursPublished(r.client[0]));
+}
+
+TEST(Neighbours, ASlotWhoseTemplateHasNoTypeGetsNoReport) {
+  // A custom template without {type} would put the report on the packets topic: that slot is
+  // skipped (the task's out-of-scope line), and alone it is "no slot".
+  Rig r;
+  r.settings.slot[0].preset = "custom";
+  r.settings.slot[0].server = "wss://broker.example.org:443/mqtt";
+  r.settings.slot[0].audience = "broker.example.org";
+  r.settings.slot[0].topic = "mine/{device}";
+  r.connectSlot1();
+  const std::string report = "{\"neighbors\":[]}";
+  char why[kReasonCap] = {0};
+  EXPECT_EQ(Connections::ReportOffer::NoSlot, r.link.offerNeighbours(report.c_str(), report.size(), why, sizeof why));
+  r.tick();
+  EXPECT_EQ(0, neighboursPublished(r.client[0]));
+  ASSERT_EQ(1u, r.client[0].published.size()) << "the status still went, to the one topic there is";
+  EXPECT_EQ("mine/" + r.pubHex, r.client[0].published[0].topic);
+  EXPECT_NE(std::string::npos, r.client[0].published[0].payload.find("\"status\":\"online\""));
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

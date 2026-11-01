@@ -281,6 +281,10 @@ class JobRunner {
   const Record* newest() const { return recentCount_ > 0 ? &recent_[0] : nullptr; }
 
   const AirtimeGate& gate() const { return gate_; }
+  // The same gate, for a transaction that is not a job's (task p1.8-33: the observer's
+  // neighbour sweep sends a regions request per neighbour, and each one waits for this gate
+  // and is counted on it, so the board's airtime is one budget and not two).
+  AirtimeGate& gate() { return gate_; }
   const ResultBuffer& results() const { return results_; }
   // The buffer itself, for the one thing outside this runner that writes it: the kept image the
   // loop writes at the end of a wake and reads back after a deep sleep (agent/IRetained.h, task
