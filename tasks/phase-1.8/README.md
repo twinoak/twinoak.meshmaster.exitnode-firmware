@@ -1,4 +1,4 @@
-# Pile 1.8 — where CI runs, the observer fits, a scope of its own, and its neighbours
+# Pile 1.8 — where CI runs, the observer fits, a scope of its own, its neighbours, MeshCore 1.18 and v0.5.0
 
 Written on 31 October from Thomas's bench figures of 28 October, which showed
 that the observer of pile 1.7 does not fit a Heltec V3 beside the MeshMaster
@@ -7,7 +7,9 @@ MeshView shows *Direct neighbours* for his Gessaman observer and nothing for FD9
 and whether the exit nodes use flood scopes at all (they do not); and his note of
 the same evening that all CI is to run on the Unraid runners, first. This repository is
 public, so its CI is free on GitHub's runners and stays there (task 29, reworked on 31
-October after its first session stopped). Five tasks.
+October after its first session stopped). Then, from Thomas's note of 1 November:
+the weekly check's MeshCore companion 1.18 bump (#26), and the release of all of
+it as v0.5.0. Seven tasks.
 
 **Prerequisite:** pile 1.7 merged and `v0.4.0` tagged (both are).
 
@@ -41,9 +43,12 @@ exit nodes MeshMaster depends on**; one slot, on the test node, watched.
 | 31 | [the-observer-fits](31-the-observer-fits.md) | 30 | smaller MQTT buffers and stack; the gate from measured, per-board figures; a gate that keeps watching and gives way when a call dips under a floor; TLS buffers in PSRAM on a V4 if the core allows; one slot on a V3, two on a V4; a per-board table of what fits |
 | 32 | [a-scope-of-its-own](32-a-scope-of-its-own.md) | — | `flood.scope` (default `dk`): logins without a path and path discoveries flood with the region's transport code; the second try of a flooded login unscoped while `flood.unscoped retry`; scoped/unscoped/none answer counts on `status`; the heartbeat's `flood` if meshmaster.dk p4.20-151 has merged, a `[1.9]` follow-up if not |
 | 33 | [its-neighbours-and-their-scopes](33-its-neighbours-and-their-scopes.md) | 31, 32 | a 20-entry zero-hop repeater table from adverts and a 60 s discovery; each neighbour's scopes by an anonymous regions request between jobs; Gessaman's `/neighbors` report once a day through 31's gate; `mqtt.neighbors`, `discover.scopes`, `nbr:` in `mqtt.status`; noise floor, air time and battery in the status message |
+| 34 | [meshcore-1-18](34-meshcore-1-18.md) | 33 | MeshCore `companion-v1.18.0` (`81dbae59`) under 29–33: #26 brought up to `master` and merged, the range read for the companion side (tier three answered), every `d9296435` citation re-cited, RAM/Flash at both pins |
+| 35 | [v0-5-0](35-v0-5-0.md) | 34 | v0.5.0 tagged and published as *Latest*; its notes in v0.4.0's shape with the new console lines; CHANGELOG and `agent-core` 0.5.0; v0.4.0's notes corrected if still old |
 
-29 → 30 → 31 → 32 → 33. 29 first: every later task's CI follows its rule, and PR #32
-waits on it. 32 touches no observer file; 33 needs both 31 and 32.
+29 → 30 → 31 → 32 → 33 → 34 → 35. 29 first: every later task's CI follows its rule.
+The bump comes after the features, as the repeater's did (its 3.5/06): 31–33 are
+written against `d9296435` and 34 re-reads all of it at `81dbae59`, so 35 ships on 1.18. 32 touches no observer file; 33 needs both 31 and 32.
 
 ```powershell
 .\tasks\run-all.ps1 -Phase '1.8'
@@ -53,10 +58,10 @@ waits on it. 32 touches no observer file; 33 needs both 31 and 32.
 
 ## Models
 
-- **Fable** — 30, 31, 33. Memory on a board with no room to spare, the one
+- **Fable** — 30, 31, 33, 34. Memory on a board with no room to spare, the one
   connection that must not be the one to fail, and a report that must publish
   inside both.
-- **Opus** — 29, 32.
+- **Opus** — 29, 32, 35.
 
 ## Between 30 and 31 (Thomas, if you can)
 
@@ -68,11 +73,12 @@ between the two, run `-To 30`, then `-From 31`.
 
 ## Afterwards
 
-On the bench: one slot on a V3 for an hour beside the uplink, then `status`'s
-`min ever`; on a V4, both slots. Then `discover.scopes` on FD9B and its MeshView
-page (*Direct neighbours*, Battery, Noise floor, TX/RX), and a flooded login to a
-repeater with no stored path, to see `flood:` count a scoped answer. Then tag
-`v0.5.0`.
+35 publishes v0.5.0 as *Latest*. On the bench, with its images: one slot
+on a V3 for an hour beside the uplink, then `status`'s `min ever`; on a V4, both
+slots. Then `discover.scopes` on FD9B and its MeshView page (*Direct neighbours*,
+Battery, Noise floor, TX/RX), and a flooded login to a repeater with no stored
+path, to see `flood:` count a scoped answer. What the walk finds goes into a
+v0.5.1.
 
 ## Follow-ups
 
