@@ -323,8 +323,8 @@ TEST(Neighbours, ThePageSizeAndThePriceAgree) {
 
 // ------------------------------------------------------------------ the login reply
 
-// The ver-7 branch of MyMesh::onContactResponse (companion-v1.17.1, examples/companion_radio/
-// MyMesh.cpp:690-702) composes its frame from the repeater's reply: byte 1 is the reply's
+// The ver-7 branch of MyMesh::onContactResponse (companion-v1.18.0, examples/companion_radio/
+// MyMesh.cpp:704-716) composes its frame from the repeater's reply: byte 1 is the reply's
 // data[6] (is_admin), bytes 2..7 the contact's prefix, 8..11 the tag, byte 12 the reply's
 // data[7] (the ACL permission byte) and byte 13 its data[12] (FIRMWARE_VER_LEVEL). Inverting it
 // here gives the bytes this board sees, which are the repeater's own.

@@ -25,8 +25,9 @@ namespace mm {
 class AgentClock : public IClock {
  public:
   enum class Source : uint8_t {
-    None,    // the RTC holds MeshCore's placeholder (15 May 2024) or something implausible
-    Rtc,     // the RTC held a plausible time at boot (kept across a software reset)
+    None,    // the RTC holds MeshCore's seed (1 March 2026 since 1.18) or something implausible
+    Rtc,     // the RTC held a plausible time at boot (kept across a software reset, or restored
+             // from MeshCore's RTC backup after a crash - kEarliestPlausibleTime below)
     Sntp,    // the pool answered
     Server,  // taken from a config reply's serverTime
   };
@@ -65,9 +66,16 @@ class AgentClock : public IClock {
   bool sntpStarted_ = false;
 };
 
-// Earlier than this is not a time this firmware can have been running at: 2025-01-01T00:00:00Z.
-// MeshCore's fallback clock starts at 15 May 2024 on a power-on, which is how "no time" is told
-// from a time.
-constexpr uint32_t kEarliestPlausibleTime = 1735689600u;
+// Earlier than this is not a time this firmware can have been running at: 2026-11-01T00:00:00Z,
+// the day of the task that set it (p1.8-34). It is how "no time" is told from a time, and it has
+// to sit **above MeshCore's seed**: since 1.18 (`35142a88`, #1896) ESP32RTCClock::begin seeds the
+// system clock at 1 March 2026 (RTC_TIME_MIN, src/helpers/ESP32Board.h:206-248 at 81dbae59) on
+// every reset that has no valid RTC backup, and restores the backup - the last time this board
+// ran at, kept in RTC_NOINIT memory across a crash, a watchdog or a brownout - when it has one.
+// At 1.17.1 the seed was 15 May 2024 and the floor was 1 January 2025; left there, a fresh
+// power-on would have been read as "kept by the RTC" with March 2026 on the clock. A board that
+// has run for eight months on the seed alone, never reaching SNTP or the server, would cross
+// this floor - and would have been an exit node offline for eight months first.
+constexpr uint32_t kEarliestPlausibleTime = 1793491200u;
 
 }  // namespace mm

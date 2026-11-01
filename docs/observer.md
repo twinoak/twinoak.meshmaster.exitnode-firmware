@@ -116,7 +116,12 @@ one, built the same way:
   (`src/observer/Neighbours.h`); nothing is allocated for it. Once per cycle it
   is refreshed by a **node discovery** — one `CTL_TYPE_NODE_DISCOVER_REQ` for
   repeaters, zero hop, the same request the repeater firmware's own
-  `discover.neighbors` sends — and sixty seconds of taking the answers.
+  `discover.neighbors` sends — and sixty seconds of taking the answers. Since
+  MeshCore 1.18 (`f19733e4`, #3538) a repeater whose `flood.advert.interval` is
+  0 — with its local `advert.interval` 0 too, which the repeater's own CLI makes
+  it on the first `set` — is a *hidden node* that answers no node discovery, so
+  the discovery misses it and only the adverts it sends, if any, put it in the
+  table.
 - **The scopes.** Then one anonymous **regions** request per neighbour, newest
   first: the login's datagram with two other bytes, `{tag}{0x01}{0x00}`, sent
   **direct on an empty path**, because a repeater answers it only when the

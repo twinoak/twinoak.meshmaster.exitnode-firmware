@@ -1,6 +1,6 @@
 // A hashtag region's transport key, and the transport code a packet carries in it.
 //
-// This is MeshCore's own arithmetic, read at the pin (`d9296435`) and written here because our
+// This is MeshCore's own arithmetic, read at the pin (`81dbae59`) and written here because our
 // floods are built here and not by a companion on a cable:
 //
 //   the key    `TransportKeyStore::getAutoKeyFor` (src/helpers/TransportKeyStore.cpp): a region's
@@ -8,12 +8,16 @@
 //              `RegionMap::getTransportKeysFor` is what adds the `#` for a name stored without
 //              one, and the companion's own default scope does the same
 //              (`temp.getAutoKeyFor(0, "#" DEFAULT_FLOOD_SCOPE_NAME, key)`,
-//              examples/companion_radio/MyMesh.cpp ~L925-932). So a public region's key is public
+//              examples/companion_radio/MyMesh.cpp ~L969-976). So a public region's key is public
 //              by construction - which is why `get flood.scope` may print it, and why a private
 //              region (`$name`, whose key lives in the node's own keystore) is out of scope here
 //   the code   `TransportKey::calcTransportCode` (same file): HMAC-SHA256 with that key over the
 //              packet's payload-type byte and its payload, truncated to the first two bytes,
-//              with 0000 and FFFF reserved (a code of 0 becomes 1 and FFFF becomes FFFE)
+//              with 0000 and FFFF reserved (a code of 0 becomes 1 and FFFF becomes FFFE). Since
+//              MeshCore 1.18 (`01f9293b`, #3568) a repeater reads a transport code of 0 as
+//              **un-scoped** - `RegionMap::findMatch` answers its wildcard for it - so the
+//              reservation is what keeps a scoped flood of ours from being forwarded as an
+//              unscoped one: `reserveTransportCode` below never lets a 0 out (task p1.8-34)
 //   the name   `RegionMap::is_name_char` (src/helpers/RegionMap.cpp): `-`, `$`, `#`, `0`..`9` and
 //              every byte from `A` upwards - "all alpha-num or accented characters, but exclude
 //              most punctuation chars" - in a `RegionEntry::name` of `char[31]`, so thirty

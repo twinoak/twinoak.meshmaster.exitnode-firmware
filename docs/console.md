@@ -113,7 +113,7 @@ before that, at `log.level` and below. Every state change of the link, the
 clock and the server call is one line, so a bench walk is reading:
 
 ```
-[+1s] I meshmaster-agent 0.0.0-dev on MeshCore companion-v1.17.1
+[+1s] I meshmaster-agent 0.0.0-dev on MeshCore companion-v1.18.0
 [+1s] I board: heltec_v3, Power-on reset
 [+2s] I radio: 869.618 MHz, bw 62.5 kHz, sf 8, cr 8, tx 22 dBm
 [+2s] I identity: 7f3a...

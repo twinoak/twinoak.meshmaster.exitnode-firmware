@@ -5,11 +5,12 @@ lines of `platformio.ini`:
 
 ```ini
 [meshcore]
-pin = d92964352441e53b93e8667b802e04f6e072b39e
-tag = companion-v1.17.1
+pin = 81dbae592ffad40b4212bc0b37e82b38da08f4bc
+tag = companion-v1.18.0
 ```
 
-`d9296435` is `companion-v1.17.1`, the commit the field repeater runs. MeshCore
+`81dbae59` is `companion-v1.18.0`, the commit the field repeater runs (its `repeater-v1.18.0`
+is the same commit; *The pin's history* below is where the one before it stays named). MeshCore
 moves — a companion release every few weeks — and this page is how this
 repository moves with it. Three tiers, and the first one is the common case.
 
@@ -48,14 +49,17 @@ One file touches it, `src/mesh/AgentMesh.cpp`, and a bump re-reads these:
 | Ours | MeshCore's | What would break it |
 |---|---|---|
 | `AgentMesh : mesh::Mesh` | `src/Mesh.h` | a change to the dispatch callbacks' signatures |
-| the login | `Mesh::createAnonDatagram` + `PAYLOAD_TYPE_ANON_REQ`, read by `MyMesh::handleLoginReq` (`examples/simple_repeater/MyMesh.cpp:90-145`): a blank password is looked up in the ACL, a password rewrites the key's entry to that password's level | the layout of a login request or its reply; the 15-character password cap of `BaseChatMesh::sendLogin` (`src/helpers/BaseChatMesh.cpp:572-591`) |
+| the login | `Mesh::createAnonDatagram` + `PAYLOAD_TYPE_ANON_REQ`, read by `MyMesh::handleLoginReq` (`examples/simple_repeater/MyMesh.cpp:90-145`): a blank password is looked up in the ACL, a password rewrites the key's entry to that password's level | the layout of a login request or its reply; the 15-character password cap of `BaseChatMesh::sendLogin` (`src/helpers/BaseChatMesh.cpp:603-622`) |
 | a request | `Mesh::createDatagram(PAYLOAD_TYPE_REQ, …)`, read by `MyMesh::handleRequest` (same file, 211-378); `REQ_TYPE_GET_ACCESS_LIST` (262-275) answers admin alone with `{pub_key[6], permissions}` per entry | a `REQ_TYPE_*` code, or the shape of a reply |
-| a CLI line | `Mesh::createDatagram(PAYLOAD_TYPE_TXT_MSG, …)` with `TXT_TYPE_CLI_DATA`, read by `MyMesh::onPeerDataRecv` (same file, 702-758): admin only, the sender timestamp must be **above** the last one seen (equal is a retry that runs nothing), and the reply is a `TXT_MSG` of the repeater's own with its own timestamp | the text type's bits, the replay rule, the 160-byte reply buffer of `CommonCLI::handleCommand`; `setperm` (1240-1261), `get`/`ver`/`board` and `region` (`src/helpers/CommonCLI.cpp:265-321`, `1036-1082`) |
-| path discovery | the flooded base-telemetry request the companion's `CMD_SEND_PATH_DISCOVERY_REQ` makes (`examples/companion_radio/MyMesh.cpp:1602-1630`), answered as a returned path | the request's bytes, or a firmware that answers it (none has yet) |
-| a flood's **scope** (task p1.8-32) | `Mesh::sendFlood(packet, transport_codes, …)` with the codes the companion's `sendFloodScoped` attaches (`examples/companion_radio/MyMesh.cpp:489-497`: code 0 the scope's over the packet, code 1 left 0), the key `TransportKeyStore::getAutoKeyFor` derives (SHA-256 over `#name`, first 16 bytes) and the code `TransportKey::calcTransportCode` computes (HMAC-SHA256 over the payload type and payload, two bytes, 0000 and FFFF reserved) — `src/helpers/TransportKeyStore.cpp`, read by `MyMesh::onRecvPacket` and `allowPacketForward` on the repeater side (`examples/simple_repeater/MyMesh.cpp:434-443`, `556-567`). The name's characters are `RegionMap::is_name_char`'s and its length `RegionEntry::name`'s `char[31]` (`src/helpers/RegionMap.{h,cpp}`) | any of those four: the two hash steps, the reservation, the name rule, or the `sendFlood` overload. `src/mesh/TransportScope.cpp` is the port and `test/test_flood_scope` holds it against **the pinned source on disk** as well as against the crypto, so a bump that moves one of them is a red test and not a silent change of scope |
+| a CLI line | `Mesh::createDatagram(PAYLOAD_TYPE_TXT_MSG, …)` with `TXT_TYPE_CLI_DATA`, read by `MyMesh::onPeerDataRecv` (same file, 702-758): admin only, the sender timestamp must be **above** the last one seen (equal is a retry that runs nothing), and the reply is a `TXT_MSG` of the repeater's own with its own timestamp | the text type's bits, the replay rule, the 160-byte reply buffer of `CommonCLI::handleCommand`; `setperm` (1242-1263), `get`/`ver`/`board` and `region` (`src/helpers/CommonCLI.cpp:276-345`, `889-1027`) |
+| path discovery | the flooded base-telemetry request the companion's `CMD_SEND_PATH_DISCOVERY_REQ` makes (`examples/companion_radio/MyMesh.cpp:1651-1679`), answered as a returned path | the request's bytes, or a firmware that answers it (none has yet) |
+| a flood's **scope** (task p1.8-32) | `Mesh::sendFlood(packet, transport_codes, …)` with the codes the companion's `sendFloodScoped` attaches (`examples/companion_radio/MyMesh.cpp:491-499`: code 0 the scope's over the packet, code 1 left 0), the key `TransportKeyStore::getAutoKeyFor` derives (SHA-256 over `#name`, first 16 bytes) and the code `TransportKey::calcTransportCode` computes (HMAC-SHA256 over the payload type and payload, two bytes, 0000 and FFFF reserved) — `src/helpers/TransportKeyStore.cpp`, read by `MyMesh::onRecvPacket` and `allowPacketForward` on the repeater side (`examples/simple_repeater/MyMesh.cpp:434-443`, `556-567`). Since 1.18 (`01f9293b`, #3568) a code of **0 is un-scoped** to a repeater — `RegionMap::findMatch` (`src/helpers/RegionMap.cpp:191`) answers its wildcard for it — which is why the reservation matters: `src/mesh/TransportScope.cpp`'s `reserveTransportCode` turns a 0 into 1, so no scoped flood of ours is forwarded as an unscoped one. The name's characters are `RegionMap::is_name_char`'s and its length `RegionEntry::name`'s `char[31]` (`src/helpers/RegionMap.{h,cpp}`) | any of those four: the two hash steps, the reservation, the name rule, or the `sendFlood` overload. `src/mesh/TransportScope.cpp` is the port and `test/test_flood_scope` holds it against **the pinned source on disk** as well as against the crypto, so a bump that moves one of them is a red test and not a silent change of scope |
 | a trace | `Mesh::createTrace` + `sendDirect`, answered in `Mesh::onRecvPacket`'s `PAYLOAD_TYPE_TRACE` arm | the flags byte's meaning (`1 << (flags & 3)`, which task p3.5-42 got wrong once) |
 | the replies | `onPeerDataRecv`, `onPeerPathRecv`, `onTraceRecv` | the arguments, or when they are called |
 | the parsers | `lib/agent-core/src/ReplyCodec.cpp`, against `RepeaterStats` (`examples/simple_repeater/MyMesh.h:44-60`) and the request handlers above | a field added in the middle of `RepeaterStats` rather than at its end |
+| a **regions request** (task p1.8-33) | the login's `createAnonDatagram` with the plaintext `{tag}{ANON_REQ_TYPE_REGIONS}{0x00}` (`0x01`, `examples/simple_repeater/MyMesh.cpp:55`; the `0x00` a zero-length reply path), sent `sendDirect` on an empty path - which is byte for byte `Mesh::sendZeroHop` (`src/Mesh.cpp:717-726`) and carries no transport code. The repeater answers it only on a direct route, through `anon_limiter(4, 180)` (`MyMesh::onAnonDataRecv`, same file 571-600), and `handleAnonRegionsReq` (147-163) writes `{sender_timestamp}{its clock}{names}` with `RegionMap::exportNamesTo(..., REGION_DENY_FLOOD)` (`src/helpers/RegionMap.cpp:319-348`): the regions it floods, comma-separated. `src/observer/Neighbours.cpp` builds the request and reads the reply | the request's two bytes, the direct-only rule, the reply's eight-byte prefix or the names' separator |
+| a **node discovery** (task p1.8-33) | `Mesh::createControlData` with `CTL_TYPE_NODE_DISCOVER_REQ` (`0x80`) for repeaters, sent direct on an empty path; a repeater answers `CTL_TYPE_NODE_DISCOVER_RESP` (`0x90`) with `{type|node_type}{snr}{tag}{key}`, zero hop, after a random delay, through `discover_limiter(4, 120)`, only when forwarding is on - and, since 1.18 (`f19733e4`, #3538), **only when it is not a hidden node** (`isHiddenNode()`: both advert intervals 0; `MyMesh::onControlDataRecv`, same file 789-844). For the window the responses are let through `Mesh::onRecvPacket`'s control arm (`src/Mesh.cpp:70-76`) to `AgentMesh::onControlDataRecv` | the two type nibbles, the response's layout, or the control arm's conditions (direct, high bit, no hops) |
+| the **status message's figures** (task p1.8-33) | the radio's `getNoiseFloor()` (`src/helpers/radiolib/RadioLibWrappers.h:61`), the dispatcher's `getTotalAirTime()` and `getReceiveAirTime()` in milliseconds (`src/Dispatcher.h:183-184`), the board's `getBattMilliVolts()` (`variants/heltec_v3/HeltecV3Board.h:53`, `variants/heltec_v4/HeltecV4Board.cpp:43`) | a unit change, or a counter that stops being cumulative |
 
 `BaseChatMesh` is deliberately **not** used: its contact table, its channels,
 its message ACKs and its reciprocal path returns are all paths that put a packet
@@ -182,6 +186,16 @@ After a build, the pinned MeshCore is on disk:
 That checkout — not a memory of it, not a transcription in a task file — is what
 a claim about the companion firmware is checked against. `git log`, `git show`
 and `grep` all work in it; it is a real clone at the pinned commit.
+
+## The pin's history
+
+The one place the old commits stay named. A row is a bump that landed; *how* says
+who read it.
+
+| Tag | Commit | Since | How |
+|---|---|---|---|
+| `companion-v1.17.1` | `d9296435` | the bootstrap (meshmaster.dk p4.2-65, 2 October 2026) | the commit the field repeater ran; every citation of piles 1 to 1.8 was written against it |
+| `companion-v1.18.0` | `81dbae59` | 2 November 2026 (task p1.8-34) | the weekly workflow opened #26 on 19 October and nobody approved its CI; p1.8-34 brought the branch up to `master` over 29–33, read the 266 commits for the companion side (tier three: none found), re-cited every line of ours (138 edits in 36 files, `out/34-recite.py`) and merged it. `repeater-v1.18.0` is the same commit, so the repeater and the exit node build against one MeshCore again |
 
 ## This repository is an upstream too
 

@@ -191,7 +191,7 @@ TEST(Table, ADiscoveryResponseEntersAndIsReadByTagAndType) {
 // ---- the bytes --------------------------------------------------------------------------------
 
 TEST(Bytes, TheDiscoveryRequestIsTheRepeatersOwn) {
-  // sendNodeDiscoverReq (MyMesh.cpp:1000-1013 at d664d89d, :845-858 at the pin): type 0x80 with
+  // sendNodeDiscoverReq (MyMesh.cpp:1000-1013 at d664d89d, :846-859 at the pin): type 0x80 with
   // prefix_only 0, the filter bit for ADV_TYPE_REPEATER, the tag, since 0.
   uint8_t out[kDiscoveryRequestLen];
   EXPECT_EQ(kDiscoveryRequestLen, discoveryRequest(0x04030201u, out));
@@ -490,7 +490,7 @@ TEST(Sweep, TheNbrLineNamesTheQueryInProgressAndTheLastReportsOutcome) {
 
 // src/mesh/AgentMesh.cpp needs a board to run. What this holds: the regions request and the node
 // discovery go out through `sendDirect` on an empty path - MeshCore's own zero-hop send is
-// ROUTE_TYPE_DIRECT with path_len 0 (Mesh.cpp:717-726 at d9296435), and the direct send is the one
+// ROUTE_TYPE_DIRECT with path_len 0 (Mesh.cpp:717-726 at 81dbae59), and the direct send is the one
 // place a packet of this board goes out without a transport code - and nothing of MeshCore's
 // zero-hop or flood sends is called for them (test/test_flood_scope's Board test holds the counts).
 TEST(Board, TheRegionsRequestAndTheDiscoveryAreDirectSendsOnAnEmptyPath) {

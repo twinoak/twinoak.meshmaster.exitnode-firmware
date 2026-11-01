@@ -246,7 +246,7 @@ TEST(Frame, TheLayoutIsReadAsPacketReadFromReadsIt) {
 }
 
 TEST(Score, IsMeshCoresPacketScoreIntAtThePin) {
-  // RadioLibWrappers.cpp:221-239: SF 8's threshold is -10 dB; (snr + 10) / 10 * (1 - len / 256), clamped.
+  // RadioLibWrappers.cpp:224-242: SF 8's threshold is -10 dB; (snr + 10) / 10 * (1 - len / 256), clamped.
   EXPECT_FLOAT_EQ(0.0f, packetScore(-10.5f, 8, 40));
   EXPECT_FLOAT_EQ(0.0f, packetScore(0.0f, 6, 40));  // below SF 7: 0 (:231)
   EXPECT_FLOAT_EQ(1.0f, packetScore(9.5f, 8, 32));

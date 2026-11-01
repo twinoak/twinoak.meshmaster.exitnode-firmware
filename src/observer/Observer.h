@@ -51,7 +51,7 @@ struct BoardStats {
 };
 
 // Signer over the board's own identity: Ed25519 by mesh::LocalIdentity::sign (src/Identity.cpp:151-153
-// at d9296435), which is the call the observer firmware's JWTHelper makes.
+// at 81dbae59), which is the call the observer firmware's JWTHelper makes.
 class IdentitySigner : public observer::Signer {
  public:
   void setIdentity(const mesh::LocalIdentity* id) { id_ = id; }

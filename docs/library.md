@@ -214,8 +214,8 @@ constexpr size_t kMeshPathCap = 64;        // MeshCore's MAX_PATH_SIZE, and the 
 constexpr size_t kMaxCliReplyLen = 160;    // agent/ReplyCodec.h: what CommonCLI writes
 ```
 
-They are MeshCore's numbers at this repository's pin (`companion-v1.17.1`,
-`d9296435`), written as the library's own, and `MeshReply`'s buffers are sized by
+They are MeshCore's numbers at this repository's pin (`companion-v1.18.0`,
+`81dbae59`), written as the library's own, and `MeshReply`'s buffers are sized by
 them. **If your mesh is a different MeshCore build, hold its numbers against
 these with a `static_assert` of your own** — this repository does it in
 `src/mesh/AgentMesh.h` — because a reply that does not fit is an overrun and not

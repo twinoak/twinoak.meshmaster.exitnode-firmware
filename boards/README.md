@@ -8,7 +8,7 @@ repository's LF endings, which `.gitattributes` gives every text file:
 
 | File | Copied from | At |
 |---|---|---|
-| `heltec_v4.json` | `boards/heltec_v4.json` in [MeshCore](https://github.com/meshcore-dev/MeshCore) | the commit `[meshcore].pin` names in `platformio.ini` (`companion-v1.17.1`, `d9296435`) |
+| `heltec_v4.json` | `boards/heltec_v4.json` in [MeshCore](https://github.com/meshcore-dev/MeshCore) | the commit `[meshcore].pin` names in `platformio.ini` (`companion-v1.18.0`, `81dbae59`) |
 
 Nothing here is edited: a difference between this file and the pinned package's
 is a bug, not a feature, and a pin bump re-copies it

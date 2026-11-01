@@ -313,7 +313,7 @@ TEST(Credential, TheNewPasswordIsHeldBesideTheOthersAndWipedWithThem) {
 }
 
 // A `password` line on the air is a TXT_MSG datagram: the destination's hash, our hash, and the
-// MAC and cipher of the text (Mesh::createDatagram at d9296435). The frame log prints the two
+// MAC and cipher of the text (Mesh::createDatagram at 81dbae59). The frame log prints the two
 // hashes as hex and one star per byte after them.
 TEST(Credential, ThePasswordLineFrameIsPrintedWithItsBodyAsStars) {
   std::vector<uint8_t> payload;

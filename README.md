@@ -221,7 +221,7 @@ from nothing:
 
 ```console
 > status
-firmware  meshmaster-agent 0.0.0-dev on MeshCore companion-v1.17.1 (d9296435)
+firmware  meshmaster-agent 0.0.0-dev on MeshCore companion-v1.18.0 (81dbae59)
 board     heltec_v3, Power-on reset, up 0d 00:00:41
 identity  7f3a9c02e1b44d9a0f6c2b7d8e9a1c3f5d7b9e0a2c4e6f8a0b1c2d3e4f5a6b7c
 radio     869.618 MHz, bw 62.5 kHz, sf 8, cr 8, tx 22 dBm; companion role, no repeat
@@ -281,7 +281,7 @@ error: radio.tx: out of range, -9..22
 > set meshmaster.url http://meshmaster.dk
 error: meshmaster.url: the scheme must be https://
 > status
-firmware  meshmaster-agent 0.0.0-dev on MeshCore companion-v1.17.1 (d9296435)
+firmware  meshmaster-agent 0.0.0-dev on MeshCore companion-v1.18.0 (81dbae59)
 board     heltec_v3, Power-on reset, up 0d 00:03:10
 identity  7f3a9c02e1b44d9a0f6c2b7d8e9a1c3f5d7b9e0a2c4e6f8a0b1c2d3e4f5a6b7c
 radio     869.618 MHz, bw 62.5 kHz, sf 8, cr 8, tx 22 dBm; companion role, no repeat
@@ -426,7 +426,7 @@ else:
 
 - **Agent version** the firmware's own (`meshmaster-agent 0.1.0+abc1234`, or
   `0.0.0-dev` from a local build), **Firmware** the MeshCore release this image
-  is built from (`companion-v1.17.1`) and **Board** `heltec_v3`. On a board
+  is built from (`companion-v1.18.0`) and **Board** `heltec_v3`. On a board
   the companion firmware *is* the firmware, so the two lines together are the
   string `status` prints.
 - **Companion key** the board's own identity, the 64 hex characters `status`
@@ -573,7 +573,7 @@ between green and red on one that is not.
 ## Keeping up with MeshCore
 
 MeshCore is a dependency pinned at one commit (`[meshcore]` in
-`platformio.ini`): `companion-v1.17.1`, `d9296435`, the commit the field
+`platformio.ini`): `companion-v1.18.0`, `81dbae59`, the commit the field
 repeater runs. It moves, and this firmware is meant to move with it, in three
 tiers — a weekly workflow that opens the bump as a pull request, one command
 that turns a red bump into a task, and the rare wire-protocol change that is a

@@ -20,6 +20,23 @@ this repository changed and why is in `tasks/phase-*/reports/`.
 A task that moves one of the four things above adds its line here in the same
 pull request, as `docs/` moves with code.
 
+## Unreleased — what pile 1.8 has moved so far (v0.5.0 is task 35's)
+
+- **The MeshCore pin moved** (task p1.8-34): `companion-v1.17.1`, `d9296435` →
+  **`companion-v1.18.0`, `81dbae59`**, the commit the field repeater runs since
+  its own 1.18 bump. Read for the companion side in
+  `tasks/phase-1.8/reports/34.md`, tier three *none found*: no packet layout, no
+  byte of the login, the request or the regions frame, and no reply
+  `lib/agent-core/src/ReplyCodec.cpp` parses has changed. `kMeshReplyDataCap`
+  184 and `kMeshPathCap` 64 are MeshCore's `MAX_PACKET_PAYLOAD` and
+  `MAX_PATH_SIZE` at the new pin too, **unmoved**; the contract fixtures'
+  manifest commit is not moved by this task.
+- Tasks p1.8-30 to p1.8-33 recorded in their reports what this section has
+  to say for a consumer (`IMesh` gained `floodScope()` and `setFloodMode()`
+  with defaults, `JobRunner` a non-const `gate()`, the heartbeat a `flood`
+  member, the fixtures' manifest `67c2a4c` → `42e4d45` by addition only);
+  task 35 writes it out as v0.5.0 with `agent-core` 0.5.0.
+
 ## v0.4.0 — the observer in the heartbeat, and where a failed job failed
 
 Pile 1.7, task 28 (`tasks/phase-1.7/`), which closes the pile. Two optional

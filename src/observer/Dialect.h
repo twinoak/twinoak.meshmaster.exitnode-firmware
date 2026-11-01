@@ -46,13 +46,13 @@
 //     mqtt_connect_failures, mqtt_slots_breaker (each when > 0) - integers, in this order
 //
 // How the two computed numbers are made, read at the MeshCore pin this firmware builds against
-// (d9296435, companion-v1.17.1), which is also what the observer branch does:
+// (81dbae59, companion-v1.18.0), which is also what the observer branch does:
 //
 //   hash    SHA-256 over the payload type byte, then - for a TRACE only - the two bytes of
 //           path_len (a uint16_t, Packet.h:47), then the payload; the first eight bytes of the
 //           digest. mesh::Packet::calculatePacketHash, src/Packet.cpp:41-50. On the board the
 //           Packet computes it (AgentMesh::logRx); here it arrives as bytes.
-//   score   RadioLibWrapper::packetScoreInt(snr, sf, len), src/helpers/radiolib/RadioLibWrappers.cpp:221-239:
+//   score   RadioLibWrapper::packetScoreInt(snr, sf, len), src/helpers/radiolib/RadioLibWrappers.cpp:224-242:
 //           0 below the spreading factor's SNR threshold, else min(1, (snr - threshold) / 10 *
 //           (1 - len / 256)). The Dispatcher computes it for every received frame
 //           (src/Dispatcher.cpp:207) and hands it to logRx; packetScore() below is the same
@@ -186,7 +186,7 @@ size_t formatNeighbours(const NeighboursFields& f, char* out, size_t cap, int* w
 void formatTimestamp(uint32_t epoch, uint32_t micros, char* out, size_t cap);
 
 // The status message's radio field: "%.6f,%.1f,%d,%d" (MQTTBridge.cpp:4061-4062). The two
-// floats are floats there (NodePrefs::freq and ::bw, src/helpers/CommonCLI.h:30,44 at the pin),
+// floats are floats there (NodePrefs::freq and ::bw, src/helpers/CommonCLI.h:32,46 at the pin),
 // so 869.618 is written as a float writes it: 869.617981.
 void formatRadio(float freqMHz, float bwKHz, int sf, int cr, char* out, size_t cap);
 

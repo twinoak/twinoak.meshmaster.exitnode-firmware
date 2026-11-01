@@ -1145,9 +1145,9 @@ Outcome JobRunner::runCli(const ClaimedJob& job, Context& ctx, size_t& dataLen) 
 }
 
 Outcome JobRunner::runAdvertRequest(const ClaimedJob& job, Context& ctx, size_t& dataLen) {
-  // `advert` floods (CommonCLI::handleCommand at d9296435, src/helpers/CommonCLI.cpp:195-198:
+  // `advert` floods (CommonCLI::handleCommand at 81dbae59, src/helpers/CommonCLI.cpp:206-209:
   // sendSelfAdvertisement(1500, true), answered `OK - Advert sent`), which is what refreshes
-  // everyone's paths; `advert.zerohop` (191-194) reaches the direct neighbours only.
+  // everyone's paths; `advert.zerohop` (202-205) reaches the direct neighbours only.
   const char* command = job.advertFlood ? "advert" : "advert.zerohop";
   const Outcome session = adminSession(job, ctx);
   if (session != Outcome::Ok) return session;
@@ -1171,7 +1171,7 @@ Outcome JobRunner::runAdvertRequest(const ClaimedJob& job, Context& ctx, size_t&
 }
 
 Outcome JobRunner::runClockSync(const ClaimedJob& job, Context& ctx, size_t& dataLen) {
-  // `time <unix>` (CommonCLI.cpp:217-227) rather than `clock sync` (199-208): both refuse to
+  // `time <unix>` (CommonCLI.cpp:228-238) rather than `clock sync` (210-219): both refuse to
   // go backwards, but with `time` the value set is in the command line and in the result, not
   // only in a frame field nobody stores. The value is this board's clock - SNTP, or the
   // server's time until SNTP answers - and a board with no time yet has nothing to set.
@@ -1216,7 +1216,7 @@ Outcome JobRunner::runPasswordSet(const ClaimedJob& job, Context& ctx, size_t& d
     return Outcome::Failed;
   }
   if (job.credential.newPasswordCut) {
-    // The firmware keeps fifteen bytes (`char password[16]` in NodePrefs at d9296435): a value
+    // The firmware keeps fifteen bytes (`char password[16]` in NodePrefs at 81dbae59): a value
     // it would cut is a lock-out, because the server would store what was sent and the repeater
     // what it kept.
     g_log.add("the new password is longer than %u bytes and the firmware keeps %u: nothing is sent, because a cut-off "
@@ -1233,8 +1233,8 @@ Outcome JobRunner::runPasswordSet(const ClaimedJob& job, Context& ctx, size_t& d
 
   // The command line as bytes - prefix and secret - built right before the send and wiped right
   // after it; the log names the command without its value, and the frame log stars the body
-  // (`sensitive`). `password <new>` is CommonCLI.cpp:256-261 (admin), `set guest.password <new>`
-  // is handleSetCmd at 506-509 (guest); the first echoes what it stored, `password now: …`.
+  // (`sensitive`). `password <new>` is CommonCLI.cpp:267-272 (admin), `set guest.password <new>`
+  // is handleSetCmd at 513-516 (guest); the first echoes what it stored, `password now: …`.
   const bool admin = job.passwordField == PasswordField::Admin;
   const char* what = admin ? "cli 'password <new>'" : "cli 'set guest.password <new>'";
   std::snprintf(g_secretLine, sizeof g_secretLine, "%s%s", admin ? "password " : "set guest.password ",
@@ -1311,7 +1311,7 @@ Outcome JobRunner::runReboot(const ClaimedJob& job, Context& ctx, size_t& dataLe
   g_log.add("no restore on this session: the repeater is asked to reboot on it, and a restore before the command would "
             "make the command unanswerable; the next login from this key puts the entry back (task 60)");
 
-  // `reboot` is `_board->reboot()`, which does not return (CommonCLI.cpp:185-186): silence is
+  // `reboot` is `_board->reboot()`, which does not return (CommonCLI.cpp:196-197): silence is
   // the expected answer, and the next status read confirms it by the uptime, on the server.
   const Outcome sent = cliLine(job, ctx, "cli 'reboot'", "reboot", false);
   if (sent == Outcome::Unreachable) {

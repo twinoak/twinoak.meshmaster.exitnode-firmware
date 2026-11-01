@@ -70,7 +70,7 @@ struct SentLine {
 class FakeRepeater : public mm::ApplyExchange {
  public:
   // The clock in whole seconds, as the RTC's; `unique` is MeshCore's getCurrentTimeUnique
-  // (src/MeshCore.h:108-114 at d9296435): the time, or one above the last one handed out.
+  // (src/MeshCore.h:119-125 at 81dbae59): the time, or one above the last one handed out.
   uint32_t now = 1'700'000'000;
   uint32_t lastUnique = 0;
   bool regionsAnswer = true;
@@ -520,7 +520,7 @@ TEST(ConfigApplyPlan, TheLinesAndTheirExpectationsAreReadBackAsTheyWerePut) {
 
 // ------------------------------------------------------------------ CliReplies
 
-// Every spelling CommonCLI at d9296435 refuses with, and the answers that are not refusals.
+// Every spelling CommonCLI at 81dbae59 refuses with, and the answers that are not refusals.
 TEST(CliReplies, TheHardErrorsAreCommonClisSpellingsAndAnAnswerIsNotOne) {
   EXPECT_TRUE(mm::cliReplyIsHardError("Error, max 64"));
   EXPECT_TRUE(mm::cliReplyIsHardError("ERROR: dutycycle must be 1-100"));

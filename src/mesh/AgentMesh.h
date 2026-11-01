@@ -55,7 +55,7 @@ static_assert(kMeshPathCap >= MAX_PATH_SIZE, "agent/IMesh.h's kMeshPathCap is sm
 
 // A received frame as the observer (src/observer/, task p1.7-26) takes it: the bytes the radio
 // received and its numbers for them, and the packet hash MeshCore computed. Handed over at
-// logRx, which Dispatcher::checkRecv (src/Dispatcher.cpp:191-238 at d9296435) calls right after
+// logRx, which Dispatcher::checkRecv (src/Dispatcher.cpp:191-238 at 81dbae59) calls right after
 // logRxRaw for the same frame, once tryParsePacket has accepted it - so the raw bytes stashed
 // at logRxRaw and the packet at logRx are the same frame, and a frame the dispatcher refused
 // is never handed over. Nothing in it is decoded by anyone: the tap carries bytes.
@@ -115,10 +115,10 @@ class AgentMesh : public mesh::Mesh, public IMesh, public observer::NeighbourLin
   SendResult sendRequest(uint8_t reqType, const uint8_t* data, uint8_t len, uint32_t& tag) override;
   // The sender timestamp is drawn here, from uniqueTime(), and handed back: the repeater runs
   // the line when it is above the last it saw from this key and answers an equal one with
-  // nothing (MyMesh::onPeerDataRecv at d9296435).
+  // nothing (MyMesh::onPeerDataRecv at 81dbae59).
   SendResult sendCli(const char* text, bool sensitive, uint32_t& timestamp) override;
   // The path-discovery request as the companion's CMD_SEND_PATH_DISCOVERY_REQ makes it
-  // (examples/companion_radio/MyMesh.cpp:1602-1630 at d9296435).
+  // (examples/companion_radio/MyMesh.cpp:1651-1679 at 81dbae59).
   SendResult sendDiscovery(uint32_t& tag) override;
   SendResult sendTrace(const uint8_t* roundTripHashes, uint8_t hashBytes, uint8_t hashSize, uint32_t& tag) override;
 
@@ -143,7 +143,7 @@ class AgentMesh : public mesh::Mesh, public IMesh, public observer::NeighbourLin
   // `busy()` is a job open at the runner (the hook, set by main.cpp to JobRunner::openJob) or a
   // peer set here; the sweep sends nothing while either holds. The node discovery is one
   // CTL_TYPE_NODE_DISCOVER_REQ for repeaters, direct on an empty path - what MeshCore's own
-  // zero-hop send does (Mesh.cpp:717-726 at d9296435: ROUTE_TYPE_DIRECT, path_len 0), through
+  // zero-hop send does (Mesh.cpp:717-726 at 81dbae59: ROUTE_TYPE_DIRECT, path_len 0), through
   // the one direct send this file has - and for `windowMs` the CTL_TYPE_NODE_DISCOVER_RESP frames
   // are let through to onControlDataRecv and put in the table. A regions request is the login's
   // anonymous datagram with the two other bytes of Neighbours.h, direct on an empty path, with
@@ -243,7 +243,7 @@ class AgentMesh : public mesh::Mesh, public IMesh, public observer::NeighbourLin
   // frame, kLoginPayloadClearBytes a login with a password, kDatagramClearBytes a `password` line.
   SendResult dispatch(mesh::Packet* pkt, size_t clearBytes = 0);
   // The one place a flood of this board goes out, scoped or not (task p1.8-32): the companion's
-  // own `sendFloodScoped` (examples/companion_radio/MyMesh.cpp ~L489-497 at d9296435) - code 0
+  // own `sendFloodScoped` (examples/companion_radio/MyMesh.cpp ~L491-499 at 81dbae59) - code 0
   // from the scope over this packet, code 1 left 0 - or `ROUTE_TYPE_FLOOD` with no codes at all
   // when the scope is `*` or this send was told `Unscoped`. A **direct** send never goes through
   // here and carries no transport code: MeshCore's `sendDirect` has no overload that takes any.

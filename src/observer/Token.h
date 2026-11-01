@@ -10,7 +10,7 @@
 //   encoding   header and claims each base64url, the "-_" alphabet, no padding   :115-142
 //   signature  Ed25519 over the bytes "<header>.<claims>", by the node's own    :57-82 (ed25519_sign, the same call
 //              key - and written as 128 UPPERCASE HEX characters, not base64url:  mesh::LocalIdentity::sign makes:
-//              "MeshCore Decoder format", the firmware says                       src/Identity.cpp:151-153 at d9296435)
+//              "MeshCore Decoder format", the firmware says                       src/Identity.cpp:151-153 at 81dbae59)
 //                                                                                 :91-110
 //   token      "<header>.<claims>.<SIGNATURE HEX>"                              :98-110
 //   username   "v1_<64 UPPERCASE HEX>" of the node's public key                 MQTTBridge.cpp:2961-2965
