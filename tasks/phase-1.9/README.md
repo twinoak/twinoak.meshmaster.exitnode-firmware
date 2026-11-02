@@ -20,8 +20,8 @@ change nothing else. Two tasks, and a bench walk between them.
 | `v0.4.0`, no slot, after a call (28 Oct) | 136 580 | 55 464 | 73 716 | — / 55 464 |
 | `v0.4.0`, one slot, after a job (28 Oct) | 73 016 | **3 088** | 59 380 | — |
 | `v0.5.0`, V3, kept uplink, no slot (2 Nov) | 71 612 | — | 51 188 | 69 232 / — |
-| after 36, V3, no slot | | | | |
-| after 36, V3, one slot (MeshView), an hour | | | | |
+| after 36, V3, no slot (FD9B, 2 Nov, 10 min after boot) | 120 392 | 93 988 | 102 388 | 113 988 / ~93 988 (the one handshake, at boot: 1 handshake for 16 calls, 15 reused) |
+| after 36, V3, one slot (MeshView), an hour (FD9B, 2 Nov) | 100 924 (the slot: ~19 500) | 69 736 | 86 004 | 94 712 / not seen: 1 handshake for 55 calls, at boot, before the slot; the slot's own handshake dipped to 74 960 |
 | after 36, V4, two slots, an hour | | | | |
 
 ## Order and dependencies
@@ -52,7 +52,8 @@ then the bench walk below, then
 ## Between 36 and 37 (Thomas)
 
 Flash 36's images (CI's artifacts of its pull request, or `out/`; the plain
-`.bin` keeps the settings) on FD9B and on a V4:
+`.bin` keeps the settings) on FD9B, and on a V4 if one is at hand (Thomas has
+none on 2 November, so the V4 row may stay empty):
 
 1. **V3, observer off** (`set mqtt1.preset none`), ten minutes: `status`'s `heap`
    and `uplink` lines → row *after 36, V3, no slot*.
@@ -60,11 +61,14 @@ Flash 36's images (CI's artifacts of its pull request, or `out/`; the plain
    with a job or two through it: `get mqtt.status` (`memory`, `uplink`, slot 1's
    state, `gave way`) and `status`'s `heap` → row *after 36, V3, one slot*. Note
    whether the slot connected at all, and `min ever`.
-3. **V4, both slots**, an hour: the same → row *after 36, V4, two slots*.
-4. The web flasher's **first install** with 36's `-merged.bin` on one board, to
-   see that the bootloader built from source boots.
+3. **V4, both slots**, an hour, if there is a V4: the same → row *after 36, V4,
+   two slots*. Optional.
+4. The web flasher's **first install** with 36's `-merged.bin` on a spare board
+   (not FD9B: a merged flash gives a new key), to see that the bootloader built
+   from source boots. Optional, but until it is done the release notes say
+   the merged image's bootloader is new and untried on a board.
 
-37 reads the rows. Without them it stops on purpose and says so.
+37 reads the rows. Without the two V3 rows it stops on purpose and says so.
 
 ## Follow-ups
 

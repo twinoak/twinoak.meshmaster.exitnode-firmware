@@ -1,6 +1,6 @@
 # 37 — Measured, and released
 
-**Depends on:** 36, and the bench rows in this pile's README (*after 36, …*). **First:** if those rows are empty, write `logs/STOPPED-37.md` saying so, change nothing else, and end. The figures this task writes come from a board, and a desk cannot measure them.
+**Depends on:** 36, and the bench rows in this pile's README. **First:** if the two V3 rows (*after 36, V3, no slot* and *after 36, V3, one slot*) are empty, write `logs/STOPPED-37.md` saying so, change nothing else, and end. The figures this task writes come from a board, and a desk cannot measure them. The V4 row may be empty: Thomas has no V4 (2 November).
 **Spec:** this pile's README (*Measured*), 36's report (*Not verified here*), `src/observer/Board.{h,cpp}` (`kHeltecV3`, `kHeltecV4`: slots, `slotInternalBytes`, the PSRAM share, `uplinkDipBytes`, their source phrases), `src/observer/Connection.{h,cpp}` (the gate: `gateNeedBytes()`, the floor `kHeapFloorBytes`, the margin, the yield), `docs/observer.md` (*The lines to type*, *What it costs*), `.github/workflows/release.yml` (the notes: the V3/V4 rule ~L240 and ~L312), `CHANGELOG.md`, the three `agent-core` manifests; 1.8/35 (how v0.5.0 was tagged and checked).
 **Size:** one session.
 **Model:** claude-opus-5
@@ -14,13 +14,17 @@ FD9B and the other V3s get their observer back.
 
 ## Deliverables
 
-1. **The figures from the walk.** `kHeltecV3` and `kHeltecV4` take the measured
-   slot cost and uplink dip (a kept call, and a handshake), each with its source
-   phrase dated (*measured 2 Nov 2026, after 36, …*). Say whether `kHeapFloorBytes`
+1. **The figures from the walk.** `kHeltecV3` takes the measured slot cost and
+   uplink dip (a kept call, and a handshake), each with its source phrase dated
+   (*measured 2 Nov 2026, after 36, …*). `kHeltecV4` takes its row if there is
+   one. If there is not, it is derived from the V3's measurement as 1.8/31 did
+   (less what goes to PSRAM), conservatively, and its source phrase says *not
+   measured on a V4*. The notes then say that two slots on a V4 are
+   expected, not walked. Say whether `kHeapFloorBytes`
    should move, from the hour's `min ever`, and move it only if the figures say
    so.
-2. **The rule, as measured.** How many slots a V3 opens, and a V4, from the
-   rows. If a V3 fits two, say it and allow it; if it fits one, keep one. The
+2. **The rule, as measured.** How many slots a V3 opens, from its rows; a V4
+   keeps two unless its own row says otherwise. If a V3 fits two, say it and allow it; if it fits one, keep one. The
    refusal's sentence and `docs/observer.md`'s *The lines to type* follow.
 3. **Words:** `docs/observer.md` *What it costs* with the measured table in place
    of 36's expected one; the release notes in `release.yml` with the V3/V4 rule
