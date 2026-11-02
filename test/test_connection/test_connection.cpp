@@ -217,7 +217,8 @@ const char* const kOwner = "0123456789abcdef0123456789abcdef0123456789abcdef0123
 const char* const kEmail = "owner@example.dk";
 
 // The board under test is a profile (observer/Board.h): the V4's by default, so that the tests
-// of pile 1.7 - two slots - run as written; a test of the V3's rule says so (Rig(kHeltecV3)).
+// of pile 1.7 - two slots and PSRAM - run as written; a test of the V3's internal-only gate says
+// so (Rig(kHeltecV3)), and one of a board with a single slot brings a profile of its own.
 struct Rig {
   FakeClient client[kSlots];
   FixedIdentity identity;
@@ -621,44 +622,47 @@ TEST(Heap, ASlotOpensOnlyAboveTheReserveAndLooksAgainEveryFiveSeconds) {
   EXPECT_EQ(SlotState::Connecting, g.state(0));
 }
 
-// The gate is the board's figures plus what the uplink's last call dipped (task p1.8-31). On a
-// Heltec V3 with the bench's idle heap of 28 October and no call measured yet, the conservative
-// dip - a handshake per call, 81 116 - keeps the slot waiting; a call over a kept connection
-// that dipped 5 580 is what the gate then counts, and the slot opens on the next look. The
-// memory line says which figure is in force and where it came from.
+// The gate is the board's figures plus what the uplink's last call dipped (tasks p1.8-31 and
+// p1.9-37). On a Heltec V3 with the figures the walk of 2 November measured, the conservative dip
+// - the walk's one handshake, 26 404 - asks for 66 352, which a board busier than the walk's does
+// not have; the call over the kept connection that dipped 6 404 is what the gate then counts, and
+// the slot opens on the next look. The memory line says which figure is in force and where it
+// came from.
 TEST(Heap, TheGateIsTheBoardsFiguresPlusWhatTheUplinkLastDipped) {
   Rig r(kHeltecV3);
-  EXPECT_EQ(63564u, kHeltecV3.slotInternalBytes);
-  EXPECT_EQ(81116u, kHeltecV3.uplinkDipBytes);
-  EXPECT_EQ(63564u + 81116u + kHeapFloorBytes + kGateMarginBytes, r.link.gateNeedBytes());
+  EXPECT_EQ(19468u, kHeltecV3.slotInternalBytes) << "120 392 free with no slot, 100 924 with one (2 Nov 2026)";
+  EXPECT_EQ(26404u, kHeltecV3.uplinkDipBytes) << "the walk's one handshake: 120 392 -> 93 988";
+  EXPECT_EQ(19468u + 26404u + kHeapFloorBytes + kGateMarginBytes, r.link.gateNeedBytes());
   EXPECT_FALSE(r.link.uplinkDipMeasured());
-  g_free = 136580;
-  g_largest = 73716;
+  g_free = 60000;
+  g_largest = 51000;
   r.configure();
   r.link.setLinkUp(true);
   r.tick();
   ASSERT_EQ(SlotState::WaitingForHeap, r.state(0));
-  EXPECT_STREQ("heap 136580 free, largest block 73716; needs 165160 and 17408", r.link.view(0).lastError);
+  EXPECT_STREQ("heap 60000 free, largest block 51000; needs 66352 and 17408", r.link.view(0).lastError);
   char line[400];
   r.link.describeGate(line, sizeof line);
-  EXPECT_EQ(0u, std::string(line).find("heltec_v3 opens 1 slot(s) while free heap >= 165160 (one slot 63564 + the uplink's dip 81116 assumed + floor 16384 + margin 4096) and the largest block >= 17408 (now 136580 and 73716)")) << line;
+  EXPECT_EQ(0u, std::string(line).find("heltec_v3 opens 2 slot(s) while free heap >= 66352 (one slot 19468 + the uplink's dip 26404 assumed + floor 16384 + margin 4096) and the largest block >= 17408 (now 60000 and 51000)")) << line;
   EXPECT_NE(std::string::npos, std::string(line).find("a call under the floor closes the highest slot for 10 min")) << line;
 
-  r.link.onUplinkCall(136580, 131000, 136400);
+  // The walk's own call over the kept connection: 120 392 free before it, 113 988 lowest during.
+  r.link.onUplinkCall(120392, 113988, 120300);
   EXPECT_TRUE(r.link.uplinkDipMeasured());
-  EXPECT_EQ(5580u, r.link.uplinkDipBytes());
-  EXPECT_EQ(63564u + 5580u + kHeapFloorBytes + kGateMarginBytes, r.link.gateNeedBytes());
+  EXPECT_EQ(6404u, r.link.uplinkDipBytes());
+  EXPECT_EQ(19468u + 6404u + kHeapFloorBytes + kGateMarginBytes, r.link.gateNeedBytes());
   r.tick(kHeapRecheckMs);
   r.tick();
   EXPECT_EQ(SlotState::Connecting, r.state(0));
   r.link.describeGate(line, sizeof line);
-  EXPECT_NE(std::string::npos, std::string(line).find("the uplink's dip 5580 measured")) << line;
-  EXPECT_NE(std::string::npos, std::string(line).find(", its last call's lowest 131000")) << line;
+  EXPECT_NE(std::string::npos, std::string(line).find("the uplink's dip 6404 measured")) << line;
+  EXPECT_NE(std::string::npos, std::string(line).find(", its last call's lowest 113988")) << line;
   EXPECT_EQ(std::string::npos, std::string(line).find("psram")) << "a V3 has none: " << line;
 
-  // A handshake call later dips more, and the gate follows it on its next look.
-  r.link.onUplinkCall(73016, 20000, 72900);
-  EXPECT_EQ(53016u, r.link.uplinkDipBytes());
+  // A handshake call later dips more, and the gate follows it on its next look: the walk's own
+  // slot handshake, 100 924 free before it and 74 960 lowest during.
+  r.link.onUplinkCall(100924, 74960, 100800);
+  EXPECT_EQ(25964u, r.link.uplinkDipBytes());
 }
 
 // The gate keeps watching after a slot is open (task p1.8-31): a call that went through but
@@ -700,31 +704,54 @@ TEST(Heap, ACallThatDipsUnderTheFloorClosesSlot2AndKeepsSlot1ThenASecondDipClose
   EXPECT_EQ(50000u, r.link.uplinkDipBytes());
 }
 
-// One slot on a Heltec V3, two on a V4 (task p1.8-31, observer/Board.h). A V3 given a slot 2 -
-// stored by v0.4.0's console, which took it - reports it off with the reason, in the slot's
-// line and on the log, and counts one configured slot; a V4 opens both.
-TEST(Heap, AV3RefusesSlot2WithTheReasonAndAV4OpensTwo) {
+// Two slots on either board since task p1.9-37 (observer/Board.h): the walk of 2 November put a
+// slot at 19 468 bytes after the lighter TLS of p1.9-36, and a V3 fits two of them beside the
+// uplink's handshake. The refusal is still the seam for a board that fits one, exercised here
+// through a profile of this test's own: a slot 2 stored in such a board reports off with the
+// reason, in the slot's line and on the log, and counts one configured slot.
+TEST(Heap, BothBoardsOpenTwoSlotsAndABoardWithOneRefusesSlot2WithTheReason) {
+  constexpr BoardProfile kOneSlot = {"one_slot",
+                                     1,
+                                     false,
+                                     kHeltecV3.slotInternalBytes,
+                                     0,
+                                     kHeltecV3.uplinkDipBytes,
+                                     "this test's own profile",
+                                     "this test's own profile"};
+  Rig one(kOneSlot);
+  one.settings.slot[1].preset = "meshmapper";
+  one.configure();
+  one.link.setLinkUp(true);
+  one.tick();
+  EXPECT_EQ(SlotState::Connecting, one.state(0));
+  EXPECT_EQ(SlotState::Off, one.state(1));
+  EXPECT_FALSE(one.link.view(1).configured);
+  EXPECT_EQ(1, one.link.configuredSlots());
+  EXPECT_EQ(0u, one.client[1].opens.size());
+  char line[320];
+  one.link.describe(1, line, sizeof line);
+  EXPECT_STREQ("slot 2 meshmapper: off (this board has memory for one broker only)", line);
+  EXPECT_NE(std::string::npos, logText().find("observer: slot 2 off (this board has memory for one broker only)"));
+  EXPECT_EQ(1, one.link.board().slots);
+  // An empty slot 2 on such a board is not a fault, and says so as before.
+  one.settings.slot[1].preset = "none";
+  one.configure();
+  one.link.describe(1, line, sizeof line);
+  EXPECT_STREQ("slot 2 none: off (preset is none)", line);
+
+  // Both boards this repository builds open both slots, and nothing is refused on either.
   Rig v3(kHeltecV3);
   v3.settings.slot[1].preset = "meshmapper";
-  v3.configure();
-  v3.link.setLinkUp(true);
+  v3.connectSlot1();
+  v3.tick(kHeapRecheckMs);
   v3.tick();
-  EXPECT_EQ(SlotState::Connecting, v3.state(0));
-  EXPECT_EQ(SlotState::Off, v3.state(1));
-  EXPECT_FALSE(v3.link.view(1).configured);
-  EXPECT_EQ(1, v3.link.configuredSlots());
-  EXPECT_EQ(0u, v3.client[1].opens.size());
-  char line[320];
-  v3.link.describe(1, line, sizeof line);
-  EXPECT_STREQ("slot 2 meshmapper: off (this board has memory for one broker; a V4 carries two)", line);
-  EXPECT_NE(std::string::npos, logText().find("observer: slot 2 off (this board has memory for one broker; a V4 carries two)"));
-  EXPECT_EQ(1, v3.link.board().slots);
+  ASSERT_EQ(SlotState::Connecting, v3.state(1));
+  v3.client[1].accept();
+  v3.tick();
+  EXPECT_EQ(2, v3.link.connectedSlots());
+  EXPECT_EQ(2, v3.link.board().slots);
   EXPECT_STREQ("heltec_v3", v3.link.board().name);
-  // An empty slot 2 on a V3 is not a fault, and says so as before.
-  v3.settings.slot[1].preset = "none";
-  v3.configure();
-  v3.link.describe(1, line, sizeof line);
-  EXPECT_STREQ("slot 2 none: off (preset is none)", line);
+  EXPECT_EQ(2, v3.link.configuredSlots());
 
   Rig v4;
   v4.settings.slot[1].preset = "meshmapper";
@@ -744,8 +771,8 @@ TEST(Heap, AV3RefusesSlot2WithTheReasonAndAV4OpensTwo) {
 TEST(Heap, AV4WaitsForPsramAsWellAsInternalHeap) {
   Rig r;
   EXPECT_TRUE(kHeltecV4.psram);
-  EXPECT_EQ(2u * 16384u + 8192u, kHeltecV4.slotPsramBytes);
-  EXPECT_EQ(63564u - 32768u, kHeltecV4.slotInternalBytes);
+  EXPECT_EQ(40960u, kHeltecV4.slotPsramBytes) << "the 16 KB in-buffer, the 4 KB out-buffer and the handshake's own";
+  EXPECT_EQ(kHeltecV3.slotInternalBytes, kHeltecV4.slotInternalBytes) << "the V3's measured figure, unreduced (task p1.9-37)";
   g_psramFree = kHeltecV4.slotPsramBytes - 1;
   r.configure();
   r.link.setLinkUp(true);

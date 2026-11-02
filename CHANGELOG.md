@@ -22,12 +22,53 @@ pull request, as `docs/` moves with code.
 
 ## Unreleased
 
-- **No interface moved; the build did** (task p1.9-36). The boards are built
-  with the ESP-IDF compiled from source under a committed `sdkconfig.defaults`
-  (*Arduino as an ESP-IDF component*, the same core 2.0.17 and ESP-IDF 4.4.7),
-  so that mbedtls's TLS buffers are allocated per record rather than per
-  connection. Nothing of `lib/agent-core/` changed: not an interface, not a
-  constant, not a fixture, not the version. A consumer pins what it pinned.
+Nothing yet.
+
+## v0.6.0 — a lighter TLS, and two broker slots on both boards
+
+Pile 1.9, tasks 36 and 37 (`tasks/phase-1.9/`), released by task 37.
+**`agent-core` 0.6.0** in the three manifests. Nothing else of a pin moved: the
+contract fixtures are still meshmaster.dk **`42e4d45`** (77 files) and the
+companion frame fixtures still **`f518ebd`** (46); MeshCore is still
+**`companion-v1.18.0`, `81dbae59`**; `kMeshReplyDataCap` 184 and `kMeshPathCap`
+64, unmoved. **The build underneath moved and nothing above it did.** The four
+questions:
+
+- **Did a method move?** **No.** Not one method of `IMesh`, `IUplink`,
+  `IPlatform`, `IClock`, `IJobExtension`, `JobContext`, `ResultWriter` or
+  `TextOut`, and nothing of `JobRunner`, `JobReport` or `Backoff`: nothing was
+  added, nothing changed shape and nothing was removed. A consumer's tree
+  compiles against 0.6.0 exactly as it compiled against 0.5.0.
+- **Did a `MeshReply` constant move?** **No.** `kMeshReplyDataCap` is 184 and
+  `kMeshPathCap` is 64, at the same MeshCore pin task p1.8-34 read them at.
+- **Did the fixtures' manifest commit move?** **No.** `42e4d45`, 77 files, byte
+  for byte — no `tools/sync-fixtures.ps1` ran in this pile. The wire this
+  library writes and reads is the wire `v0.5.0` wrote and read.
+- **The version and the pin:** `agent-core` 0.6.0; MeshCore
+  `companion-v1.18.0`, `81dbae59`.
+
+What a consumer changes: **nothing**. What a consumer who builds the *Heltec*
+firmware of this repository should know, since it is the one thing this release
+is:
+
+- **The ESP-IDF is compiled from source under the same Arduino core** (task
+  p1.9-36): `framework = arduino, espidf` in `platformio.ini`, core 2.0.17 on
+  ESP-IDF 4.4.7 — the pair `espressif32@6.11.0` picks itself — with a committed
+  `sdkconfig.defaults` that is the core's own configuration but for ten mbedTLS
+  keys, held there by `tools/check-sdkconfig.py` on every CI build. The TLS
+  content buffers are allocated while a record is in flight and freed after it
+  (`CONFIG_MBEDTLS_DYNAMIC_BUFFER`, 16 KB in and 4 KB out), and the certificates
+  are freed after the handshake. The first `pio run` on a machine compiles the
+  ESP-IDF; nothing of `lib/agent-core/` is involved, and it still builds and
+  tests on a host with no ESP-IDF at all.
+- **What that cost, measured on a Heltec V3 on 2 November 2026** (task p1.9-37,
+  `src/observer/Board.h`): a broker connection costs **19 468** bytes of
+  internal heap where it cost 63 564, and the MeshMaster uplink's handshake dips
+  **26 404** where it dipped 81 116 — so **both boards now open two broker
+  slots**, where a V3 opened one. The gate, the floor (16 384) and the margin
+  (4 096) are unchanged; `src/observer/Connection.h` is the arithmetic and
+  `get mqtt.status`'s `memory` line prints it. Two slots on a V4 are expected,
+  not walked: no V4 was at hand, so its figures are the V3's measured ones.
 
 ## v0.5.0 — the uplink's one connection, an observer that fits, a flood with a scope, and the neighbours
 

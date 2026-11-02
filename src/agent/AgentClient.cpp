@@ -28,16 +28,17 @@ constexpr size_t kBodyCap = 2048;                  // the config and heartbeat a
 
 // The lowest free heap seen during a call (task p1.8-30) is read from src/platform/TlsHeap.h's
 // wrapper of mbedtls's allocator, which every allocation mbedtls makes passes through - the
-// handshake's certificate chain, the two 16 KB content buffers, the session's keys - with a
+// handshake's certificate chain, the content buffers, the session's keys - with a
 // read of the free heap right after it: exact for mbedtls's share of the call, which is nearly
 // all of it. The rest (lwIP's segments, HTTPClient's Strings and its 1 KB chunk buffer) is
 // caught by the four samples request() and call() take, and by the board's minimum-ever: if
 // that moved during the call, the call is what moved it and the figure is exact for everything.
 // Since task p1.8-31 the same wrapper is where a board with PSRAM puts its TLS buffers.
 
-// One of mbedtls' two TLS content buffers as one allocation (CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN
-// 16384 in this core's sdkconfig, plus its header room): what the largest free block has to hold
-// for a handshake to be possible at all. The same figure as src/observer/Connection.h's
+// The larger of mbedtls' two TLS content buffers as one allocation
+// (CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN 16384 in sdkconfig.defaults since task p1.9-36, which sizes
+// the pair apart - 4096 out - plus its header room): what the largest free block has to hold for
+// a handshake to be possible at all. The same figure as src/observer/Connection.h's
 // kTlsBufferBytes, written here because this file includes nothing of the observer.
 constexpr uint32_t kTlsBufferBytes = 16 * 1024 + 1024;
 

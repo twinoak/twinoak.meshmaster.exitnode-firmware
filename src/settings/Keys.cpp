@@ -364,8 +364,9 @@ bool validateValue(const KeyDef& key, const char* value, char* err, size_t errCa
         say(err, errCap, msg);
         return false;
       }
-      // A slot this board has no memory for (observer/Board.h: one on a Heltec V3, two on a V4)
-      // takes no preset but `none`, and says why in one line (task p1.8-31).
+      // A slot this board has no memory for (observer/Board.h; since task p1.9-37 both boards
+      // open both slots, so this refuses nothing they are given) takes no preset but `none`, and
+      // says why in one line (task p1.8-31).
       const int slot = (std::strncmp(key.name, "mqtt", 4) == 0 && std::isdigit(static_cast<unsigned char>(key.name[4])) != 0 &&
                         key.name[5] == '.')
                            ? key.name[4] - '1'
