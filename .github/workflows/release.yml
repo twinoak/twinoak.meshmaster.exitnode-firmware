@@ -225,6 +225,28 @@ jobs:
               echo
               echo "**This is a dry run.** The images are the workflow's artifacts and nothing is published."
             fi
+            # This release's own five lines. Version-specific, like the console section below:
+            # the task that ships a tag rewrites it (p1.8-35), and CHANGELOG.md is the per-tag record.
+            cat <<'EOF'
+
+          ## What's new since v0.4.0
+
+          - **One TLS connection to meshmaster.dk, kept between calls.** The handshake happens at the
+            first call and then only when the connection is gone, so a call costs a few kilobytes of
+            heap where it used to cost tens of them. `status`'s new `uplink` line counts the handshakes
+            against the calls and says what the last call cost.
+          - **The observer fits.** The heap gate is built from what this board was measured to cost and
+            keeps watching after a slot is open: a MeshMaster call that dips under the floor closes the
+            highest slot for ten minutes. **One slot on a Heltec V3, two on a V4**, whose TLS buffers go
+            to its PSRAM.
+          - **A flood scope of its own.** Every flood now carries the transport code of the region
+            `flood.scope` names - `dk` out of the box - and the second flood of a transaction drops it,
+            so a repeater with no region map yet is still found.
+          - **Naboer, and the status fields MeshView left empty.** The repeaters this node hears at
+            zero hops and the scopes each one answers are published once a day (MeshView's *Direct
+            neighbours*), and the status message carries the noise floor, the air time and the battery.
+          - **MeshCore companion 1.18** (`81dbae59`), the commit the field repeaters run.
+          EOF
             echo
             echo "## Flashing"
             echo
@@ -250,6 +272,10 @@ jobs:
             the board's key. **Never upgrade with the `-merged.bin`**: the erase takes the key with it,
             and the exit node then needs a new token and its associations made again, because the
             repeaters know it by that key.
+          - **An upgrade needs nothing typed.** Every setting the board already has is kept, and the
+            settings this release adds start at their defaults: `flood.scope` `dk`,
+            `flood.unscoped` `retry`, `mqtt.neighbors` `on`, `mqtt.neighbors.interval` `24` hours.
+            A V3 carrying a second broker slot from v0.4.0 is the one thing to look at - below.
 
           `SHA256SUMS` lists every file.
 
@@ -285,7 +311,16 @@ jobs:
 
           **On a Heltec V3, set MeshView only.** A V3 has memory for one broker beside its
           MeshMaster connection, and a second one just waits for memory that never comes.
-          Leave MeshMapper to the V4s.
+          Leave MeshMapper to the V4s. Since this release the firmware says so instead of waiting:
+          `set mqtt2.preset meshmapper` on a V3 answers
+
+          ```
+          error: mqtt2.preset: this board has memory for one broker; a V4 carries two
+          ```
+
+          and a V3 upgraded from v0.4.0 with a second slot already stored shows it as
+          `slot 2 meshmapper: off (this board has memory for one broker; a V4 carries two)` on
+          `get mqtt.status`, with one slot in `status`'s `observer` line and on the exit node's page.
 
           `mqtt.iata` is your region: `AAL`, `AAR`, `BLL`, `ODE`, `CPH` or `RNN`. `mqtt.owner` is
           optional. The Danish observer guide's lines (`set mqtt1.preset custom`, …) work as typed too,

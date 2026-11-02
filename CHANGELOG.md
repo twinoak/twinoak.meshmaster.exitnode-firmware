@@ -20,22 +20,94 @@ this repository changed and why is in `tasks/phase-*/reports/`.
 A task that moves one of the four things above adds its line here in the same
 pull request, as `docs/` moves with code.
 
-## Unreleased — what pile 1.8 has moved so far (v0.5.0 is task 35's)
+## v0.5.0 — the uplink's one connection, an observer that fits, a flood with a scope, and the neighbours
 
-- **The MeshCore pin moved** (task p1.8-34): `companion-v1.17.1`, `d9296435` →
-  **`companion-v1.18.0`, `81dbae59`**, the commit the field repeater runs since
-  its own 1.18 bump. Read for the companion side in
-  `tasks/phase-1.8/reports/34.md`, tier three *none found*: no packet layout, no
-  byte of the login, the request or the regions frame, and no reply
-  `lib/agent-core/src/ReplyCodec.cpp` parses has changed. `kMeshReplyDataCap`
-  184 and `kMeshPathCap` 64 are MeshCore's `MAX_PACKET_PAYLOAD` and
-  `MAX_PATH_SIZE` at the new pin too, **unmoved**; the contract fixtures'
-  manifest commit is not moved by this task.
-- Tasks p1.8-30 to p1.8-33 recorded in their reports what this section has
-  to say for a consumer (`IMesh` gained `floodScope()` and `setFloodMode()`
-  with defaults, `JobRunner` a non-const `gate()`, the heartbeat a `flood`
-  member, the fixtures' manifest `67c2a4c` → `42e4d45` by addition only);
-  task 35 writes it out as v0.5.0 with `agent-core` 0.5.0.
+Pile 1.8, tasks 30 to 34 (`tasks/phase-1.8/`), released by task 35.
+**`agent-core` 0.5.0** in the three manifests; the contract fixtures moved to
+meshmaster.dk **`42e4d45`** (77 files, from `v0.4.0`'s `67c2a4c`, 75) and the
+companion frame fixtures are still at `f518ebd` (46); MeshCore
+**`companion-v1.18.0`, `81dbae59`** (from `companion-v1.17.1`, `d9296435`);
+`kMeshReplyDataCap` 184 and `kMeshPathCap` 64, unmoved. The four questions:
+
+- **Did a method move?** Two additions to **`IMesh`**, both `virtual` **with a
+  body**, so a second implementation compiles untouched and sends the heartbeat
+  it sent: `floodScope()` — the region every flood of that mesh goes out in, a
+  name, `*` for *no transport code at all*, or **`nullptr` for a mesh that says
+  nothing about scope** — and `setFloodMode(FloodMode)`, told per send. A mesh
+  that overrides neither is the mesh it was. `JobRunner::gate()` gained a
+  **non-const** overload beside the const one (additive; the board's neighbour
+  sweep shares the one airtime budget through it), and `JobRunner` gained
+  `setFloodRetry`, `floodCounts`, `floodUnscopedRetry` and `describeFlood`.
+  `JobReport` and `JobContext` are unchanged. Nothing of `IUplink`,
+  `IPlatform`, `IClock`, `IJobExtension`, `ResultWriter` or `TextOut` moved, and
+  **nothing was removed**.
+- **Did a `MeshReply` constant move?** No. `kMeshReplyDataCap` is 184 and
+  `kMeshPathCap` is 64, and they are MeshCore's `MAX_PACKET_PAYLOAD` and
+  `MAX_PATH_SIZE` at the **new** pin too — task 34 read them there
+  (`tasks/phase-1.8/reports/34.md`), which is the point of holding a
+  `static_assert` against them.
+- **Did the fixtures' manifest commit move?** **Yes** — `67c2a4c` → `42e4d45`
+  (task p1.8-32, `tools/sync-fixtures.ps1 -Commit master -Set contracts`).
+  **The wire moved by addition and by addition only**: two files appeared,
+  `AgentFlood.json` and `AgentHeartbeatFlood.json`, and **not one existing
+  fixture's bytes changed** — the sync's `git diff` touches `MANIFEST.txt` and
+  nothing else. So the heartbeat's new `flood` object is the whole of the
+  change, it is optional, and a consumer that writes none of it is on the wire
+  it was on. The companion frame fixtures did not move with the MeshCore bump:
+  task 34 found **no change to any frame this library decodes** (tier three,
+  *none found*).
+- **The version and the pin:** `agent-core` 0.5.0; MeshCore
+  `companion-v1.18.0`, `81dbae59`.
+
+What a consumer changes: **nothing**. The one addition, in a few lines:
+
+- **A flood carries its region's transport code** (meshmaster.dk's D-47, task
+  p1.8-32). A flood used to be a plain `ROUTE_TYPE_FLOOD` with no codes, which a
+  repeater that follows the Danish standard's region map forwards only as a
+  wildcard. `agent/FloodScope.h` is the rule and the counting, and it knows
+  nothing of hashes or transport codes: `FloodMode` (`Scoped` | `Unscoped`),
+  `UnscopedRetry` (`Retry` | `Never`), `kFloodScopeUnscoped` (`*`, the word the
+  contract's `AgentFloodScopes.Unscoped` has), `floodModeFor(flood, retry)` —
+  the whole decision — `FloodCounts`, and `FloodPolicy`, which holds one
+  transaction at a time and is **nestable**, because a request that lost its
+  session logs in again inside its own retry loop. `JobRunner` marks a
+  transaction over each retry loop (the login's two tries with the probe
+  between them, a request or a CLI line and its retry, and the whole of
+  `discover`) and asks the policy before every send, so **the second flood of a
+  transaction goes unscoped** while the setting is `retry` and a repeater with
+  no region map is still found. The arithmetic — the scope's key and the code —
+  is the *consumer's*, not this library's: on this board it is
+  `src/mesh/TransportScope.h`, SHA-256 over `#name` for the key and
+  HMAC-SHA256 over the payload for the code, read off MeshCore's own
+  `TransportKeyStore` and `TransportKey::calcTransportCode`. A mesh that
+  overrides neither new method floods exactly as it did.
+- **The heartbeat's `flood` object**, written after `observer` as the record has
+  it: `scope` (left out when the mesh's is `nullptr` — *the companion's own* on
+  the wire), `unscopedRetry`, and the three counts `answeredScoped`,
+  `answeredUnscoped` and `unanswered`, which are the record's non-nullable longs
+  and are always written. `AgentLoop` fills it from the mesh's scope and the
+  runner's counts, and **writes nothing at all for a mesh that reports no
+  scope** — so an older consumer's heartbeat is byte for byte the one it sent.
+
+Two things of **this firmware's** moved with it, for a consumer who reads this
+repository's sources as a worked example:
+
+- **One TLS connection to the server, kept between calls** (task p1.8-30).
+  `src/agent/KeepAlive.h` is the policy — reuse while the client sees the
+  connection alive and the root has not changed, remake a kept connection once
+  inside the call when the request over it got no reply and no TLS error, never
+  retry a fresh connection's failure — and `src/agent/AgentClient.cpp` is the
+  wire under it. It is deliberately **not** in this library: it is about
+  `HTTPClient`'s codes and `WiFiClientSecure`'s probe, which is a board's
+  uplink and not the `IUplink` seam. meshmaster.dk holds an idle connection for
+  **128 s**, measured; the idle heartbeat is at 120 s.
+- **The clock's plausibility floor is 1 November 2026**, not 1 January 2025
+  (`src/net/Clock.h`, task p1.8-34). MeshCore 1.18's `ESP32RTCClock` seeds
+  itself with its build date and keeps a backup across a reset in `RTC_NOINIT`
+  memory; with the old floor a fresh power-on would have read that seed as a
+  time kept by the RTC and dated the first heartbeat and every result by it. A
+  consumer with its own `IClock` over a radio whose clock does the same has the
+  same floor to raise.
 
 ## v0.4.0 — the observer in the heartbeat, and where a failed job failed
 
