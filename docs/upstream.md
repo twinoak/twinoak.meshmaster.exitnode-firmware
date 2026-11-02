@@ -23,7 +23,7 @@ only thing that can go wrong is that our own code no longer compiles against
 theirs, which is exactly the thing CI can tell us by itself.
 
 The price is that a consumer of the package does not get everything a checkout
-of MeshCore's own tree gets, and five things had to be arranged by hand. They
+of MeshCore's own tree gets, and six things had to be arranged by hand. They
 are the places a bump re-reads:
 
 | What | Where | Why |
@@ -33,6 +33,7 @@ are the places a bump re-reads:
 | `lib/ed25519` | `tools/pio/meshcore_private_libs.py` | MeshCore keeps it as a *private* library of its project, which a package consumer does not get; the sources are compiled straight out of the pinned checkout and the include path is a `-I` in `platformio.ini` |
 | rweather/Crypto's `SHA256.cpp`, `Hash.cpp`, `Crypto.cpp` in `[env:native]` | the same script, and `[env:native]`'s `lib_ignore` | since task p1.8-32 a flood scope's transport key and code are SHA-256 and HMAC-SHA256 of **this** library — the one MeshCore hashes with — and the host build needs them, but the library's own `RNG.cpp` includes `<Arduino.h>` and a host has none. So the native environment ignores the library and these three translation units are added to its build; the boards get the whole library from `lib_deps` as before |
 | `boards/heltec_v4.json` | `boards/` here, unedited (`boards/README.md`) | PlatformIO reads `boards_dir` before it clones a dependency, so a `board =` cannot name a file inside one. The V3 needs none - its board is PlatformIO's own `esp32-s3-devkitc-1`. A bump re-copies this file and `diff`s it |
+| the variant's `pins_arduino.h`, for the Arduino core | `tools/pio/arduino_component.py` | since task p1.9-36 the Arduino core is compiled as an ESP-IDF component, which does not see `platformio.ini`'s `-I`; the script finds `variants/<build.variant>/pins_arduino.h` in the pinned checkout (the V4's; the V3 has none) and hands it to the core's compile, as the `-I` did before. A bump that renames the variant directory or moves the file is a core compiled with the wrong pins - the script prints which header the core got, and the build log is where to read it |
 
 Everything else — `src/`, `variants/` — the package gives us, and
 `build_as_lib.py` in MeshCore's own tree is what selects from it (our

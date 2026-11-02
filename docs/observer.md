@@ -246,6 +246,7 @@ firmware's (`src/observer/Board.h`, where each one says where it comes from):
 | the gate's margin | 4 096 | the same |
 | **slots the gate will open** | **1** | **2** |
 | where the TLS buffers are | internal heap | PSRAM (every mbedtls allocation of 4 KB and over, through a hook on its allocator - `src/platform/TlsHeap.cpp`) |
+| **expected after task p1.9-36** (the ESP-IDF built with dynamic TLS buffers; not measured - task 37 writes the bench's figures) | a connection *between* records holds neither 16 KB content buffer: about 34 KB of a slot's 63 564 and of the uplink's steady cost is not held, and the ~8 KB of certificates is freed after the handshake. A record in flight borrows its buffer back - 16 KB in, 4 KB out - so the *dip* of a call or a publish stays near the old figure while the *rest* falls by ~40 KB per connection. One slot beside the uplink should then fit with room, and the question for the bench is the handshake beside an open slot | the same ~40 KB per connection, from PSRAM rather than internal heap, since the buffers are PSRAM's there; the internal share of a slot (30 796) loses only the certificates |
 
 So:
 
@@ -275,9 +276,11 @@ So:
   slot on a V3 truly fits.
 - **A board has the slots its memory allows**: one on a V3, two on a V4. On a V3
   `set mqtt2.preset` takes `none` and nothing else, with the reason; a slot 2
-  stored by `v0.4.0` is off with the same reason. A custom ESP-IDF build with
-  smaller TLS buffers is what a second slot on a V3 would take, and that is not
-  this pile's.
+  stored by `v0.4.0` is off with the same reason. Since task p1.9-36 the ESP-IDF
+  is built from source with mbedtls's buffers allocated per record rather than
+  per connection (README, *Building it*); the row marked **expected** above says
+  what that should do to the figures, and the slot rule moves only when task 37
+  has measured it.
 - The client runs on its own task: a publish is an enqueue, and the mesh loop and
   the agent loop never wait on a broker. Its sizes are set with their arithmetic
   in `src/net/MqttClient.cpp`: a 512-byte receive buffer (nothing is subscribed),

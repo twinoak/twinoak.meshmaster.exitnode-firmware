@@ -150,8 +150,9 @@ Every include is `<agent/X.h>`:
 #include <agent/IPlatform.h>
 ```
 
-**The ESP-IDF build of the component is unverified** at `v0.3.0` — there is no
-ESP-IDF in this repository's toolchain. What has run is the CMake file parsed and
+**The ESP-IDF build of the component is unverified** at `v0.3.0` — the boards'
+own ESP-IDF build (since pile 1.9) takes the library through PlatformIO's
+dependency finder, not as a component. What has run is the CMake file parsed and
 held against the sources on disk (`tools/check-idf-component.cmake`), and every
 source compiled on a host with an IDF consumer's strictness,
 `-Wall -Wextra -Werror -fno-exceptions -fno-rtti`, in the five configurations

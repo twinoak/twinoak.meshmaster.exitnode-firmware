@@ -35,6 +35,31 @@ pio run -e heltec_v4     # the second: same firmware, MeshCore's V4 variant
 pio test -e native       # the tests that need no board
 ```
 
+**The ESP-IDF is compiled from source**, since pile 1.9 (`platformio.ini`:
+`framework = arduino, espidf`, *Arduino as an ESP-IDF component*). The Arduino
+core is the same 2.0.17 the platform ships, on the same ESP-IDF 4.4.7 it was
+built on, but the ESP-IDF is built here under the committed
+[`sdkconfig.defaults`](sdkconfig.defaults) instead of coming precompiled inside
+the core — because one thing in it is not a build flag: mbedtls's TLS buffers.
+The precompiled core holds two 16 KB content buffers for the life of every TLS
+connection and keeps the certificates after the handshake, and a Heltec V3 with
+its connection to meshmaster.dk kept open had no room for a broker beside it.
+`sdkconfig.defaults` is the core's own configuration, copied whole, with the
+mbedtls section changed to allocate those buffers while a record is in flight
+and free the certificates after the handshake; `tools/check-sdkconfig.py` holds
+it to the core's on every CI build and names every key that differs with its
+reason, and nothing else about the firmware moved — the partition tables, the
+flash mode, the merged image's layout, what the board prints. The price is the
+first build of a clean tree: it compiles the ESP-IDF, which takes minutes rather
+than seconds, and CI pays it on every run; after that a build is incremental
+like any other. `CMakeLists.txt` and `src/CMakeLists.txt` are the two files the
+mode needs, and `tools/pio/arduino_component.py` hands the core the board's
+defines and pin header the Arduino-only build gave it. One habit that follows:
+PlatformIO empties `.pio/build` whenever its *own* version changes (the
+project checksum hashes it), so a `pio test -e native` in the container below
+with CI's PlatformIO after a host build with another one throws the compiled
+ESP-IDF away — run the container first, or pin the same version in both.
+
 The V4's board definition is the one thing of MeshCore's that is copied into
 this repository — PlatformIO reads `boards_dir` before it clones a dependency,
 so `board = heltec_v4` cannot name a file inside one

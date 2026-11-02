@@ -148,14 +148,16 @@ jobs:
           path: |
             ~/.platformio
             ~/.cache/pip
-          key: pio-${{ runner.os }}-${{ env.PIO_VERSION }}-${{ hashFiles('platformio.ini') }}
+          key: pio-${{ runner.os }}-${{ env.PIO_VERSION }}-${{ hashFiles('platformio.ini', 'sdkconfig.defaults') }}
           restore-keys: |
             pio-${{ runner.os }}-${{ env.PIO_VERSION }}-
 
       - name: Install PlatformIO Core
         run: pip install --quiet "platformio==${PIO_VERSION}"
 
-      # The version is a build flag, so it is in the image and not in a file beside it.
+      # The version is a build flag, so it is in the image and not in a file beside it. Since task
+      # p1.9-36 this compiles the ESP-IDF from source under sdkconfig.defaults, as ci.yml does and
+      # with the same cache key; the bootloader in the merged image is built here too.
       - name: Build with the version baked in
         env:
           PLATFORMIO_BUILD_FLAGS: -D MESHMASTER_AGENT_VERSION='"${{ needs.ci-green.outputs.version }}"'
