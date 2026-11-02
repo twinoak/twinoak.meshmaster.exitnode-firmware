@@ -121,8 +121,9 @@ void Connections::configure(const ObserverSettings& settings, bool enabled, cons
     } else {
       r.why = "the observer is off";
     }
-    // A slot this board has no memory for (Board.h: one on a V3, two on a V4) is off with the
-    // reason whenever something is stored in it - by the console of an older image, or by hand.
+    // A slot this board has no memory for (Board.h; since task p1.9-37 no board of this
+    // repository has one) is off with the reason whenever something is stored in it - by the
+    // console of an older image, or by hand.
     // An empty one stays "preset is none", which is not a fault.
     const char* refusal = slotRefusal(i, board());
     const char* stored = settings.slot[i].preset;

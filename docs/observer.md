@@ -25,17 +25,19 @@ where it is written down.
 
 ## The lines to type
 
-**On a Heltec V3, set MeshView only (slot 1) and leave MeshMapper to the V4s.**
-Measured on 28 October with `v0.4.0`: a V3 has about 136 KB free with no broker,
-one broker connection costs about 63 KB, and the MeshMaster uplink's call dips
-about 80 KB — so with one broker up, a call took the board to 3 KB free, and a
-second broker never gets memory to connect (it stays *waiting-for-heap*). Since
-task p1.8-31 **a V3 has one slot and a V4 two** (`src/observer/Board.h`): on a V3
-`set mqtt2.preset meshmapper` is refused with
-`error: mqtt2.preset: this board has memory for one broker; a V4 carries two`, a
-slot 2 an older image stored is shown off with the same words, and `get
-mqtt.status` shows one slot. The guide's MeshMapper line is therefore the one
-line that does not take on a V3; on a V4 it does ([*What it costs*](#what-it-costs-and-the-order-of-priority)).
+**Both brokers fit on both boards.** Measured on 2 November with task p1.9-36's
+lighter TLS, on a Heltec V3: the board has 120 392 bytes free with no broker, one
+broker connection costs 19 468 of them, and the MeshMaster uplink's call dips
+6 404 over the connection it keeps or 26 404 for the rare handshake — so two
+brokers and a handshake together leave about 55 000 free. On `v0.5.0` a slot cost
+63 564 and a second one never got memory to connect (it stayed
+*waiting-for-heap*). Since task p1.9-37 **both boards open two slots**
+(`src/observer/Board.h`), so every line of the guide below takes on a V3 as it
+does on a V4, and `get mqtt.status` shows two slots. The gate is still what
+decides, board by board and minute by minute: a slot the heap cannot take waits
+instead of connecting, and a MeshMaster call that comes near the floor closes the
+highest slot for ten minutes
+([*What it costs*](#what-it-costs-and-the-order-of-priority)).
 
 The Danish observer guide, as the console of this firmware takes it. `set` takes
 effect at once — no `reboot` is needed for any line here, though the guide's
@@ -239,14 +241,14 @@ firmware's (`src/observer/Board.h`, where each one says where it comes from):
 
 | | Heltec V3 | Heltec V4 |
 |---|---|---|
-| internal heap free, idle, no slot | 136 580 (28 Oct 2026, `v0.4.0`, after a MeshMaster call) | not measured; the same core, so about the same |
-| one slot costs | **63 564** internal (measured 28 Oct 2026: 136 580 → 73 016 with MeshView up) | **30 796** internal + **40 960** PSRAM (derived: the V3's figure less the two 16 KB TLS content buffers, which go to PSRAM; not measured on a V4) |
-| the uplink's call dips | **81 116** (measured 28 Oct 2026, a handshake per call: 136 580 → 55 464); *the board replaces this with what its own last call dipped, once it has made one* | 48 348 (derived the same way; replaced the same way) |
-| the floor a call must stay above | 16 384 (not measured: what WiFi, lwIP and the HTTP client need in flight, twice over) | the same |
+| internal heap free, idle, no slot | 120 392 (measured 2 Nov 2026 on FD9B, after task p1.9-36, ten minutes after boot; 136 580 on `v0.4.0`) | not measured; the same core, so about the same less what PSRAM's own bookkeeping takes |
+| one slot costs | **19 468** internal (measured 2 Nov 2026: 120 392 → 100 924 with MeshView up, where `v0.5.0` cost 63 564) | **19 468** internal — the V3's figure unreduced, because since 36 a connection holds no mbedtls allocation over the 4 KB threshold between records — and up to **40 960** PSRAM while a record is in flight (not measured on a V4) |
+| the uplink's call dips | **6 404** over the kept connection (120 392 → 113 988), **26 404** for a handshake (120 392 → 93 988 — one handshake in sixteen calls); the gate assumes the handshake until the board has measured a call of its own, and then uses *what that call dipped* | the same two figures, unreduced (not measured on a V4) |
+| the floor a call must stay above | 16 384 (not measured, and the walk never came near it: 69 736 was the lowest the board ever saw with a slot up) | the same |
 | the gate's margin | 4 096 | the same |
-| **slots the gate will open** | **1** | **2** |
-| where the TLS buffers are | internal heap | PSRAM (every mbedtls allocation of 4 KB and over, through a hook on its allocator - `src/platform/TlsHeap.cpp`) |
-| **expected after task p1.9-36** (the ESP-IDF built with dynamic TLS buffers; not measured - task 37 writes the bench's figures) | a connection *between* records holds neither 16 KB content buffer: about 34 KB of a slot's 63 564 and of the uplink's steady cost is not held, and the ~8 KB of certificates is freed after the handshake. A record in flight borrows its buffer back - 16 KB in, 4 KB out - so the *dip* of a call or a publish stays near the old figure while the *rest* falls by ~40 KB per connection. One slot beside the uplink should then fit with room, and the question for the bench is the handshake beside an open slot | the same ~40 KB per connection, from PSRAM rather than internal heap, since the buffers are PSRAM's there; the internal share of a slot (30 796) loses only the certificates |
+| **slots the gate will open** | **2** | **2** |
+| where the TLS buffers are | internal heap, and only while a record is in flight (task p1.9-36) | PSRAM (every mbedtls allocation of 4 KB and over, through a hook on its allocator - `src/platform/TlsHeap.cpp`) |
+| the hour with one slot up | 100 924 free, **69 736** min ever, 86 004 largest block; one handshake in fifty-five calls, and the slot's own handshake dipped to 74 960 (measured 2 Nov 2026) | not walked: Thomas had no V4 on 2 November, so **two slots on a V4 are expected, not measured** |
 
 So:
 
@@ -254,14 +256,15 @@ So:
   uplink's dip + the floor + the margin**, and the largest free block holds one
   TLS content buffer (17 KB) on a V3 or the handshake's largest internal
   allocation (4 KB) on a V4, whose PSRAM must in turn hold the slot's 40 KB and a
-  17 KB block. With the figures above and no call measured yet that is 165 KB on
-  a V3 - more than the board has, on purpose: the dip of a handshake per call is
-  the conservative figure, and the board swaps in **what its own last call
-  dipped** (`status`'s `uplink` line, *lowest during*) as soon as it has one. A
-  call over the kept connection dips a few KB; the gate then asks for about
-  63.5 + a few + 16 + 4 KB, which a V3 at rest has. Below the figure a slot waits
-  (`waiting-for-heap`) and looks again every five seconds; `get mqtt.status`'s
-  `memory` line prints the whole sum and which dip is in force.
+  17 KB block. With the figures above and no call measured yet that is **66 352**
+  on either board - the conservative sum, because it assumes the handshake - and a
+  V3 at rest has 120 392, so the first slot opens without waiting and the second
+  looks at 100 924. The board then swaps in **what its own last call dipped**
+  (`status`'s `uplink` line, *lowest during*) as soon as it has one: a call over
+  the kept connection dips 6 404, and the gate asks for 46 352. Below the figure a
+  slot waits (`waiting-for-heap`) and looks again every five seconds;
+  `get mqtt.status`'s `memory` line prints the whole sum and which dip is in
+  force.
 - Two slots never open at once: the second waits for the first's handshake.
 - **The gate keeps watching.** Every MeshMaster call's lowest free heap is read
   (task p1.8-30 measures it); a call that **dipped under the floor** while a slot
@@ -272,15 +275,22 @@ So:
   time(s)`, and the slot's `last error` says which it was and the figures. A
   handshake call on a V3 with a slot up is the case that trips it: the kept
   connection makes those rare (the server closes an idle one after about two
-  minutes), and the bench walk of pile 1.8 is where `min ever` says whether one
-  slot on a V3 truly fits.
-- **A board has the slots its memory allows**: one on a V3, two on a V4. On a V3
-  `set mqtt2.preset` takes `none` and nothing else, with the reason; a slot 2
-  stored by `v0.4.0` is off with the same reason. Since task p1.9-36 the ESP-IDF
-  is built from source with mbedtls's buffers allocated per record rather than
-  per connection (README, *Building it*); the row marked **expected** above says
-  what that should do to the figures, and the slot rule moves only when task 37
-  has measured it.
+  minutes, and the walk saw one handshake in fifty-five calls), and the walk of
+  2 November is where `min ever` answered whether a slot on a V3 fits - **69 736**
+  over an hour with MeshView up, four times the floor, so no call of that hour
+  came near it. Two slots take the same arithmetic 19 468 lower, to about 50 000,
+  which is why both are allowed.
+- **A board has the slots its memory allows**, and since task p1.9-37 that is
+  **two on both boards**: every line of the Danish guide takes on a V3, and
+  `set mqtt2.preset meshmapper` is no longer refused anywhere. The mechanism is
+  still there for a board that fits one - such a board answers
+  `error: mqtt2.preset: this board has memory for one broker only` and shows a
+  stored slot 2 off with the same words - but neither board this repository builds
+  is one. Task p1.9-36 is why: the ESP-IDF is built from source with mbedtls's
+  buffers allocated per record rather than per connection (README, *Building
+  it*), which took a slot from 63 564 bytes to 19 468 and the uplink's handshake
+  from 81 116 to 26 404. The figures above are the walk of 2 November that
+  measured it.
 - The client runs on its own task: a publish is an enqueue, and the mesh loop and
   the agent loop never wait on a broker. Its sizes are set with their arithmetic
   in `src/net/MqttClient.cpp`: a 512-byte receive buffer (nothing is subscribed),
@@ -294,7 +304,7 @@ So:
   backlog. The queue is static RAM, not heap, so it stays: shrinking it would
   free nothing the gate counts.
 - Static RAM: the connections and their queues are about 7.6 KB of the image's
-  RAM (52.7 % of the V3's 320 KB after task 31); the TLS contexts and esp-mqtt's
+  RAM (57.8 % of the V3's 320 KB, 189 452 bytes, at task p1.9-37); the TLS contexts and esp-mqtt's
   tasks are heap, taken when a slot connects and given back when it closes.
   `status`'s `heap` line (and on a V4 its `psram` figures) is where to read it.
 - **The neighbour report's peak** (task p1.8-33): the report is built into a
@@ -313,7 +323,7 @@ So:
 observer  slot 1 meshview connected, slot 2 meshmapper connected; iata AAR, origin "MeshMaster-7F3A"; 412 packet message(s) made, 0 did not fit; 2 of 2 slot(s) connected (get mqtt.status)
 slot 1 meshview (wss://mqtt.meshview.dk:443/mqtt): connected since 12:03:20, root ISRG Root X1/X2; 413 published, 0 dropped, 0 queued; 1 connects, 0 refusal(s), 0 error(s), 0 renewal(s), gave way 0 time(s); last error: none
 slot 2 meshmapper (wss://mqtt.meshmapper.net:443/mqtt): connected since 12:03:26, root ISRG Root X1/X2; 409 published, 4 dropped, 0 queued; 1 connects, 0 refusal(s), 0 error(s), 0 renewal(s), gave way 0 time(s); last error: none
-memory    heltec_v4 opens 2 slot(s) while free heap >= 56856 (one slot 30796 + the uplink's dip 5580 measured + floor 16384 + margin 4096) and the largest block >= 4096 (now 121304 and 65524); and psram >= 40960 with a 17408 block (now 1894320 and 1835008): the TLS buffers, its last call's lowest 115724; a call under the floor closes the highest slot for 10 min
+memory    heltec_v4 opens 2 slot(s) while free heap >= 45528 (one slot 19468 + the uplink's dip 5580 measured + floor 16384 + margin 4096) and the largest block >= 4096 (now 121304 and 65524); and psram >= 40960 with a 17408 block (now 1894320 and 1835008): the TLS buffers, its last call's lowest 115724; a call under the floor closes the highest slot for 10 min
 nbr: next in 22h 41m, last ok 1h 18m ago, 7 neighbours, 5 responded
 uplink    0 memory failure(s) so far, 41 call(s); the last 121304 free before, lowest 115724 during, 121180 after
 tls       buffers of 4096 bytes and over in psram: 9 allocation(s) routed there, 0 fell back to internal heap
@@ -321,12 +331,13 @@ stack     slot 1 task: 6144 bytes, the least ever free 2328
 stack     slot 2 task: 6144 bytes, the least ever free 2312
 ```
 
-That is a V4. A V3 prints one slot, `heltec_v3 opens 1 slot(s) while free heap >=
-89624 (one slot 63564 + the uplink's dip 5580 measured + floor 16384 + margin
-4096) and the largest block >= 17408 (now …)`, no `psram` figures, `tls buffers in
-internal heap (this board has no psram)` and one `stack` line; and if an older
-image left a slot 2 in it, `slot 2 meshmapper: off (this board has memory for
-one broker; a V4 carries two)`.
+That is a V4. A V3 prints the same two slots — `heltec_v3 opens 2 slot(s) while
+free heap >= 45528 (one slot 19468 + the uplink's dip 5580 measured + floor 16384
++ margin 4096) and the largest block >= 17408 (now …)` — with no `psram` figures
+and `tls buffers in internal heap (this board has no psram)` in place of the `tls`
+line above. A board whose profile opened one slot would show the second as
+`slot 2 meshmapper: off (this board has memory for one broker only)`; neither
+board this repository builds is such a board (task p1.9-37).
 
 **Read line by line**, because every number in it answers a question the bench
 asks:

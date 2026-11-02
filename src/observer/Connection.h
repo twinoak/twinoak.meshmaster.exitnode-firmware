@@ -34,7 +34,8 @@
 // that gives way when the uplink's call fails for want of memory, or - since task p1.8-31 -
 // when a call that went through dipped the heap under kHeapFloorBytes: the radio first, then
 // the MeshMaster uplink, then the observer (tasks/phase-1.7/27, tasks/phase-1.8/31). How many
-// slots a board opens at all is Board.h's: one on a Heltec V3, two on a V4.
+// slots a board opens at all is Board.h's: two on either board since task p1.9-37 measured
+// what a slot costs after the lighter TLS of p1.9-36.
 //
 // What is published, as the observer firmware does (agessaman/MeshCore observer-firmware at
 // d664d89d): every received packet as a `packets` message, QoS 0, not retained
@@ -150,9 +151,10 @@ using ReportLine = void (*)(void* ctx, LogLevel level, const char* line);
 
 // ---- the policy's numbers -------------------------------------------------------------------
 
-// The gate (task p1.8-31). What one slot costs and what the uplink's call dips are the board's
-// own figures (Board.h: measured on a Heltec V3 on 28 October 2026, derived for the V4), not the
-// observer firmware's 40 KB that task 27 borrowed. A slot opens while
+// The gate (tasks p1.8-31 and p1.9-37). What one slot costs and what the uplink's call dips are
+// the board's own figures (Board.h: measured on a Heltec V3 on 2 November 2026 after p1.9-36's
+// lighter TLS, and the same figures for a V4, which has no row of its own), not the observer
+// firmware's 40 KB that task 27 borrowed. A slot opens while
 //
 //   free internal heap >= board.slotInternalBytes + uplink dip + kHeapFloorBytes + kGateMarginBytes
 //
@@ -164,22 +166,30 @@ using ReportLine = void (*)(void* ctx, LogLevel level, const char* line);
 // After a slot is open the gate keeps watching: every uplink call's lowest free heap is read,
 // and one under kHeapFloorBytes closes the highest slot for kHeapYieldMs, counted as *gave way*.
 //
-// One of mbedtls's two content buffers as one allocation (CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN
-// 16 384 in this core's sdkconfig, not asymmetric, plus its header room): what the heap holding
-// the buffers must be able to allocate at all.
+// The larger of mbedtls's two content buffers as one allocation
+// (CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN 16 384 in sdkconfig.defaults since task p1.9-36, which
+// sizes the pair apart - 4 096 out - plus its header room): what the heap holding the buffers
+// must be able to allocate at all. Since 36 the buffer is taken when a record is in flight and
+// freed after it rather than held for the life of the connection, so this is a peak and not a
+// steady cost; it is still the one allocation a handshake cannot do without.
 constexpr uint32_t kTlsBufferBytes = 16 * 1024 + 1024;
 // On a board with PSRAM, mbedtls allocations of this size and over go there (src/platform/
 // TlsHeap.cpp), which is the core's own line for malloc (CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL
 // 4096); what stays internal is smaller than this, so this is what the largest internal block
-// must hold there.
+// must hold there. Since task p1.9-36 both content buffers are such an allocation once per
+// record rather than once per connection, so there are many more of them and they are the
+// board's PSRAM peak, not its PSRAM floor.
 constexpr uint32_t kPsramThresholdBytes = 4096;
 // What WiFi and the radio need to survive a call: not measured. The WiFi driver takes its
 // dynamic receive buffers from the internal heap as frames arrive (CONFIG_ESP32_WIFI_DYNAMIC_RX_
 // BUFFER_NUM 32 of about 1.6 KB, a few in flight at a time), lwIP its segments for the open
 // connections, the uplink's HTTP client its 1 KB chunk buffer and the reply's String, and the
-// console and the log a line each; 16 KB holds a handful of each twice over. The bench of 28 October saw a call
-// go through with 3 088 bytes free, so this floor is above survival and below comfort, and it is
-// the one constant the bench walk of this pile is most likely to move.
+// console and the log a line each; 16 KB holds a handful of each twice over. The bench of
+// 28 October saw a call go through with 3 088 bytes free, so this floor is above survival and
+// below comfort. It does not move with the walk of 2 November (task p1.9-37): the hour with a
+// slot up never came near it - 69 736 was the lowest the board ever saw, and two slots and a
+// handshake would leave about 50 000 - so there is no measurement either to raise it with or to
+// lower it with, and a floor that was never reached is a floor that has not been tested.
 constexpr uint32_t kHeapFloorBytes = 16 * 1024;
 // The gate's margin over the arithmetic: the heap's fragmentation and the slot's own outbox
 // while a call is in flight. Not measured; one allocation of the PSRAM threshold's size.

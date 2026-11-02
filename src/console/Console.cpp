@@ -95,7 +95,7 @@ void Console::help() {
   io_->println("  reboot");
   io_->printf("  erase %s       forget every setting; the identity stays\r\n", kEraseWord);
   io_->println("  get mqtt.presets    the broker presets an mqttN.preset can name");
-  io_->println("  get mqtt.status     the observer's broker slots (one on a V3, two on a V4): state, since, published, dropped, last error");
+  io_->println("  get mqtt.status     the observer's broker slots (two on either board): state, since, published, dropped, last error");
   io_->println("  get flood.scope     the region every flood carries, its transport key and the code of an example payload");
   io_->println("  discover.scopes     the repeaters heard at zero hops, and a cycle of the scope sweep now (the report goes to the brokers)");
   io_->println("keys:");

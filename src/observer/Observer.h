@@ -137,7 +137,7 @@ class Observer : public RxTap, public observer::StatusSource, public IHeartbeatO
   const char* lastNeighboursMessage() const { return neighbours_; }
   size_t lastNeighboursLength() const { return neighboursLen_; }
 
-  // How many slots this board opens (observer/Board.h: one on a V3, two on a V4), and whether
+  // How many slots this board opens (observer/Board.h: two on either board), and whether
   // slot `slot` is shown at all - the board's own, or one beyond them with a preset stored in
   // it, which is shown off with the reason rather than hidden.
   int slotsOnBoard() const { return link_.board().slots; }

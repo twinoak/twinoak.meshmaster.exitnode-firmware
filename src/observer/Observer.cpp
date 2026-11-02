@@ -266,8 +266,8 @@ bool Observer::describeObserver(HeartbeatObserver& out) {
   // `enabled_` is the console's own answer - at least one slot resolved and a region code to
   // build its topic from - and `get mqtt.status` is where its `why_` is read when it is false.
   if (!enabled_) return false;
-  // The board's own slots: one on a V3, two on a V4 (observer/Board.h). A slot beyond them is
-  // nothing MeshMaster needs a row for.
+  // The board's own slots: two on either board since task p1.9-37 (observer/Board.h). A slot
+  // beyond them is nothing MeshMaster needs a row for.
   const int shown = slotsOnBoard();
   for (int s = 0; s < shown; s++) {
     const observer::SlotView v = link_.view(s);

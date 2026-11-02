@@ -228,26 +228,29 @@ jobs:
               echo "**This is a dry run.** The images are the workflow's artifacts and nothing is published."
             fi
             # This release's own five lines. Version-specific, like the console section below:
-            # the task that ships a tag rewrites it (p1.8-35), and CHANGELOG.md is the per-tag record.
+            # the task that ships a tag rewrites it (p1.8-35, p1.9-37), and CHANGELOG.md is the per-tag record.
             cat <<'EOF'
 
-          ## What's new since v0.4.0
+          ## What's new since v0.5.0
 
-          - **One TLS connection to meshmaster.dk, kept between calls.** The handshake happens at the
-            first call and then only when the connection is gone, so a call costs a few kilobytes of
-            heap where it used to cost tens of them. `status`'s new `uplink` line counts the handshakes
-            against the calls and says what the last call cost.
-          - **The observer fits.** The heap gate is built from what this board was measured to cost and
-            keeps watching after a slot is open: a MeshMaster call that dips under the floor closes the
-            highest slot for ten minutes. **One slot on a Heltec V3, two on a V4**, whose TLS buffers go
-            to its PSRAM.
-          - **A flood scope of its own.** Every flood now carries the transport code of the region
-            `flood.scope` names - `dk` out of the box - and the second flood of a transaction drops it,
-            so a repeater with no region map yet is still found.
-          - **Naboer, and the status fields MeshView left empty.** The repeaters this node hears at
-            zero hops and the scopes each one answers are published once a day (MeshView's *Direct
-            neighbours*), and the status message carries the noise floor, the air time and the battery.
-          - **MeshCore companion 1.18** (`81dbae59`), the commit the field repeaters run.
+          - **A lighter TLS: a V3 runs the observer beside its MeshMaster connection again.** The
+            ESP-IDF is built from source under the same Arduino core, with mbedtls's TLS content
+            buffers allocated while a record is in flight instead of held for the life of a
+            connection. Nothing the firmware does changed; what changed is what a connection costs.
+          - **Two broker slots on both boards.** Measured on a Heltec V3 on 2 November: a broker
+            connection costs **19 468** bytes of heap where it cost 63 564, and the MeshMaster
+            uplink's handshake dips **26 404** where it dipped 81 116 - so a V3 with 120 392 bytes
+            free keeps two brokers and a handshake with about 55 000 to spare, and
+            `set mqtt2.preset meshmapper` now takes on a V3 as it does on a V4. The heap gate is
+            unchanged and still decides board by board: a slot the heap cannot take waits, and a
+            MeshMaster call that comes near the floor closes the highest slot for ten minutes.
+            `get mqtt.status`'s `memory` line prints the whole sum. **Two slots on a V4 are expected,
+            not walked** - no V4 was at hand on 2 November, so its figures are the V3's measured ones
+            and its PSRAM share is derived.
+          - **Smaller images, by about 58 KB of flash**, which is DTLS and the components this build
+            does not have; static RAM moves by under a kilobyte.
+          - **Nothing else moved.** No setting, no console line, no message on the air and no
+            interface: the only change is the build underneath.
           EOF
             echo
             echo "## Flashing"
@@ -274,10 +277,16 @@ jobs:
             the board's key. **Never upgrade with the `-merged.bin`**: the erase takes the key with it,
             and the exit node then needs a new token and its associations made again, because the
             repeaters know it by that key.
-          - **An upgrade needs nothing typed.** Every setting the board already has is kept, and the
-            settings this release adds start at their defaults: `flood.scope` `dk`,
-            `flood.unscoped` `retry`, `mqtt.neighbors` `on`, `mqtt.neighbors.interval` `24` hours.
-            A V3 carrying a second broker slot from v0.4.0 is the one thing to look at - below.
+          - **An upgrade needs nothing typed.** Every setting the board already has is kept, and this
+            release adds none. The one thing a V3 gains is its second broker slot, which it will now
+            open - below.
+          - **The `-merged.bin`'s bootloader is new in this release, and untried on a board.** It is
+            built from source with this release (13 936 bytes where the core's precompiled one was
+            15 104), with the same header, the same flash mode, size and frequency, and the same
+            partition table byte for byte - but no board has been flashed from 0x0 with it yet. The
+            plain `.bin` does not touch it, so an **upgrade is unaffected**. A **first install** is
+            the case to watch: if a board stays silent after the flash instead of printing its banner
+            at 115200, that is this, and `v0.5.0`'s `-merged.bin` is the way back.
 
           `SHA256SUMS` lists every file.
 
@@ -309,24 +318,23 @@ jobs:
           get mqtt.status
           ```
 
-          On a **Heltec V4**, add MeshMapper as the second broker: `set mqtt2.preset meshmapper`.
+          **On either board, add MeshMapper as the second broker**: `set mqtt2.preset meshmapper`.
+          Until this release a Heltec V3 had memory for one broker only and answered that line with a
+          refusal; the lighter TLS above took a broker connection from 63 564 bytes of heap to
+          19 468, and the walk of 2 November measured a V3 keeping two brokers and a MeshMaster
+          handshake with about 55 000 bytes still free. A V3 upgraded from v0.5.0 with a second slot
+          stored in it opens that slot now instead of showing it off with the reason.
 
-          **On a Heltec V3, set MeshView only.** A V3 has memory for one broker beside its
-          MeshMaster connection, and a second one just waits for memory that never comes.
-          Leave MeshMapper to the V4s. Since this release the firmware says so instead of waiting:
-          `set mqtt2.preset meshmapper` on a V3 answers
-
-          ```
-          error: mqtt2.preset: this board has memory for one broker; a V4 carries two
-          ```
-
-          and a V3 upgraded from v0.4.0 with a second slot already stored shows it as
-          `slot 2 meshmapper: off (this board has memory for one broker; a V4 carries two)` on
-          `get mqtt.status`, with one slot in `status`'s `observer` line and on the exit node's page.
+          The gate has not changed and is still what decides, board by board: a slot the heap cannot
+          take stays `waiting-for-heap` and looks again every five seconds, and a MeshMaster call
+          that comes near the floor closes the highest slot for ten minutes and counts it as `gave
+          way`. `get mqtt.status`'s `memory` line prints the sum a slot opens above and the heap as
+          it is now. On a V4 the TLS buffers go to its PSRAM; **two slots on a V4 are expected, not
+          walked** - the figures are the V3's.
 
           `mqtt.iata` is your region: `AAL`, `AAR`, `BLL`, `ODE`, `CPH` or `RNN`. `mqtt.owner` is
-          optional. The Danish observer guide's lines (`set mqtt1.preset custom`, …) work as typed too,
-          except its MeshMapper line on a V3.
+          optional. The Danish observer guide's lines (`set mqtt1.preset custom`, …) work as typed
+          too, every one of them on both boards.
 
           **Naboer (neighbours)**: the board also publishes the repeaters it hears at zero hops and
           the scopes each one answers with — MeshView's *Direct neighbours* — once a day. Nothing to
