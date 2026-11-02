@@ -4,6 +4,13 @@
 .piolibdeps/
 platformio.local.ini
 
+# The ESP-IDF's generated configuration, one per board environment, seeded from the committed
+# sdkconfig.defaults (task p1.9-36); and what its component manager would write if it ever ran
+sdkconfig.*
+!sdkconfig.defaults
+dependencies.lock
+managed_components/
+
 # What a session leaves behind for a reviewer to read (tasks/README.md: leave the evidence)
 out/
 tasks/*/logs/

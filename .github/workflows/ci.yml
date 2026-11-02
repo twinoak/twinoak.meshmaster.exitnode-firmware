@@ -4,7 +4,14 @@
 #                       artifact. heltec_v3 and heltec_v4 since task p1-06. Then -t mergebin and
 #                       tools/check-partitions.py against the merged image: the partition table
 #                       the environment names is the framework default's with NVS above the
-#                       application, and the image ends before NVS begins (task p1.2-11)
+#                       application, and the image ends before NVS begins (task p1.2-11). Since
+#                       task p1.9-36 the build compiles the ESP-IDF from source under the
+#                       committed sdkconfig.defaults (Arduino as a component), so the step after
+#                       it is tools/check-sdkconfig.py: that file is the Arduino core's own
+#                       configuration but for the TLS keys it lists, and the generated
+#                       sdkconfig.<board> of the build carries them. The cache key names the
+#                       file too, because the ESP-IDF's python environment and tools are keyed
+#                       by it as much as by platformio.ini
 #   native tests        pio test -e native (the host tests: no board, no radio), which since task
 #                       p1.5-16 compiles lib/agent-core whole - the job runner and the agent loop
 #                       among it - and whose test/test_library holds the library's boundary.
@@ -21,9 +28,10 @@
 #                       runner's GCC, which is the consumer's and is named in the log
 #                       (tools/check-library-host.py); and its ESP-IDF component file parsed and
 #                       held against the sources on disk (tools/check-idf-component.cmake). The
-#                       component is not *built* anywhere in this repository - there is no
-#                       ESP-IDF in its toolchain - and the Walter firmware's phase 4 is where it
-#                       first compiles
+#                       component is not *built* anywhere in this repository - the boards' ESP-IDF
+#                       build of p1.9-36 takes the library through PlatformIO's own dependency
+#                       finder, not as a component - and the Walter firmware's phase 4 is where
+#                       it first compiles
 #   fixtures            tools/sync-fixtures.ps1 -Verify - the contract fixtures and the
 #                       transcribed companion frames are still meshmaster.dk's bytes and nobody
 #                       edited one here
@@ -86,8 +94,12 @@ jobs:
         with:
           python-version: "3.11"
 
-      # The toolchain and every library, keyed by the file that decides them: a hit turns a
-      # four-minute cold build into seconds. MeshCore is a git dependency, so the pin is in the key.
+      # The toolchain and every library, keyed by the files that decide them: a hit turns a cold
+      # build into a warm one. MeshCore is a git dependency, so the pin is in the key; since task
+      # p1.9-36 so is sdkconfig.defaults, which decides the ESP-IDF's python environment and the
+      # tools (cmake, ninja) the component build installs under ~/.platformio. What the cache
+      # cannot hold is the compiled ESP-IDF itself: .pio/ is the job's own and is not cached, so
+      # every run compiles the ESP-IDF from source (the report of p1.9-36 gives the minutes).
       # Every job here runs on a runner that is new, with nothing on disk, so the cache is
       # unconditional - as is the one in the native job below (task p1.8-29).
       - name: Cache PlatformIO
@@ -96,15 +108,33 @@ jobs:
           path: |
             ~/.platformio
             ~/.cache/pip
-          key: pio-${{ runner.os }}-${{ env.PIO_VERSION }}-${{ hashFiles('platformio.ini') }}
+          key: pio-${{ runner.os }}-${{ env.PIO_VERSION }}-${{ hashFiles('platformio.ini', 'sdkconfig.defaults') }}
           restore-keys: |
             pio-${{ runner.os }}-${{ env.PIO_VERSION }}-
 
       - name: Install PlatformIO Core
         run: pip install --quiet "platformio==${PIO_VERSION}"
 
+      # Timed, because the ESP-IDF is compiled here from source: the step summary says how long,
+      # for the day the figure matters.
       - name: Build
-        run: pio run -e ${{ matrix.env }}
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          pio run -e ${{ matrix.env }}
+          echo "build (${{ matrix.env }}): $(( $(date +%s) - start )) s, ESP-IDF from source" >> "$GITHUB_STEP_SUMMARY"
+
+      # The configuration the ESP-IDF was just built with is the Arduino core's own, but for the
+      # TLS keys tools/check-sdkconfig.py lists with their reasons: anything else that differs is a
+      # red build, and so is a core on disk other than the one the file was copied from. --built
+      # reads the sdkconfig.<board> the build generated and holds the same keys against it, so a
+      # default that did not take (a dependency unmet, a key the Kconfig does not know) is seen
+      # here and not on a board (task p1.9-36). The self-test first: the differences it must refuse.
+      - name: The ESP-IDF configuration is the core's, but for the TLS keys
+        run: |
+          set -euo pipefail
+          python tools/check-sdkconfig.py --self-test
+          python tools/check-sdkconfig.py --built ${{ matrix.env }}
 
       # The merged image is what a board out of the box is flashed with, and the partition table
       # it carries is where NVS, SPIFFS (the identity) and the application live. The check holds

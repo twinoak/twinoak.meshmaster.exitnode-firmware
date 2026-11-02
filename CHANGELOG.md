@@ -20,6 +20,15 @@ this repository changed and why is in `tasks/phase-*/reports/`.
 A task that moves one of the four things above adds its line here in the same
 pull request, as `docs/` moves with code.
 
+## Unreleased
+
+- **No interface moved; the build did** (task p1.9-36). The boards are built
+  with the ESP-IDF compiled from source under a committed `sdkconfig.defaults`
+  (*Arduino as an ESP-IDF component*, the same core 2.0.17 and ESP-IDF 4.4.7),
+  so that mbedtls's TLS buffers are allocated per record rather than per
+  connection. Nothing of `lib/agent-core/` changed: not an interface, not a
+  constant, not a fixture, not the version. A consumer pins what it pinned.
+
 ## v0.5.0 — the uplink's one connection, an observer that fits, a flood with a scope, and the neighbours
 
 Pile 1.8, tasks 30 to 34 (`tasks/phase-1.8/`), released by task 35.
