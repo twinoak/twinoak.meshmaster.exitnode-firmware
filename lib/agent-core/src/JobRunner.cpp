@@ -132,6 +132,12 @@ uint32_t JobRunner::loginWaitMs(const ClaimedJob& job) const {
 
 bool JobRunner::spend(const ClaimedJob& job, Context& ctx, bool escape) {
   if (!escape && leaseRanOut(job)) return false;
+  // A job this mesh answers without the air (IMesh::answersLocally, task p1.10-40) skips the gate
+  // altogether: no wait, no `took` - so it is given no slot and takes none from the job after it -
+  // and no transaction, because a transaction is an exchange with a repeater **over the mesh**
+  // (EXIT-NODES §7) and this was not one. The lease above still holds, because a lease is the
+  // server's claim on the repeater and says nothing about the air.
+  if (mesh_->answersLocally()) return true;
   uint32_t wait = gate_.waitMs(millis());
   if (wait > 0) {
     // A budget of two a minute means most of a job is waiting. Never wait past the lease: the
@@ -1396,6 +1402,11 @@ Outcome JobRunner::runJob(const ClaimedJob& job, Context& ctx, size_t& dataLen) 
   }
   if (hops == 0 && job.hasPath && job.pathCount == 0) mesh_->setDirectPath();  // a direct neighbour
   g_log.add("path %s", mesh_->hasPath() ? "from the server" : "unknown: the mesh floods");
+  // The local door (IMesh::answersLocally, task p1.10-40), said once on the job's page: this is
+  // why the result reports no transaction and why the job was not paced by the airtime budget.
+  if (mesh_->answersLocally()) {
+    g_log.add("this mesh answers for this repeater without the air: no airtime budget, no transaction");
+  }
 
   if (std::strcmp(job.type, "status") == 0) return runStatus(job, ctx, dataLen);
   if (std::strcmp(job.type, "telemetry") == 0) return runTelemetry(job, ctx, dataLen);

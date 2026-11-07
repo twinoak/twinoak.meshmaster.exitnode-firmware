@@ -22,6 +22,32 @@ pull request, as `docs/` moves with code.
 
 ## Unreleased
 
+- **A job your mesh answers locally is not on the air, and is no longer paced
+  like it** (task p1.10-40). **One method was added to `IMesh`**, `virtual`
+  **with a body** — `bool answersLocally() const`, true from a `beginJob` for a
+  repeater your mesh reaches by something other than the mesh until that job's
+  `endJob`, defaulting to **false** — so a consumer's tree compiles untouched
+  and a mesh that overrides nothing is paced exactly as it was. `AgentMesh`
+  keeps the default: the Heltec's radio is its own and it has no local door.
+  `JobRunner::spend` now skips the airtime gate for such a job: **no wait, no
+  slot spent and no transaction counted**, because a transaction is an exchange
+  with a repeater *over the mesh* (EXIT-NODES §7) and the budget exists to share
+  one radio channel (§8). The lease is unchanged and still ends the job. **For
+  the first consumer this is the fix of a reset**: a 34-line `config.read` of a
+  repeater-v2 unit's own repeater, served over the UART through `LinkMesh`'s
+  local door, was paced at the server's *2 a minute, gap 20 s* and waited about
+  40 s before its third line — which outlived the Walter's 30 s task watchdog on
+  7 November 2026 — and would have taken eleven minutes for air it never used.
+  **Nothing else of a pin moved**: not `IUplink`, `IPlatform`, `IClock`,
+  `IJobExtension`, `JobContext`, `ResultWriter` or `TextOut`, not `JobReport`,
+  not `kMeshReplyDataCap` or `kMeshPathCap`, not a fixture, not the version.
+  What a consumer sees on the wire is a local job's `transactions` falling to
+  **0** where it used to count its exchanges, and a result's log carrying one
+  more line, *this mesh answers for this repeater without the air*; a consumer
+  whose own tests assert a transaction count for a mesh that overrides the new
+  method is the one thing to look at. A consumer that implements it must make it
+  true for the **whole** of such a job — the library reads it per `spend`, not
+  once per job — and false again between jobs.
 - **A trace to a direct neighbour goes at the board's width, not one byte**
   (task p1.10-39). **One method was added to `IMesh`**, `virtual`
   **with a body** — `uint8_t floodPathHashSize() const`, the path-hash width

@@ -159,6 +159,33 @@ class IMesh {
   // nothing on the path can follow.
   virtual uint8_t floodPathHashSize() const { return 2; }
 
+  // ------------------------------------------------------------------ the local door
+
+  // **This job is answered without the air** (task p1.10-40): true from a beginJob() for a
+  // repeater this mesh reaches by something other than the mesh, until the endJob() that closes
+  // that job - and false between jobs. The one such mesh is the repeater-v2 unit's Walter, whose
+  // own radio is wired to it over a UART: a job for *that* radio is served over the link (the
+  // *local door* of `components/agent/include/walter_agent/link_mesh.h` in
+  // twinoak.meshcore.walter-firmware) and nothing leaves an antenna.
+  //
+  // Such a job **neither waits for the airtime budget nor spends it**, and its exchanges count
+  // no transaction. The budget exists to share one radio channel (EXIT-NODES §8), and a job that
+  // never touches the channel has nothing to share: before this, a 34-line `config.read` of a
+  // unit's own repeater was paced at the default *2 a minute, gap 20 s* and spent eleven minutes
+  // waiting for air it was not going to use - on 7 November 2026 the first of those waits, about
+  // 40 s, outlived the Walter's task watchdog and reset it mid-job.
+  //
+  // Two things do **not** change for a local job. The **lease** still ends it: a lease is the
+  // server's claim on the repeater and says nothing about the air. And the result's
+  // `transactions` stays what EXIT-NODES §7 defines it as - "one request/response exchange with
+  // one repeater over the mesh" - so a local job reports **0** of them, which is the reading that
+  // keeps meshmaster.dk's planned load a figure about the air.
+  //
+  // The default is **false**: a mesh that overrides nothing is on the air for every job, which is
+  // what every mesh was until now and what this board's `AgentMesh` is - the Heltec's radio is
+  // its own and it has no local door. Cheap, const, never blocks.
+  virtual bool answersLocally() const { return false; }
+
   // ------------------------------------------------------------------ a job's exchanges
 
   // The repeater this job is for, and the path the server knows to it (the hop hashes as the
