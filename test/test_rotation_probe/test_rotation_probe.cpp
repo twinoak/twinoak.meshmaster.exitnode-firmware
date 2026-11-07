@@ -12,6 +12,12 @@
 // guest password in the claim, `guest` - against the one case that is, an admin job with no admin
 // password.
 //
+// And, since task p1.10-41, **the local door**: a job the mesh answers without the air
+// (`IMesh::answersLocally`) is answered by the board at the other end of the seam, at admin,
+// whatever the login carried - so the material is the empty string at every class, `admin`
+// included, and a unit configures its own repeater with no password stored anywhere. Every branch
+// of the decision is walked twice below, once through the door and once on the air.
+//
 // The policy is lib/agent-core/src/LoginSequence.cpp; the board's exchange is JobRunner's
 // LoginOnTheAir and
 // probeReachable, which a host cannot run, so the last tests hold that file's text to what the
@@ -287,9 +293,9 @@ struct Material {
   std::string note;
 };
 
-Material materialOf(const mm::ClaimedJob& job) {
+Material materialOf(const mm::ClaimedJob& job, bool answeredLocally = false) {
   char note[mm::kLoginNoteCap] = {0};
-  const char* m = mm::loginMaterialFor(job, note, sizeof note);
+  const char* m = mm::loginMaterialFor(job, answeredLocally, note, sizeof note);
   return Material{m, std::string(note)};
 }
 
@@ -385,6 +391,86 @@ TEST(GuestDoor, TheDiscoverAtGuestReportsThePathAndLoggedInAsGuest) {
   EXPECT_EQ(std::string(out, len), "{\"path\":{\"hops\":[\"a1b2c3\"],\"source\":\"login\"},\"loggedInAs\":\"guest\"}");
 }
 
+// ------------------------------------------------------------------ the local door (task p1.10-41)
+
+// A job the mesh answers **without the air** (IMesh::answersLocally, task p1.10-40) is answered
+// by the board at the other end of the seam - the repeater-v2 unit's Walter, whose local door
+// answers a login at admin whatever it carried. So the material is the empty string at **every**
+// class, never `nullptr`, with one line in the job's log; and the four classes are walked here
+// twice, once with material in the claim and once without.
+TEST(LocalLogin, ALocalJobLogsInWithNoMaterialAtEveryClass) {
+  const struct {
+    mm::CredentialClass c;
+    const char* type;
+    const char* name;
+  } classes[] = {
+      {mm::CredentialClass::Admin, "config.read", "admin"},
+      {mm::CredentialClass::Guest, "status", "guest"},
+      {mm::CredentialClass::Acl, "status", "acl"},
+      {mm::CredentialClass::None, "trace", "none"},
+  };
+  const std::string expected = "answered by the board, no password needed: the empty material at class ";
+  for (const auto& k : classes) {
+    EXPECT_STREQ(mm::credentialClassName(k.c), k.name) << "the class's own word, which the line names";
+
+    // No material in the claim: what meshmaster.dk hands a unit for its own repeater from the
+    // Walter that has this (its task p4.27-175) - nothing, at any class.
+    const mm::ClaimedJob bare = jobAt(k.type, k.c);
+    const Material none = materialOf(bare, /*answeredLocally=*/true);
+    ASSERT_NE(none.material, nullptr) << k.name << ": a local login is never *nothing to log in with*";
+    EXPECT_STREQ(none.material, "") << k.name;
+    EXPECT_EQ(none.note, expected + k.name) << k.name;
+    EXPECT_FALSE(mm::probesBetweenTries(bare.credentialCandidate, none.material))
+        << k.name << ": an empty material is the blank login itself, so a local job never probes";
+
+    // And with material: an older server, or a password typed for this one job under prompt
+    // custody. The door does not look at it, so it is not sent - and it is not in the line.
+    mm::ClaimedJob carried = jobAt(k.type, k.c);
+    carried.credential.setAdminPassword("adm1n-pass");
+    carried.credential.setGuestPassword("gu3st-pass");
+    const Material with = materialOf(carried, /*answeredLocally=*/true);
+    ASSERT_NE(with.material, nullptr) << k.name;
+    EXPECT_STREQ(with.material, "") << k.name << ": a password the door would ignore is not sent";
+    EXPECT_EQ(with.note, none.note) << k.name << ": the same line, whatever the claim carried";
+    EXPECT_EQ(with.note.find("adm1n"), std::string::npos) << "no log line takes the value";
+    EXPECT_EQ(with.note.find("gu3st"), std::string::npos) << "nor the guest one";
+  }
+}
+
+// The job meshmaster.dk refused on 7 November 2026, both ways round: job 22016 was a
+// `config.read` of a unit's **own** repeater at `admin` with no password stored anywhere.
+TEST(LocalLogin, TheSameAdminClaimRunsThroughTheDoorAndStillRefusesOnTheAir) {
+  const mm::ClaimedJob job = jobAt("config.read", mm::CredentialClass::Admin);
+
+  const Material local = materialOf(job, /*answeredLocally=*/true);
+  ASSERT_NE(local.material, nullptr);
+  EXPECT_STREQ(local.material, "");
+
+  // Not local, and nothing changes: there is no admin login without an admin password.
+  const Material air = materialOf(job, /*answeredLocally=*/false);
+  EXPECT_EQ(air.material, nullptr) << "a repeater on the air still needs the password it keeps";
+  EXPECT_EQ(air.note, "the claim carried no admin material; nothing to log in with");
+}
+
+// A password longer than the firmware keeps is cut, and said so, for a login that goes out. A
+// local job sends none, so there is nothing to cut and nothing to say about it.
+TEST(LocalLogin, ALocalJobGetsNoCutLineBecauseNothingOfThePasswordIsSent) {
+  mm::ClaimedJob job = jobAt("cli", mm::CredentialClass::Admin);
+  job.credential.setAdminPassword("0123456789abcdefghij");
+  ASSERT_TRUE(job.credential.adminPasswordCut) << "the claim did carry more than the companion keeps";
+
+  const Material local = materialOf(job, /*answeredLocally=*/true);
+  EXPECT_STREQ(local.material, "");
+  EXPECT_EQ(local.note.find("longer than"), std::string::npos) << local.note;
+  EXPECT_EQ(local.note.find("0123456789"), std::string::npos) << "no log line takes the value";
+
+  // On the air it is the cut password and the line that says so, as before.
+  const Material air = materialOf(job, /*answeredLocally=*/false);
+  ASSERT_NE(air.material, nullptr);
+  EXPECT_EQ(std::strlen(air.material), mm::kMaxPasswordLen);
+  EXPECT_NE(air.note.find("the admin password is longer than 15 bytes"), std::string::npos) << air.note;
+}
+
 // ------------------------------------------------------------------ the board's half, on its text
 
 // A host cannot run JobRunner, so what the probe must and must not do on the air is held on the
@@ -465,10 +551,13 @@ TEST(GuestDoorOnTheBoard, TheRunnerTakesItsMaterialFromThePolicyAndSendsNothingW
   ASSERT_NE(from, std::string::npos);
   ASSERT_NE(to, std::string::npos);
   const std::string body = runner.substr(from, to - from);
-  EXPECT_NE(body.find("loginMaterialFor(job, note, sizeof note)"), std::string::npos)
-      << "one decision, on a host; the runner only puts its line in the job's log";
+  EXPECT_NE(body.find("loginMaterialFor(job, mesh_->answersLocally(), note, sizeof note)"), std::string::npos)
+      << "one decision, on a host; the runner only asks the mesh whether the door answers and puts the line in the "
+         "job's log";
   EXPECT_EQ(body.find("hasGuestPassword"), std::string::npos) << "the branch lives in LoginSequence.cpp";
   EXPECT_EQ(body.find("hasAdminPassword"), std::string::npos);
+  EXPECT_EQ(body.find("if (mesh_->answersLocally())"), std::string::npos)
+      << "the door is an argument of the decision and not a branch of the runner's own (task p1.10-41)";
 
   const size_t ensure = runner.find("Outcome JobRunner::ensureSession(");
   const size_t probe = runner.find("bool JobRunner::probeReachable(", ensure);

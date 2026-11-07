@@ -175,6 +175,14 @@ class IMesh {
   // waiting for air it was not going to use - on 7 November 2026 the first of those waits, about
   // 40 s, outlived the Walter's task watchdog and reset it mid-job.
   //
+  // Such a job also **logs in with no material at all** (task p1.10-41): the door answers the
+  // login itself, at admin, whatever it carried, so `loginMaterialFor` answers the empty string
+  // at every class - `admin` included, where a claim with no password is otherwise *nothing to
+  // log in with* and the job is refused unsent. A unit therefore configures its own repeater with
+  // no admin password stored anywhere, and a password the claim did carry is not sent to a door
+  // that would ignore it. If your mesh answers true, the login you are handed may be the blank
+  // one at any class.
+  //
   // Two things do **not** change for a local job. The **lease** still ends it: a lease is the
   // server's claim on the repeater and says nothing about the air. And the result's
   // `transactions` stays what EXIT-NODES §7 defines it as - "one request/response exchange with

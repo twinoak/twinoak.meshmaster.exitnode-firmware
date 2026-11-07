@@ -127,6 +127,10 @@ struct Send {
   uint8_t reqType = 0;  // Request only
   std::string text;     // Cli only
   bool sensitive = false;
+  // Login only: the login carried a password, rather than the empty material of the ACL login,
+  // the guest door or a job the mesh answers locally (task p1.10-41). The **value** is never
+  // kept here - what a test asserts is that a login carried one or did not.
+  bool withMaterial = false;
   bool answered = false;  // a reply was delivered for this send
   // Which shape a flood went out in (IMesh::setFloodMode, task p1.8-32); false for a direct send
   // and for a mesh whose scope is `*`.
@@ -204,8 +208,13 @@ class FakeMesh : public mm::IMesh {
   // This mesh answers for the repeater without the air (IMesh::answersLocally, task p1.10-40):
   // the Walter's *local door*, where the radio a job is for is the one wired to the board. The
   // repeater behind the fake answers exactly the same bytes either way - it is a repeater and not
-  // a radio - so what a test of the door asserts is the **pacing**, which is the whole of the
-  // library's side of it. False by default, as the interface is and as this board's mesh is.
+  // a radio - so what a test of the door asserts is the **pacing** and, since task p1.10-41, the
+  // **material** the login carries (`loginsWithMaterial`). Those two are the library's whole side
+  // of the door. The real door answers a login *at admin whatever it carried*
+  // (`LinkMesh::localLogin`); this fake is a stock repeater and answers an empty login at the
+  // level its ACL holds this board's key at, so a test that wants a local **admin** session says
+  // `grant(self(), kPermAdmin)` and gets the same answer by the stock route. False by default, as
+  // the interface is and as this board's mesh is.
   void setAnswersLocally(bool local) { answersLocally_ = local; }
   // answer: flood-scope - which shape of flood reaches this repeater at all. A repeater with no
   // region map drops a `dk` flood it would have forwarded unscoped, and a mesh of repeaters
@@ -269,6 +278,16 @@ class FakeMesh : public mm::IMesh {
     return n;
   }
   int logins() const { return count(Send::Kind::Login); }
+  // How many of those logins carried a password at all (task p1.10-41): a job the mesh answers
+  // locally must log in with none, at every class, and this is how a test sees that the claim's
+  // password stayed where it was.
+  int loginsWithMaterial() const {
+    int n = 0;
+    for (const Send& s : sends_) {
+      if (s.kind == Send::Kind::Login && s.withMaterial) n++;
+    }
+    return n;
+  }
   // The shape of every flood that went out, in order: true scoped, false unscoped. A direct send
   // contributes nothing.
   std::vector<bool> floodShapes() const {
@@ -411,6 +430,7 @@ class FakeMesh : public mm::IMesh {
     const bool direct = note(Send::Kind::Login, senderTimestamp);
     const std::string offered =
         password == nullptr ? std::string() : std::string(password).substr(0, mm::kMaxPasswordLen);
+    sends_.back().withMaterial = !offered.empty();
     const mm::SendResult how = direct ? mm::SendResult::Direct : mm::SendResult::Flood;
     if (!reachable()) return how;
 

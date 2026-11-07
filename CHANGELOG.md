@@ -22,6 +22,35 @@ pull request, as `docs/` moves with code.
 
 ## Unreleased
 
+- **A job your mesh answers locally logs in with no password, at every class**
+  (task p1.10-41). **No method of `IMesh` moved**; what moved is one free
+  function of a public header, `loginMaterialFor`
+  (`agent/LoginSequence.h`), which took a new second parameter — `bool
+  answeredLocally` — and is a **compile error in your tree only if you call it
+  yourself**, which a consumer has no reason to: `JobRunner` is its one caller
+  and asks `IMesh::answersLocally()` for the argument. The decision it makes is
+  now the door's first: for a job your mesh answers without the air the material
+  is the **empty string at every class**, `admin` included, where a claim with no
+  password used to answer *nothing to log in with* and the job was `unauthorized`
+  **unsent**. A password the claim did carry is not sent either — the door would
+  ignore it — and the job's log says *answered by the board, no password needed*.
+  For a job that is **not** local nothing changes at all, down to the log line:
+  `admin` with no admin password still refuses, at no transaction. The ACL
+  restore is untouched and still gated on the level the claim carried, so a local
+  job that carried none restores nothing. **For the first consumer this is the
+  fix of a refusal**: every CLI job of a unit's own repeater (`cli`, `reboot`,
+  `config.apply`, `clock.sync`, `advert.request`, `acl.set`, `password.set`) is
+  `admin`-class, and on 7 November 2026 meshmaster.dk refused a scheduled
+  `config.read` of the first repeater-v2 unit's own radio with *no admin password
+  stored* — the radio's settings had been lost, so its admin password was a
+  random one nobody knows. A unit now configures its own repeater with no
+  password stored anywhere, and meshmaster.dk hands none at any class for such a
+  pair (`AgentProtocol.DecideAsync`, its task p4.27-175, keyed to the consumer's
+  reported version). **Nothing else of a pin moved**: not `IUplink`,
+  `IPlatform`, `IClock`, `IJobExtension`, `JobContext`, `ResultWriter` or
+  `TextOut`, not `kMeshReplyDataCap` or `kMeshPathCap`, not a fixture, not the
+  version. A consumer whose mesh answers `answersLocally()` true must expect the
+  **blank** login at any class, including `admin`.
 - **A job your mesh answers locally is not on the air, and is no longer paced
   like it** (task p1.10-40). **One method was added to `IMesh`**, `virtual`
   **with a body** — `bool answersLocally() const`, true from a `beginJob` for a
