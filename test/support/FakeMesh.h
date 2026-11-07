@@ -201,6 +201,12 @@ class FakeMesh : public mm::IMesh {
   void setFloodScope(const std::string& scope) { floodScope_ = scope; }
   // The path-hash width this mesh floods at (IMesh::floodPathHashSize), two bytes by default.
   void setFloodPathHashSize(uint8_t bytes) { floodPathHashSize_ = bytes; }
+  // This mesh answers for the repeater without the air (IMesh::answersLocally, task p1.10-40):
+  // the Walter's *local door*, where the radio a job is for is the one wired to the board. The
+  // repeater behind the fake answers exactly the same bytes either way - it is a repeater and not
+  // a radio - so what a test of the door asserts is the **pacing**, which is the whole of the
+  // library's side of it. False by default, as the interface is and as this board's mesh is.
+  void setAnswersLocally(bool local) { answersLocally_ = local; }
   // answer: flood-scope - which shape of flood reaches this repeater at all. A repeater with no
   // region map drops a `dk` flood it would have forwarded unscoped, and a mesh of repeaters
   // running `flood.max.unscoped=0` never carries an unscoped one. Both reach it by default.
@@ -325,6 +331,8 @@ class FakeMesh : public mm::IMesh {
   // bytes, as the Heltec's `AgentMesh::kFloodPathHashSize` is and as the rail asks. A test that
   // wants to see the library *ask* rather than assume says `setFloodPathHashSize(4)`.
   uint8_t floodPathHashSize() const override { return floodPathHashSize_; }
+  // Whether a job of this mesh is served off the air (IMesh::answersLocally, task p1.10-40).
+  bool answersLocally() const override { return answersLocally_; }
 
   void setRing(mm::ObservationRing* ring) override { ring_ = ring; }
   mm::ObservationRing* ring() const { return ring_; }
@@ -1013,6 +1021,7 @@ class FakeMesh : public mm::IMesh {
   std::string regionListing_ = "* F\n dk F\n";
   std::string floodScope_;
   uint8_t floodPathHashSize_ = 2;
+  bool answersLocally_ = false;
   mm::FloodMode nextMode_ = mm::FloodMode::Scoped;
   bool scopedReaches_ = true;
   bool unscopedReaches_ = true;

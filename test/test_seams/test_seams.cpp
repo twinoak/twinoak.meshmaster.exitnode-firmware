@@ -272,6 +272,43 @@ TEST(Seams, TheMeshTellsTheLibraryTheWidthItFloodsAt) {
   EXPECT_EQ(runner.find("hashSize = 1"), std::string::npos) << "the library picks no path-hash width of its own";
 }
 
+// The local door (task p1.10-40): the mesh says a job is answered off the air, and the gate is
+// the only thing that changes. The shape of the decision, in one place - the default is false, so
+// a consumer's tree compiles and behaves as it did; this board has no local door and keeps it;
+// and in `spend` the lease is checked **before** the door is read, because a lease is the
+// server's claim on the repeater and has nothing to do with the air.
+TEST(Seams, TheMeshTellsTheLibraryWhenAJobIsNotOnTheAir) {
+  const fs::path root(PROJECT_DIR);
+  const std::string iface = readFile(root / "lib/agent-core/include/agent/IMesh.h");
+  EXPECT_NE(iface.find("virtual bool answersLocally() const { return false; }"), std::string::npos)
+      << "the default is the air, so a mesh that overrides nothing is paced as it always was";
+
+  const std::string mesh = readFile(root / "src/mesh/AgentMesh.h");
+  EXPECT_EQ(mesh.find("answersLocally"), std::string::npos)
+      << "this board's radio is its own: AgentMesh keeps the interface's default";
+
+  const std::string runner = readFile(root / "lib/agent-core/src/JobRunner.cpp");
+  const size_t from = runner.find("bool JobRunner::spend(const ClaimedJob& job, Context& ctx, bool escape) {");
+  ASSERT_NE(from, std::string::npos);
+  const size_t to = runner.find("\n}\n", from);
+  ASSERT_NE(to, std::string::npos);
+  const std::string body = runner.substr(from, to - from);
+  const size_t lease = body.find("if (!escape && leaseRanOut(job)) return false;");
+  const size_t local = body.find("if (mesh_->answersLocally()) return true;");
+  const size_t gate = body.find("gate_.waitMs(millis())");
+  const size_t took = body.find("gate_.took(millis());");
+  const size_t counted = body.find("ctx.transactions++;");
+  ASSERT_NE(lease, std::string::npos);
+  ASSERT_NE(local, std::string::npos);
+  ASSERT_NE(gate, std::string::npos);
+  ASSERT_NE(took, std::string::npos);
+  ASSERT_NE(counted, std::string::npos);
+  EXPECT_LT(lease, local) << "a local job still ends when its lease does";
+  EXPECT_LT(local, gate) << "and never waits for the budget";
+  EXPECT_LT(local, took) << "nor spends it";
+  EXPECT_LT(local, counted) << "nor counts a transaction: EXIT-NODES §7 defines one as an exchange over the mesh";
+}
+
 // ---- the extension ------------------------------------------------------------------------------
 
 TEST(Seams, AnUnknownTypeIsOfferedToTheExtensionBeforeItIsUnsupported) {

@@ -200,6 +200,31 @@ class RunnerTest : public ::testing::Test {
     return server.results().empty() ? std::string() : server.results().back().body;
   }
 
+  // The payload of the daily `config.read` of meshmaster.dk's key table: **thirty** keys, of
+  // which `regions` is two commands and `acl` the binary access-list request, so the read is
+  // 30 + the two extras + 1 = 33 transactions and `kThirtyKeyRead` **34** with its login -
+  // EXIT-NODES §7's `config.read` row, and the shape of job 22032, the read that reset a Walter
+  // on 7 November 2026. Every key the fake's repeater does not already hold is given a value
+  // here, so that what these tests measure is the pacing and nothing else.
+  std::string thirtyKeyPayload() {
+    static const char* const keys[] = {
+        "name",        "lat",              "lon",           "owner.info",       "advert.interval",
+        "dutycycle",   "repeat",           "af",            "flood.max",        "flood.advert.interval",
+        "flood.max.unscoped", "flood.max.advert", "path.hash.mode", "loop.detect", "txdelay",
+        "direct.txdelay", "rxdelay",       "int.thresh",    "cad",              "multi.acks",
+        "allow.read.only", "agc.reset.interval", "tx",      "radio",            "radio.rxgain",
+        "radio.fem.rxgain", "radio.fem.txgain", "freq",     "regions",          "acl"};
+    std::string json = "{\"keys\":[";
+    for (const char* key : keys) {
+      if (json.back() != '[') json += ",";
+      json += std::string("\"") + key + "\"";
+      const bool isGet = std::strcmp(key, "regions") != 0 && std::strcmp(key, "acl") != 0;
+      if (isGet && mesh.config().count(key) == 0) mesh.setConfig(key, "0");
+    }
+    return json + "]}";
+  }
+  static constexpr int kThirtyKeyRead = 34;
+
   std::string outcomeOf(const std::string& body) const { return memberOf(body, "outcome"); }
   // Where a failed job failed (task p1.7-28), or "" when the result carries no such member -
   // which is what `memberOf` gives for an absent one, and an absent one is the point of half the
@@ -1240,6 +1265,121 @@ TEST_F(RunnerTest, OneSendPerCommandTheMinimumGapAndThePerMinuteCapAreHeldByTheC
       << "more transactions in a minute than the budget allows";
   EXPECT_GE(platform.millis(), 5u * mm::kDefaultMinGapSeconds * 1000u) << "the waits really happened";
   EXPECT_NE(logOf(body).find("waiting 20 s for the airtime budget"), std::string::npos) << body;
+}
+
+// ---- the local door (task p1.10-40) ----------------------------------------------------------
+//
+// A mesh that answers for the repeater **without the air** (IMesh::answersLocally) - the
+// repeater-v2 unit's Walter, whose own radio is on a UART - neither waits for the airtime budget
+// nor spends it. The three tests below are the pacing, the same job on the air for comparison,
+// and the slot accounting between them.
+
+TEST_F(RunnerTest, A34LineReadThroughTheLocalDoorWaitsForNoBudgetAndSpendsNone) {
+  // The conservative default of EXIT-NODES §8, which is what the unit's own budget was on
+  // 7 November 2026: two transactions a minute, twenty seconds apart.
+  setBudget(mm::kDefaultMaxTransactionsPerMinute, mm::kDefaultMinGapSeconds);
+  mesh.setAnswersLocally(true);
+  const std::string body = run(fake::Job(12404, "config.read")
+                                   .atClass("admin")
+                                   .leasedUntil(kNow + 1800)
+                                   .withAdminPassword("adm1n-pass")
+                                   .withPayload(thirtyKeyPayload()));
+
+  EXPECT_EQ(outcomeOf(body), "ok");
+  EXPECT_EQ(mesh.sendCount(), kThirtyKeyRead)
+      << "the login, twenty-eight gets, the two region commands, ver, board and the access list";
+  // A transaction is an exchange with a repeater **over the mesh** (EXIT-NODES §7), and none of
+  // these was one, so the figure meshmaster.dk prices the air by counts none of them.
+  EXPECT_EQ(transactionsOf(body), 0);
+  EXPECT_EQ(runner.gate().transmissions(), 0u) << "and the gate was never told a slot was taken";
+  EXPECT_EQ(runner.gate().totalWaitMs(), 0u) << "nor asked for one";
+  EXPECT_EQ(logOf(body).find("waiting"), std::string::npos) << body;
+  // (The job's own *the air is not used* line is the first entry of a log of thirty-four, which
+  // a kilobyte does not hold - task p1.10-38 drops whole entries from the front when it fills -
+  // so it is asserted on the short local job of the third test instead.)
+  // No idle longer than a reply wait: the longest gap between two sends is the fake's flooded
+  // reply latency, which is well under both the reply wait (perHopMs x 4, 16 s at the claim's
+  // defaults) and the budget's twenty-second gap. On the Walter it was a 40 s idle here that
+  // outlived the 30 s task watchdog.
+  for (uint32_t gap : mesh.gapsMs()) {
+    EXPECT_LT(gap, 3000u) << "a gap this long is a wait for something, and nothing here waits";
+  }
+  // The whole read, against the sixteen-odd minutes the next test measures for the same job.
+  EXPECT_LT(platform.millis(), 60u * 1000u);
+}
+
+TEST_F(RunnerTest, TheSame34LineReadOnAMeshThatIsOnTheAirStillWaitsAsItDid) {
+  setBudget(mm::kDefaultMaxTransactionsPerMinute, mm::kDefaultMinGapSeconds);
+  const std::string body = run(fake::Job(12405, "config.read")
+                                   .atClass("admin")
+                                   .leasedUntil(kNow + 1800)
+                                   .withAdminPassword("adm1n-pass")
+                                   .withPayload(thirtyKeyPayload()));
+
+  EXPECT_EQ(outcomeOf(body), "ok");
+  EXPECT_EQ(mesh.sendCount(), kThirtyKeyRead);
+  EXPECT_EQ(transactionsOf(body), kThirtyKeyRead);
+  EXPECT_EQ(runner.gate().transmissions(), static_cast<uint32_t>(kThirtyKeyRead));
+  for (uint32_t gap : mesh.gapsMs()) {
+    EXPECT_GE(gap, mm::kDefaultMinGapSeconds * 1000u) << "two transactions closer than the minimum gap";
+  }
+  EXPECT_LE(mesh.mostInAnyMinute(), mm::kDefaultMaxTransactionsPerMinute);
+  // Two a minute for thirty-four of them: sixteen minutes of waiting, which is what the budget
+  // is for when the air is really being used.
+  EXPECT_GE(platform.millis(), 16u * 60u * 1000u);
+  EXPECT_NE(logOf(body).find("waiting 20 s for the airtime budget"), std::string::npos) << body;
+}
+
+TEST_F(RunnerTest, ALocalJobLeavesTheNextJobOnTheAirNoFreeSlot) {
+  setBudget(mm::kDefaultMaxTransactionsPerMinute, mm::kDefaultMinGapSeconds);
+  mesh.grant(self(), mm::kPermReadOnly);
+
+  // One job on the air first: a login and a status request, which fills the minute.
+  run(fake::Job(12406, "status")
+          .atClass("acl")
+          .leasedUntil(kNow + 1800)
+          .withAclLevel(mm::kPermReadOnly)
+          .withPayload("{\"version\":false}"));
+  ASSERT_EQ(runner.gate().transmissions(), 2u);
+  const uint32_t airSpentAt = platform.millis();
+  // What that job waited for its own second slot: the gate's totals are cumulative, and the
+  // local job's share of them must be nothing.
+  const uint32_t waitedForTheAir = runner.gate().totalWaitMs();
+  ASSERT_GT(waitedForTheAir, 0u);
+  mesh.forgetSends();
+
+  // Then a local one. It reuses the session, so on the air it would have been one transaction;
+  // through the local door it is none, it waits for nothing, and the gate hears nothing of it.
+  mesh.setAnswersLocally(true);
+  const std::string local = run(fake::Job(12407, "status")
+                                    .atClass("acl")
+                                    .leasedUntil(kNow + 1800)
+                                    .withAclLevel(mm::kPermReadOnly)
+                                    .withPayload("{\"version\":false}"));
+  EXPECT_EQ(outcomeOf(local), "ok");
+  EXPECT_EQ(transactionsOf(local), 0);
+  EXPECT_EQ(runner.gate().transmissions(), 2u) << "a local job takes no slot from the job after it";
+  EXPECT_EQ(runner.gate().totalWaitMs(), waitedForTheAir) << "and asks the gate for none of its own";
+  EXPECT_LT(platform.millis() - airSpentAt, 10u * 1000u) << "so nothing of it was a wait";
+  EXPECT_NE(logOf(local).find("this mesh answers for this repeater without the air"), std::string::npos) << local;
+  mesh.forgetSends();
+
+  // And it gave the next job on the air nothing either: the window still holds the two starts of
+  // the first job, so this one waits until the oldest of them is a minute old - which is where
+  // it would have waited with no local job in between at all.
+  mesh.setAnswersLocally(false);
+  const std::string body = run(fake::Job(12408, "status")
+                                   .atClass("acl")
+                                   .leasedUntil(kNow + 1800)
+                                   .withAclLevel(mm::kPermReadOnly)
+                                   .withPayload("{\"version\":false}"));
+  EXPECT_EQ(outcomeOf(body), "ok");
+  EXPECT_EQ(transactionsOf(body), 1) << "the session is still live; the request is the transaction";
+  EXPECT_EQ(runner.gate().transmissions(), 3u);
+  ASSERT_FALSE(mesh.sends().empty());
+  EXPECT_GE(mesh.sends().front().atMs, 60u * 1000u)
+      << "the third transaction of the minute went out before the first was a minute old";
+  EXPECT_NE(logOf(body).find("s for the airtime budget"), std::string::npos) << body;
 }
 
 TEST_F(RunnerTest, TheLeaseRunningOutMidJobRefusesTheNextTransaction) {
