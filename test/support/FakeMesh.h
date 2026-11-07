@@ -199,6 +199,8 @@ class FakeMesh : public mm::IMesh {
   // task p1.8-32 sends the heartbeat it always sent. A test of the scope says `setFloodScope("dk")`
   // and gets what the board's key table falls back to.
   void setFloodScope(const std::string& scope) { floodScope_ = scope; }
+  // The path-hash width this mesh floods at (IMesh::floodPathHashSize), two bytes by default.
+  void setFloodPathHashSize(uint8_t bytes) { floodPathHashSize_ = bytes; }
   // answer: flood-scope - which shape of flood reaches this repeater at all. A repeater with no
   // region map drops a `dk` flood it would have forwarded unscoped, and a mesh of repeaters
   // running `flood.max.unscoped=0` never carries an unscoped one. Both reach it by default.
@@ -319,6 +321,10 @@ class FakeMesh : public mm::IMesh {
 
   const char* floodScope() const override { return floodScope_.empty() ? nullptr : floodScope_.c_str(); }
   void setFloodMode(mm::FloodMode mode) override { nextMode_ = mode; }
+  // The width this mesh's floods originate at (IMesh::floodPathHashSize, task p1.10-39): two
+  // bytes, as the Heltec's `AgentMesh::kFloodPathHashSize` is and as the rail asks. A test that
+  // wants to see the library *ask* rather than assume says `setFloodPathHashSize(4)`.
+  uint8_t floodPathHashSize() const override { return floodPathHashSize_; }
 
   void setRing(mm::ObservationRing* ring) override { ring_ = ring; }
   mm::ObservationRing* ring() const { return ring_; }
@@ -1006,6 +1012,7 @@ class FakeMesh : public mm::IMesh {
   std::string board_ = "Heltec";
   std::string regionListing_ = "* F\n dk F\n";
   std::string floodScope_;
+  uint8_t floodPathHashSize_ = 2;
   mm::FloodMode nextMode_ = mm::FloodMode::Scoped;
   bool scopedReaches_ = true;
   bool unscopedReaches_ = true;

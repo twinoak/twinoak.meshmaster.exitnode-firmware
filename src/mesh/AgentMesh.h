@@ -200,6 +200,10 @@ class AgentMesh : public mesh::Mesh, public IMesh, public observer::NeighbourLin
   // choice made for ours. Thomas, 3 October 2026: "force it to always use at least 2 bytes".
   static constexpr uint8_t kFloodPathHashSize = 2;
 
+  // And the library is told it (IMesh::floodPathHashSize, task p1.10-39), so that the one width
+  // it chooses for itself - a trace to a direct neighbour - is this board's own and not one byte.
+  uint8_t floodPathHashSize() const override { return kFloodPathHashSize; }
+
  protected:
   mesh::DispatcherAction onRecvPacket(mesh::Packet* pkt) override;
   bool allowPacketForward(const mesh::Packet*) override { return false; }

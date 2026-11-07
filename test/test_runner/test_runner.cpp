@@ -208,6 +208,20 @@ class RunnerTest : public ::testing::Test {
   std::string dataOf(const std::string& body) const { return memberOf(body, "data"); }
   std::string logOf(const std::string& body) const { return memberOf(body, "log"); }
   int transactionsOf(const std::string& body) const { return std::atoi(memberOf(body, "transactions").c_str()); }
+  // Every `prefix` of a result's hops, in order: a trace's round trip, or a neighbours page.
+  std::vector<std::string> prefixesOf(const std::string& data) const {
+    std::vector<std::string> out;
+    const std::string needle = "\"prefix\":\"";
+    size_t at = 0;
+    while ((at = data.find(needle, at)) != std::string::npos) {
+      at += needle.size();
+      const size_t end = data.find('"', at);
+      if (end == std::string::npos) break;
+      out.push_back(data.substr(at, end - at));
+      at = end;
+    }
+    return out;
+  }
 
   fake::FakePlatform platform;
   fake::FakeMesh mesh{platform};
@@ -498,6 +512,58 @@ TEST_F(RunnerTest, ATraceReportsTheRoundTripAndThisBoardsOwnHopLast) {
   EXPECT_EQ(hops, 6);
   EXPECT_NE(data.find("\"prefix\":\"a1\""), std::string::npos) << data;
   EXPECT_NE(data.find("\"prefix\":\"7f\""), std::string::npos) << data;
+}
+
+// The one width the library chooses for itself (task p1.10-39): a direct neighbour has no learned
+// hop to take a width from, and until now `runTrace` filled in one byte - which is how job 20005
+// of 5 November 2026 reported an `86` that any of three repeaters within earshot could have sent.
+// The width is the board's own, which the mesh answers with (IMesh::floodPathHashSize).
+TEST_F(RunnerTest, ATraceToADirectNeighbourGoesAtTheBoardsWidth) {
+  const std::string body = run(fake::Job(12352, "trace").atClass("none").leasedUntil(kLease).asDirectNeighbour());
+
+  EXPECT_EQ(outcomeOf(body), "ok");
+  EXPECT_EQ(transactionsOf(body), 1) << "a trace asks nobody for a session (§7)";
+  const std::string data = dataOf(body);
+  EXPECT_TRUE(fake::followsShapeOf(data, fake::contract("TraceResult")));
+  // The round trip of a direct neighbour is one hash out - the repeater's own, computed from its
+  // key - and this board's own appended on the way home. Two bytes each: four hex digits, not two.
+  const std::vector<std::string> hops = prefixesOf(data);
+  ASSERT_EQ(hops.size(), 2u) << data;
+  EXPECT_EQ(hops[0], repeater().substr(0, 4)) << data;
+  EXPECT_EQ(hops[1], self().substr(0, 4)) << data;
+}
+
+// And that width is the **mesh's** answer, not a number in the library: a mesh that floods wider
+// traces wider, which is what the method is for.
+TEST_F(RunnerTest, TheWidthOfADirectNeighboursTraceIsTheMeshsOwnAnswer) {
+  mesh.setFloodPathHashSize(4);
+  const std::string body = run(fake::Job(12353, "trace").atClass("none").leasedUntil(kLease).asDirectNeighbour());
+
+  EXPECT_EQ(outcomeOf(body), "ok");
+  const std::vector<std::string> hops = prefixesOf(dataOf(body));
+  ASSERT_EQ(hops.size(), 2u) << body;
+  EXPECT_EQ(hops[0], repeater().substr(0, 8)) << body;
+  EXPECT_EQ(hops[1], self().substr(0, 8)) << body;
+}
+
+// A path the claim carried keeps its own width, as it always did: the library never widens one,
+// because the extra byte of a narrow hop belongs to no node.
+TEST_F(RunnerTest, ATraceAlongAClaimedPathKeepsThatPathsWidth) {
+  const std::vector<std::string> one =
+      prefixesOf(dataOf(run(fake::Job(12354, "trace").atClass("none").leasedUntil(kLease).alongPath({"a1", "7f"}))));
+  ASSERT_EQ(one.size(), 6u);
+  for (const std::string& hop : one) EXPECT_EQ(hop.size(), 2u) << hop;
+  EXPECT_EQ(one[0], "a1");
+  EXPECT_EQ(one[2], repeater().substr(0, 2));
+  EXPECT_EQ(one[5], self().substr(0, 2));
+
+  const std::vector<std::string> two = prefixesOf(
+      dataOf(run(fake::Job(12355, "trace").atClass("none").leasedUntil(kLease).alongPath({"a1b2", "7f80"}))));
+  ASSERT_EQ(two.size(), 6u);
+  for (const std::string& hop : two) EXPECT_EQ(hop.size(), 4u) << hop;
+  EXPECT_EQ(two[0], "a1b2");
+  EXPECT_EQ(two[2], repeater().substr(0, 4));
+  EXPECT_EQ(two[5], self().substr(0, 4));
 }
 
 TEST_F(RunnerTest, ATraceAlongThreeByteHashesIsUnsupportedAtNoTransaction) {

@@ -22,6 +22,26 @@ pull request, as `docs/` moves with code.
 
 ## Unreleased
 
+- **A trace to a direct neighbour goes at the board's width, not one byte**
+  (task p1.10-39). **One method was added to `IMesh`**, `virtual`
+  **with a body** — `uint8_t floodPathHashSize() const`, the path-hash width
+  every flood of that mesh originates, defaulting to **2** — so a consumer's
+  tree compiles untouched and a mesh that overrides nothing traces no narrower
+  than the rail allows. `AgentMesh` answers `kFloodPathHashSize`. The library
+  chooses a width in exactly one place, a trace to a *direct neighbour* (the
+  claim carried a path of zero hops, so no hop was learned and the only hash is
+  one the library computes from the repeater's key), and it now asks this
+  instead of filling in `1`; every other path still keeps the width the claim
+  carried, because the library never widens one. **Nothing else of a pin
+  moved**: not `IUplink`, `IPlatform`, `IClock`, `IJobExtension`, `JobContext`,
+  `ResultWriter` or `TextOut`, not `JobReport`, not `kMeshReplyDataCap` or
+  `kMeshPathCap`, not a fixture, not the version. What a consumer sees on the
+  wire is a `TraceResult` whose `prefix` fields are **four hex digits** for a
+  direct neighbour where they were two — the same thing MeshMaster's .NET agent
+  sends (`TraceHandler`: a direct path takes the companion's own mode, D-33) —
+  so a consumer whose mesh floods wider than two bytes should override the
+  method, and one whose tests assert a two-character prefix for a direct
+  neighbour is the one thing to look at.
 - **A result's log is one entry per line** (task p1.10-38). `JobLog::add` joins
   its entries with a `'\n'` instead of a `"; "`, as MeshMaster.Agent's own
   `JobLog.Append` does, and when the kilobyte buffer fills it now drops whole

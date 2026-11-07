@@ -141,6 +141,24 @@ class IMesh {
   // that decides which send gets which is agent/FloodScope.h's and lives in the job runner.
   virtual void setFloodMode(FloodMode mode) { (void)mode; }
 
+  // ------------------------------------------------------------------ the path-hash width
+
+  // The path-hash width every flood of this mesh originates, in bytes (task p1.10-39). The
+  // library chooses a width in exactly one place - a trace to a **direct neighbour**, where there
+  // is no learned hop to take a width from and the only hash is one it computes itself from the
+  // repeater's key - and this is the number it chooses. Everywhere else it passes through the
+  // width the claim's path carried, because the extra byte of a narrow hop belongs to no node.
+  //
+  // The default is **2**, which is the rail of this repository and meshmaster.dk's D-33: path
+  // hashes are two bytes or more, never one, because two repeaters that share a first byte both
+  // repeat a packet addressed to that byte - the first bench showed exactly that, and so did job
+  // 20005 of 5 November 2026, a trace whose `86` could have been any of three repeaters. A mesh
+  // that overrides nothing floods no narrower than the rail allows. Override it only to say
+  // *wider*: 1, 2, 4 and 8 are what a trace packet can state (`isTraceableHashSize`), and a mesh
+  // answering anything else makes a trace to a direct neighbour `unsupported` rather than a frame
+  // nothing on the path can follow.
+  virtual uint8_t floodPathHashSize() const { return 2; }
+
   // ------------------------------------------------------------------ a job's exchanges
 
   // The repeater this job is for, and the path the server knows to it (the hop hashes as the

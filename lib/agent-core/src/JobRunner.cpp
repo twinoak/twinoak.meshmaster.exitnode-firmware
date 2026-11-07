@@ -621,9 +621,15 @@ Outcome JobRunner::runTrace(const ClaimedJob& job, Context& ctx, size_t& dataLen
   uint8_t hashSize = 0;
   uint8_t hops = pathToBytes(job, g_pathBytes, sizeof g_pathBytes, hashSize);
   if (hops == 0 && job.hasPath && job.pathCount == 0) {
-    // A direct neighbour: a known path of zero hops, and the trace's hashes are this board's own
-    // size, one byte (PATH_HASH_SIZE).
-    hashSize = 1;
+    // A direct neighbour: a known path of zero hops, so there is no learned hop to take a width
+    // from and the only hash is one we compute ourselves, from the repeater's key. The width is
+    // then **this board's own** - what its floods originate at, two bytes and never one (D-33;
+    // the mesh answers, AgentMesh::kFloodPathHashSize) - for the repeater's hash on the way out
+    // and for this board's own on the way back. One byte addresses every repeater that shares a
+    // first byte: job 20005 of 5 November 2026 got an `86` that three of them could have sent.
+    // The .NET agent chooses the same way (meshmaster.dk's Handlers.cs, TraceHandler: a direct
+    // path takes the companion's own mode, any other path its own width).
+    hashSize = mesh_->floodPathHashSize();
   } else if (hops == 0) {
     g_log.add("no path is known to this repeater: a trace needs one; run discover first");
     return Outcome::Unreachable;
