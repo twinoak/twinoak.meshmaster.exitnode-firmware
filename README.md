@@ -676,7 +676,14 @@ reading.
   adds - the width is at least two bytes. One-byte hashes let two repeaters
   that share a first byte both repeat a direct packet, and the first bench
   showed a five-hop path of them. A path learned from a reply keeps the width
-  it was learned at. Thomas, 3 October 2026, for all MeshCore work
+  it was learned at, and so does a path the server sends - the library never
+  widens one, because the extra byte of a narrow hop belongs to no node. **A
+  trace to a direct neighbour is at the board's width**: there is no learned
+  hop there, the only hash is one computed from the repeater's key, and the
+  mesh is asked for the number (`IMesh::floodPathHashSize`, task p1.10-39).
+  It was one byte until then, which is how job 20005 reported an `86` that
+  three repeaters within earshot could have sent. Thomas, 3 October 2026, for
+  all MeshCore work
   ([D-33](https://github.com/twinoak/meshmaster.dk/blob/master/spec/DECISIONS.md#3-new-decisions)).
 - **The observer publishes, and tells MeshMaster only its state.** The raw
   bytes the radio heard go to the brokers this board's owner configured and to

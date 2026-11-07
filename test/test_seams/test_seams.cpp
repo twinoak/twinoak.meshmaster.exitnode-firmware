@@ -247,6 +247,31 @@ TEST(Seams, TheMeshDrawsTheCliTimestampAndHandsItBack) {
       << "the apply engine's series is the host test's; on the board the mesh draws it";
 }
 
+// The width the library traces a direct neighbour at is the mesh's own, and the interface's
+// default is the rail's two bytes (task p1.10-39; the rail is README.md's *path hashes are two
+// bytes or more, never one*, meshmaster.dk's D-33).
+TEST(Seams, TheMeshTellsTheLibraryTheWidthItFloodsAt) {
+  const fs::path root(PROJECT_DIR);
+  const std::string iface = readFile(root / "lib/agent-core/include/agent/IMesh.h");
+  EXPECT_NE(iface.find("virtual uint8_t floodPathHashSize() const { return 2; }"), std::string::npos)
+      << "the default is the rail's width, so a mesh that overrides nothing never traces at one byte";
+
+  const std::string mesh = readFile(root / "src/mesh/AgentMesh.h");
+  EXPECT_NE(mesh.find("uint8_t floodPathHashSize() const override { return kFloodPathHashSize; }"), std::string::npos)
+      << "this board answers with the width its floods originate at";
+
+  // And the runner asks, in the one place it chooses a width at all: a direct neighbour, where no
+  // hop was learned. Nowhere in it is a width a literal.
+  const std::string runner = readFile(root / "lib/agent-core/src/JobRunner.cpp");
+  const size_t from = runner.find("Outcome JobRunner::runTrace(");
+  ASSERT_NE(from, std::string::npos);
+  const size_t to = runner.find("\nOutcome JobRunner::", from + 1);
+  ASSERT_NE(to, std::string::npos);
+  const std::string body = runner.substr(from, to - from);
+  EXPECT_NE(body.find("hashSize = mesh_->floodPathHashSize();"), std::string::npos);
+  EXPECT_EQ(runner.find("hashSize = 1"), std::string::npos) << "the library picks no path-hash width of its own";
+}
+
 // ---- the extension ------------------------------------------------------------------------------
 
 TEST(Seams, AnUnknownTypeIsOfferedToTheExtensionBeforeItIsUnsupported) {
