@@ -165,8 +165,14 @@ const char* JobRunner::loginMaterial(const ClaimedJob& job) {
   // that every branch of it is walked natively (test/test_rotation_probe) rather than held on
   // this file's text. This puts its one line into the job's log, and no log line ever takes the
   // value as an argument.
+  //
+  // The door is **part of the question** (task p1.10-41): a job this mesh answers without the air
+  // is answered at admin by the board at the other end of the seam, whatever the login carried,
+  // so the material is the empty string at every class and a job for a unit's own repeater needs
+  // no stored password. Asked here, where the material is chosen, and not after it: the answer at
+  // `admin` with no password is otherwise `nullptr`, and `ensureSession` refuses the job on it.
   char note[kLoginNoteCap] = {0};
-  const char* material = loginMaterialFor(job, note, sizeof note);
+  const char* material = loginMaterialFor(job, mesh_->answersLocally(), note, sizeof note);
   if (note[0] != '\0') g_log.add("%s", note);
   return material;
 }
@@ -463,6 +469,14 @@ int JobRunner::restoreAcl(const ClaimedJob& job, Context& ctx, Outcome outcome) 
   // Nothing to restore unless the claim carried a grant below admin and the session in force is
   // admin - by the admin password, which rewrote our entry to admin on stock firmware, or a
   // blank login answered admin because an earlier session died before its restore.
+  //
+  // **The claim's level is the whole gate, and that is what a local job turns on** (task
+  // p1.10-41, checking task p4.1-60's rule once more): the local door answers every login at
+  // admin, so `ctx.sessionRole` is admin for such a job too - but a unit's own repeater is handed
+  // no grant (meshmaster.dk's task p4.27-173), `hasAclLevel` is false, and the first clause ends
+  // it. Nothing is restored on a repeater the unit *is*, and no `setperm` goes over its console.
+  // A local job that somehow does carry a level is restored exactly as an over-the-air one is:
+  // the level the server granted is the level the server expects to find.
   if (!job.hasAclLevel || job.aclLevel >= kPermAdmin || job.aclLevel < kPermReadOnly || !ctx.hasSession ||
       ctx.sessionRole != kPermAdmin) {
     return -1;

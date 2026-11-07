@@ -1279,6 +1279,11 @@ TEST_F(RunnerTest, A34LineReadThroughTheLocalDoorWaitsForNoBudgetAndSpendsNone) 
   // 7 November 2026: two transactions a minute, twenty seconds apart.
   setBudget(mm::kDefaultMaxTransactionsPerMinute, mm::kDefaultMinGapSeconds);
   mesh.setAnswersLocally(true);
+  // A local job logs in with **no material at any class** (task p1.10-41), so the admin session
+  // this read needs comes from the empty login: the real door answers that at admin by itself,
+  // and this fake is a stock repeater, which answers it at the level its ACL holds this board's
+  // key at. The claim's password is still here, and still goes nowhere.
+  mesh.grant(self(), mm::kPermAdmin);
   const std::string body = run(fake::Job(12404, "config.read")
                                    .atClass("admin")
                                    .leasedUntil(kNow + 1800)
@@ -1286,6 +1291,7 @@ TEST_F(RunnerTest, A34LineReadThroughTheLocalDoorWaitsForNoBudgetAndSpendsNone) 
                                    .withPayload(thirtyKeyPayload()));
 
   EXPECT_EQ(outcomeOf(body), "ok");
+  EXPECT_EQ(mesh.loginsWithMaterial(), 0) << "the door is answered by the board: nothing was sent to log in with";
   EXPECT_EQ(mesh.sendCount(), kThirtyKeyRead)
       << "the login, twenty-eight gets, the two region commands, ver, board and the access list";
   // A transaction is an exchange with a repeater **over the mesh** (EXIT-NODES §7), and none of
@@ -1380,6 +1386,108 @@ TEST_F(RunnerTest, ALocalJobLeavesTheNextJobOnTheAirNoFreeSlot) {
   EXPECT_GE(mesh.sends().front().atMs, 60u * 1000u)
       << "the third transaction of the minute went out before the first was a minute old";
   EXPECT_NE(logOf(body).find("s for the airtime budget"), std::string::npos) << body;
+}
+
+// ---- no password for a local login (task p1.10-41) -------------------------------------------
+//
+// The same door, at its login: a job it answers needs **no material at any class**, because the
+// board at the other end answers the login itself and at admin. What this is for is job 22016 of
+// 7 November 2026 - a scheduled `config.read` of a unit's **own** repeater, refused by
+// meshmaster.dk with *no admin password stored*, for a radio whose password is a random one
+// nobody knows.
+
+TEST_F(RunnerTest, AnAdminJobThroughTheLocalDoorRunsToItsEndWithNoPasswordAnywhere) {
+  mesh.setAnswersLocally(true);
+  // The real door answers any login at admin; this fake is a stock repeater and answers the
+  // **empty** login at the level its ACL holds this board's key at, which is the same answer by
+  // the stock route (FakeMesh::setAnswersLocally).
+  mesh.grant(self(), mm::kPermAdmin);
+
+  // The claim meshmaster.dk hands a unit for its own repeater: `admin`, and no credential at all.
+  const std::string body = run(fake::Job(12409, "cli")
+                                   .atClass("admin")
+                                   .leasedUntil(kNow + 1800)
+                                   .withPayload("{\"command\":\"set tx 20\"}"));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << body;
+  EXPECT_EQ(mesh.logins(), 1) << "the login went, and it was the empty one";
+  EXPECT_EQ(mesh.loginsWithMaterial(), 0);
+  ASSERT_EQ(mesh.lines().size(), 1u);
+  EXPECT_EQ(mesh.lines()[0], "set tx 20") << "the line the job is for, once";
+  EXPECT_EQ(transactionsOf(body), 0) << "none of it was on the air (task p1.10-40)";
+  EXPECT_NE(logOf(body).find("answered by the board, no password needed: the empty material at class admin"),
+            std::string::npos)
+      << body;
+  EXPECT_EQ(logOf(body).find("nothing to log in with"), std::string::npos)
+      << "that is the sentence this task ended for a local job: " << body;
+  EXPECT_TRUE(fake::followsShapeOf(dataOf(body), fake::contract("CliResult")));
+}
+
+TEST_F(RunnerTest, TheSameAdminJobOnTheAirWithNoPasswordIsStillUnauthorizedWithNothingSent) {
+  // Not local, and nothing changes: there is no admin login without an admin password, and the
+  // job is refused before anything is sent.
+  mesh.grant(self(), mm::kPermAdmin);
+  const std::string body = run(fake::Job(12410, "cli")
+                                   .atClass("admin")
+                                   .leasedUntil(kNow + 1800)
+                                   .withPayload("{\"command\":\"set tx 20\"}"));
+
+  EXPECT_EQ(outcomeOf(body), "unauthorized") << body;
+  EXPECT_EQ(mesh.sendCount(), 0) << "nothing at all went out";
+  EXPECT_EQ(transactionsOf(body), 0);
+  EXPECT_NE(logOf(body).find("the claim carried no admin material; nothing to log in with"), std::string::npos)
+      << body;
+}
+
+TEST_F(RunnerTest, ALocalJobSendsNoPasswordTheClaimDidCarryEither) {
+  mesh.setAnswersLocally(true);
+  mesh.grant(self(), mm::kPermAdmin);
+
+  // A password this repeater does not know - an older server's, or one typed for another job. If
+  // it went out, the fake would answer it with the silence stock firmware answers a wrong
+  // password with, and the job would come back `unreachable` after two tries. It comes back `ok`,
+  // which is the proof that nothing of it was sent.
+  const std::string body = run(fake::Job(12411, "cli")
+                                   .atClass("admin")
+                                   .leasedUntil(kNow + 1800)
+                                   .withAdminPassword("not-the-one")
+                                   .withPayload("{\"command\":\"set tx 20\"}"));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << body;
+  EXPECT_EQ(mesh.logins(), 1);
+  EXPECT_EQ(mesh.loginsWithMaterial(), 0) << "the claim's password stayed where it was";
+  EXPECT_EQ(body.find("not-the-one"), std::string::npos) << "and is nowhere in the result: " << body;
+}
+
+TEST_F(RunnerTest, ALocalJobThatCarriedNoLevelRestoresNothing) {
+  mesh.setAnswersLocally(true);
+  mesh.grant(self(), mm::kPermAdmin);
+
+  // The restore (task p4.1-60) is gated on the **level the claim carried**, and a unit's own
+  // repeater is handed none (meshmaster.dk's task p4.27-173): nothing is put back on a repeater
+  // the unit *is*, and no `setperm` goes over its console.
+  const std::string first = run(fake::Job(12412, "cli")
+                                    .atClass("admin")
+                                    .leasedUntil(kNow + 1800)
+                                    .withPayload("{\"command\":\"set tx 20\"}"));
+  EXPECT_EQ(outcomeOf(first), "ok") << first;
+  EXPECT_EQ(mesh.cliLines(), 1) << "the job's own line and no restore after it";
+  EXPECT_EQ(mesh.timesSent("setperm " + self() + " 3"), 0);
+  EXPECT_EQ(logOf(first).find("the ACL entry"), std::string::npos) << first;
+  EXPECT_EQ(mesh.levelOf(self()), mm::kPermAdmin) << "the ACL is as it was";
+  mesh.forgetSends();
+
+  // And the gate really is the claim's level and not the door: a local job that *does* carry one
+  // is restored exactly as an over-the-air one is, because the level the server granted is the
+  // level the server expects to find.
+  const std::string second = run(fake::Job(12413, "cli")
+                                     .atClass("admin")
+                                     .leasedUntil(kNow + 1800)
+                                     .withAclLevel(mm::kPermReadOnly)
+                                     .withPayload("{\"command\":\"set tx 20\"}"));
+  EXPECT_EQ(outcomeOf(second), "ok") << second;
+  EXPECT_EQ(mesh.timesSent("setperm " + self() + " 1"), 1) << "the session's last command, as task 60 wrote it";
+  EXPECT_EQ(mesh.levelOf(self()), mm::kPermReadOnly);
 }
 
 TEST_F(RunnerTest, TheLeaseRunningOutMidJobRefusesTheNextTransaction) {
