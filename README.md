@@ -515,7 +515,10 @@ schedule or on a press of **Read now**, produces a claim of up to two jobs; each
 is one login and one request or two, paced by the budget the heartbeat carried,
 and its reading is on the repeater's page within a poll interval. The job's row
 shows the outcome, the transaction count, the path used and the round trip, and
-its `log` is the same text the console printed.
+its `log` says the same things the console printed — **one entry per line**, as
+the .NET agent sends it, so *The agent's log* on the job's page reads line by
+line. A log that fills its kilobyte keeps the end and drops whole entries off
+the front.
 
 What the page will *not* show is anything the mesh said: a message is counted
 under `overheard` and dropped unread. The console's **`tx`** is the other half

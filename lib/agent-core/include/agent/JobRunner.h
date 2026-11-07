@@ -105,9 +105,16 @@ namespace mm {
 
 // A result's free text, bounded here rather than at the envelope: 4 000 characters is what API §3
 // allows and a kilobyte is more than any of these jobs has to say. When it fills, the oldest
-// half goes - what a job did last is what a reader of its page wants. Nothing that could need
+// entries go - what a job did last is what a reader of its page wants. Nothing that could need
 // redacting ever reaches it: a password is never an argument of any line the runner adds, and
 // the .NET agent's redactor has nothing to do here because there is nothing to redact.
+//
+// **One entry per line** (task p1.10-38), as MeshMaster.Agent's own `JobLog.Append` writes it:
+// *The agent's log* on a job's page is a `<pre>` with `whitespace-pre-wrap`, so it keeps the
+// line breaks and reads line by line. A `"; "` between entries could not, because several
+// entries have a `"; "` of their own inside them and the page cannot tell the two apart. The
+// JSON writer escapes the `'\n'` as `\n`, so one raw byte is still two on the wire - the width
+// `"; "` had - and API §3's 4 000-character bound is untouched.
 class JobLog {
  public:
   void clear() {
@@ -118,8 +125,7 @@ class JobLog {
   void add(const char* fmt, ...) __attribute__((format(printf, 2, 3))) {
     if (len_ + 2 >= sizeof buf_) drop();
     if (len_ > 0) {
-      buf_[len_++] = ';';
-      buf_[len_++] = ' ';
+      buf_[len_++] = '\n';
       buf_[len_] = '\0';
     }
     va_list args;
@@ -135,10 +141,20 @@ class JobLog {
   const char* text() const { return buf_; }
 
  private:
+  // Whole entries go, not bytes: the cut is the first line break at or after the half, so what
+  // is left begins where an entry begins and the first line a reader sees is a whole one. An
+  // entry longer than half the buffer has no line break to cut at, and is cut at the half as it
+  // always was - there is nothing better to do with it.
   void drop() {
-    const size_t half = sizeof buf_ / 2;
-    std::memmove(buf_, buf_ + half, len_ - half + 1);
-    len_ -= half;
+    size_t cut = sizeof buf_ / 2;
+    for (size_t i = cut; i < len_; i++) {
+      if (buf_[i] == '\n') {
+        cut = i + 1;
+        break;
+      }
+    }
+    std::memmove(buf_, buf_ + cut, len_ - cut + 1);
+    len_ -= cut;
   }
 
   char buf_[1024] = {0};

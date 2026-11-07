@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -1358,6 +1359,102 @@ TEST_F(RunnerTest, TheConsoleReportsReadBackWhatTheRunnerDid) {
   char line[160];
   runner.describe(line, sizeof line);
   EXPECT_NE(std::string(line).find("1 run"), std::string::npos) << line;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The result's log, one entry per line (task p1.10-38)
+//
+// `JobLog` joins its entries with a `'\n'`, as MeshMaster.Agent's `JobLog.Append` does, because
+// *The agent's log* on a job's page keeps line breaks and several entries carry a `"; "` of
+// their own - so a `"; "` between entries was a paragraph the page could not split back up.
+// `logOf` unescapes, so a `'\n'` here is the `\n` the envelope carried.
+
+// The entry the drop test fills the buffer with: 41 characters, so a kilobyte holds twenty-four
+// of them and the twenty-fifth is what makes the buffer drop. The format string is written out
+// at both of its two uses rather than held in a variable, so that it stays a literal to
+// `JobLog::add`'s printf attribute.
+std::string filler(int i) {
+  char text[64];
+  std::snprintf(text, sizeof text, "entry %03d of a job that said a great deal", i);
+  return text;
+}
+
+TEST(JobLog, ThreeEntriesAreThreeLines) {
+  mm::JobLog log;
+  log.add("a");
+  log.add("b");
+  log.add("c");
+  EXPECT_EQ(std::string(log.text()), "a\nb\nc");
+
+  // And the envelope carries them as `a\nb\nc`: JsonWriter escapes the byte, so the server
+  // parses three lines out of one JSON string (JsonWriter.h's `escape`).
+  mm::JobReport r;
+  r.clientId = "1-a";
+  r.outcome = mm::Outcome::Ok;
+  r.log = log.text();
+  char out[256];
+  const size_t len = mm::writeJobResult(r, out, sizeof out);
+  ASSERT_GT(len, 0u);
+  EXPECT_NE(std::string(out, len).find("\"log\":\"a\\nb\\nc\""), std::string::npos) << std::string(out, len);
+}
+
+TEST(JobLog, AnEmptyLogIsNoLineAndOneEntryIsNoLineBreak) {
+  mm::JobLog log;
+  EXPECT_STREQ(log.text(), "");
+  log.add("only this");
+  EXPECT_STREQ(log.text(), "only this") << "one entry carries no separator at all";
+  log.clear();
+  EXPECT_STREQ(log.text(), "");
+}
+
+TEST(JobLog, FillingTheBufferDropsWholeEntriesSoTheFirstLineIsAWholeEntry) {
+  mm::JobLog log;
+  for (int i = 0; i < 200; i++) log.add("entry %03d of a job that said a great deal", i);
+  const std::string text = log.text();
+  ASSERT_LT(text.size(), 1024u) << "the kilobyte buffer still bounds it";
+
+  // The oldest line left is an entry from its first character to its last, not the tail of one
+  // cut at byte 512.
+  const std::string first = text.substr(0, text.find('\n'));
+  int which = -1;
+  ASSERT_EQ(std::sscanf(first.c_str(), "entry %d of a job that said a great deal", &which), 1)
+      << "the log starts mid-entry: " << first;
+  ASSERT_GT(which, 0) << "nothing was dropped, so this test checked nothing";
+  EXPECT_EQ(first, filler(which));
+
+  // The newest entry is whole too, and the one before the first line is gone.
+  EXPECT_NE(text.find(filler(199)), std::string::npos) << text;
+  EXPECT_EQ(text.find(filler(which - 1)), std::string::npos) << text;
+}
+
+TEST(JobLog, AnEntryLongerThanHalfTheBufferIsCutButStillBounded) {
+  mm::JobLog log;
+  const std::string huge(5000, 'x');
+  for (int i = 0; i < 5; i++) log.add("%s", huge.c_str());
+  EXPECT_LT(std::strlen(log.text()), 1024u) << "there is no line break to cut at, so the half goes as it always did";
+  EXPECT_GT(std::strlen(log.text()), 0u);
+
+  // A short entry before one that long puts the only line break well before the half, so there
+  // is none at or after it: the half goes, and the short entry with it.
+  mm::JobLog mixed;
+  mixed.add("the first entry, short");
+  mixed.add("%s", huge.c_str());
+  mixed.add("%s", huge.c_str());
+  EXPECT_EQ(std::string(mixed.text()).find("the first entry, short"), std::string::npos) << mixed.text();
+}
+
+TEST_F(RunnerTest, TheLogOfARealJobIsOneEntryPerLine) {
+  mesh.grant(self(), mm::kPermReadOnly);
+  const std::string body = run(fake::Job(12420, "status")
+                                   .atClass("acl")
+                                   .leasedUntil(kLease)
+                                   .withAclLevel(mm::kPermReadOnly)
+                                   .withPayload("{\"version\":false}"));
+  const std::string log = logOf(body);
+  ASSERT_NE(log.find('\n'), std::string::npos) << "the entries are joined by a line break: " << body;
+  EXPECT_EQ(log.substr(0, log.find('\n')).rfind("job 12420 status for repeater", 0), 0u)
+      << "the first line is the whole of the first entry: " << log;
+  EXPECT_NE(body.find("\\n"), std::string::npos) << "and the envelope escaped it: " << body;
 }
 
 }  // namespace

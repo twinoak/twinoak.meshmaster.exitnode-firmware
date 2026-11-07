@@ -22,7 +22,20 @@ pull request, as `docs/` moves with code.
 
 ## Unreleased
 
-Nothing yet.
+- **A result's log is one entry per line** (task p1.10-38). `JobLog::add` joins
+  its entries with a `'\n'` instead of a `"; "`, as MeshMaster.Agent's own
+  `JobLog.Append` does, and when the kilobyte buffer fills it now drops whole
+  entries — the cut is the first line break at or after the half, so the log
+  never starts mid-sentence. **Nothing moved that a pin asks about**: not a
+  method of `IMesh`, `IUplink`, `IPlatform`, `IClock`, `IJobExtension`,
+  `JobContext`, `ResultWriter` or `TextOut`, not `JobReport`, not
+  `kMeshReplyDataCap` or `kMeshPathCap`, not a fixture, not the version. What
+  changed is the **text** inside `JobReport::log`, which is free text the server
+  only displays: *The agent's log* on a job's page is a `<pre>` with
+  `whitespace-pre-wrap`, so it reads line by line. A consumer whose own tests
+  assert on the joined text is the one thing to look at; API §3's 4 000-character
+  bound is unchanged, and so is the width on the wire, because the JSON writer
+  escapes the byte as `\n`.
 
 ## v0.6.0 — a lighter TLS, and two broker slots on both boards
 
