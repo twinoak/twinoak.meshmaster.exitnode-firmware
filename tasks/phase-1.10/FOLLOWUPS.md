@@ -5,7 +5,7 @@ of this pile. A session reads this file before it starts (RUNBOOK.md section 0)
 and treats every open item tagged for its task as part of the task. Only the
 reviewer ticks an item.
 
-- [ ] **An empty `get` reply is a value, not a raw line.** `cliReplyValue`
+- [ ] **[44] An empty `get` reply is a value, not a raw line.** `cliReplyValue`
   (`lib/agent-core/src/ConfigRead.cpp`) wants `'>'` *and a space*, and
   `JobRunner` calls `trimInPlace` on the reply first, so a key whose value is
   the empty string - `handleGetCmd` prints one `sprintf(reply, "> %s", ...)`
