@@ -272,6 +272,45 @@ TEST(Seams, TheMeshTellsTheLibraryTheWidthItFloodsAt) {
   EXPECT_EQ(runner.find("hashSize = 1"), std::string::npos) << "the library picks no path-hash width of its own";
 }
 
+// The same door, asked **before** the job (task p1.10-43): the wake prices a claimed job, and the
+// price has to come from the same question the run will ask. The shape of that, in one place: the
+// new predicate is defaulted false on the interface, it is the job's own repeater key the runner
+// hands it, and `wakeJobs` asks it **once** and reads that one answer into both bounds - the
+// transaction price and the millisecond estimate - so the two can never disagree with each other
+// or with `spend`.
+TEST(Seams, TheWakeAsksTheSameDoorBeforeItPricesAJob) {
+  const fs::path root(PROJECT_DIR);
+  const std::string iface = readFile(root / "lib/agent-core/include/agent/IMesh.h");
+  const size_t declared = iface.find("virtual bool answersLocallyFor(const char* publicKeyHex) const {");
+  ASSERT_NE(declared, std::string::npos) << "the door is asked for a key, not for the job in progress";
+  EXPECT_NE(iface.find("return false;", declared), std::string::npos)
+      << "the default is the air, so a mesh that overrides nothing is priced as it always was";
+
+  // One predicate, in the runner, from the job's own repeater key - the same shape as
+  // meshDeclines() and asked by the same caller.
+  const std::string runner = readFile(root / "lib/agent-core/src/JobRunner.cpp");
+  EXPECT_NE(runner.find("return mesh_->answersLocallyFor(job.repeaterKey);"), std::string::npos);
+
+  const std::string loop = readFile(root / "lib/agent-core/src/AgentLoop.cpp");
+  const size_t from = loop.find("void AgentLoop::wakeJobs(WakeReport& report) {");
+  ASSERT_NE(from, std::string::npos);
+  const size_t to = loop.find("\nvoid AgentLoop::wakeObservations", from);
+  ASSERT_NE(to, std::string::npos);
+  const std::string body = loop.substr(from, to - from);
+  const std::string theQuestion = "const bool local = jobs_->meshAnswersLocally(job);";
+  const size_t asked = body.find(theQuestion);
+  ASSERT_NE(asked, std::string::npos);
+  EXPECT_EQ(body.find("meshAnswersLocally", asked + theQuestion.size()), std::string::npos)
+      << "one question, asked once a job";
+  const size_t priced = body.find("const int price = local ? 0 : transactionsOf(job);");
+  const size_t timed = body.find("estimateJobMs(job, local)");
+  ASSERT_NE(priced, std::string::npos) << "a local job spends no transaction, so it is priced at none";
+  ASSERT_NE(timed, std::string::npos);
+  EXPECT_LT(asked, priced) << "the door is read before the transaction price";
+  EXPECT_LT(asked, timed) << "and before the estimate";
+  EXPECT_EQ(loop.find("estimateJobMs(job)"), std::string::npos) << "nothing prices a job without telling it the door";
+}
+
 // The local door (task p1.10-40): the mesh says a job is answered off the air, and the gate is
 // the only thing that changes. The shape of the decision, in one place - the default is false, so
 // a consumer's tree compiles and behaves as it did; this board has no local door and keeps it;

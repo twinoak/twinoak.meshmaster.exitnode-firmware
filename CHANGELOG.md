@@ -22,6 +22,37 @@ pull request, as `docs/` moves with code.
 
 ## Unreleased
 
+- **A job your mesh answers locally is *priced* as local by a wake, not as air**
+  (task p1.10-43). **One method was added to `IMesh`**, `virtual` **with a body**
+  — `bool answersLocallyFor(const char* publicKeyHex) const`, defaulting to
+  **false** — so a consumer's tree compiles untouched and a mesh that overrides
+  nothing is priced exactly as it was. It is the door of `answersLocally()` (the
+  entry below) asked for a **key**, before any job has begun, because the caller
+  that needs the answer is the one which prices a claimed job before it runs it:
+  `answersLocally()` is true only from a `beginJob` to its `endJob`, so the wake
+  could not ask it. The two must agree — `answersLocallyFor(k)` is true exactly
+  when a job begun for `k` would make `answersLocally()` true — and on the first
+  consumer both are the one comparison `beginJob` already makes. What changed
+  behind it: `AgentLoop::wakeJobs` prices a job the mesh answers locally at **its
+  reply waits**, with no airtime gaps and at **0 transactions**, and reports that
+  figure (*… needs about 272 s, answered without the air*) when the wake is too
+  small even for that; a job that is **not** local is priced exactly as before,
+  to the second. `AgentMesh` keeps the default: the Heltec has no local door.
+  **For the first consumer this is the fix of a refusal that had not happened
+  yet**: a 34-line `config.read` of a repeater-v2 unit's own repeater was priced
+  at 34 × (20 s + 8 s) = **952 s** of air it was never going to use, against an
+  exchange bound of 1 200 s — 248 s of margin on the dearest job that unit runs,
+  so a shorter bound, a longer key list or a larger `minGapSeconds` from the
+  server would have refused in seconds, at no transaction, the very job task
+  p1.10-40 made fast. The same read is now priced at 272 s, and its transaction
+  price is 0, so a wake with no air left in its cap can still run it. **Nothing
+  else of a pin moved**: not `IUplink`, `IPlatform`, `IClock`, `IJobExtension`,
+  `JobContext`, `ResultWriter` or `TextOut`, not `JobReport`, not
+  `kMeshReplyDataCap` or `kMeshPathCap`, not a fixture, not the version. A
+  consumer that overrides `answersLocally()` should override this one too and
+  from the same state: left at the default, its local jobs keep being *priced* as
+  air (and still **run** off it), which is the behaviour it has today.
+
 - **A wait counts the sleep: `restore()` is told how long the board was away**
   (task p1.10-42). **No method of `IMesh`, `IUplink`, `IPlatform`, `IClock`,
   `IJobExtension`, `JobContext`, `ResultWriter` or `TextOut` moved**, and nothing

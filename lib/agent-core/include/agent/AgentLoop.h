@@ -471,7 +471,13 @@ class AgentLoop {
   // each. The pace is what dominates - twenty-one transactions at two a minute is eleven
   // minutes and the replies are seconds - so an estimate that is right about the pace is right
   // about the job.
-  uint32_t estimateJobMs(const ClaimedJob& job) const;
+  //
+  // `answeredLocally` is the mesh's answer for this job's repeater (JobRunner::meshAnswersLocally,
+  // task p1.10-43): such a job is **not** on the air, so there is no gap between its exchanges to
+  // price and the estimate is its reply waits alone. The pace then dominates nothing, which is
+  // the whole difference between seconds and the quarter of an hour the same exchanges cost when
+  // they really are transmissions.
+  uint32_t estimateJobMs(const ClaimedJob& job, bool answeredLocally) const;
   // What is left of the wake's seconds, of the uplink's, and of the transaction cap. Each is
   // the whole of it when the budget set no bound.
   uint32_t wakeMsLeft() const;

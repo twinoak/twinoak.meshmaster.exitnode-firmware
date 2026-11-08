@@ -148,6 +148,37 @@ std::string memberOf(const std::string& json, const std::string& key) {
   return json.substr(at, end - at);
 }
 
+// The payload of the daily `config.read` of meshmaster.dk's key table: **thirty** keys, of which
+// `regions` is two commands and `acl` the binary access-list request, so the read is
+// 30 + 2 + 1 = 33 transactions and **34** with its login - EXIT-NODES §7's `config.read` row, and
+// the shape of job 22032, the read that reset a Walter on 7 November 2026. test_runner holds the
+// same list for the pacing; here it is the **price** that matters. Every key the fake's repeater
+// does not already hold is given a value, so that nothing of the read fails for a reason of its
+// own.
+std::string thirtyKeyPayload(fake::FakeMesh& mesh) {
+  static const char* const keys[] = {
+      "name",        "lat",              "lon",           "owner.info",       "advert.interval",
+      "dutycycle",   "repeat",           "af",            "flood.max",        "flood.advert.interval",
+      "flood.max.unscoped", "flood.max.advert", "path.hash.mode", "loop.detect", "txdelay",
+      "direct.txdelay", "rxdelay",       "int.thresh",    "cad",              "multi.acks",
+      "allow.read.only", "agc.reset.interval", "tx",      "radio",            "radio.rxgain",
+      "radio.fem.rxgain", "radio.fem.txgain", "freq",     "regions",          "acl"};
+  std::string json = "{\"keys\":[";
+  for (const char* key : keys) {
+    if (json.back() != '[') json += ",";
+    json += std::string("\"") + key + "\"";
+    const bool isGet = std::strcmp(key, "regions") != 0 && std::strcmp(key, "acl") != 0;
+    if (isGet && mesh.config().count(key) == 0) mesh.setConfig(key, "0");
+  }
+  return json + "]}";
+}
+// What that read costs a wake, in seconds, at the conservative budget of EXIT-NODES §8 and the
+// claim's default 8 000 ms reply: thirty-four exchanges, each of them a gap **and** a reply on the
+// air, and each of them a reply alone through the local door (task p1.10-43).
+constexpr int kThirtyKeyRead = 34;
+constexpr uint32_t kReadOnTheAirS = kThirtyKeyRead * (mm::kDefaultMinGapSeconds + 8);  // 952
+constexpr uint32_t kReadThroughTheDoorS = kThirtyKeyRead * 8;                          // 272
+
 // One boot of a unit that sleeps (task p1.6-22): a loop and a runner that are built at the boot
 // and destroyed at the sleep, which is what a deep sleep does to the RAM they live in.
 struct Boot {
@@ -1027,6 +1058,153 @@ TEST_F(LoopTest, AJobTheMeshCannotCarryIsDeclinedBeforeItIsPricedAgainstTheWake)
   EXPECT_EQ(body.find("wake budget"), std::string::npos) << "the reason is the mesh's, not the budget's: " << body;
   EXPECT_TRUE(fake::followsShapeOf(body, fake::contract("JobResultReport"))) << body;
   EXPECT_EQ(loop.counters().consecutiveFailures, 0u) << "neither answer is a failure of the server's";
+}
+
+// ---- a local job is priced as local (task p1.10-43) ------------------------------------------
+//
+// Task p1.10-40 made a job the mesh answers **without the air** skip the airtime gate while it
+// runs. The wake prices a claimed job **before** it runs, and priced it as air: `n x
+// (minGapSeconds + loginMs)`, which for a 34-line `config.read` of a unit's own repeater is 952 s,
+// nearly all of it gaps for air it was never going to use. The tests below are the line that
+// arithmetic drew and which side of it the same job falls on now - the Walter's pile-9 follow-up
+// *The wake still prices a local job as air*, with its arithmetic, on the host.
+
+TEST_F(LoopTest, ALocalJobIsPricedAtItsRepliesAndTheSameJobOnTheAirIsStillRefused) {
+  // A wake of 400 s is between the two prices: above the 272 s of thirty-four reply waits and far
+  // below the 952 s of thirty-four gaps. The **same job** is priced against it twice, and the only
+  // thing that differs is which repeater the mesh's door is keyed to.
+  ASSERT_GT(kReadOnTheAirS, 400u);
+  ASSERT_LT(kReadThroughTheDoorS, 400u);
+  server.answerHeartbeat(mm::kDefaultMaxTransactionsPerMinute, mm::kDefaultMinGapSeconds, 3600, true,
+                         platform.clock().now());
+  // The door of this repeater - the Walter's own radio (`LinkMesh::setOwnKey`) - and the admin
+  // session a local job gets from the empty login (task p1.10-41), which this fake answers at the
+  // level its ACL holds this board's key at.
+  mesh.setLocalDoorKey(repeater());
+  mesh.grant(self(), mm::kPermAdmin);
+  mm::Budget budget;
+  budget.wakeSeconds = 400;
+  server.queue(fake::Job(14050, "config.read")
+                   .atClass("admin")
+                   .leasedUntil(kNow + 1800)
+                   .withAdminPassword("adm1n-pass")
+                   .withPayload(thirtyKeyPayload(mesh))
+                   .json());
+
+  const mm::WakeReport local = loop.wake(hourly(60), budget);
+
+  EXPECT_EQ(local.jobsClaimed, 1);
+  EXPECT_EQ(local.jobsRun, 1) << "priced at its replies, the read fits this wake";
+  EXPECT_EQ(local.jobsNotRun, 0);
+  EXPECT_EQ(local.jobs, mm::StepOutcome::Done);
+  EXPECT_EQ(local.transactionsSpent, 0) << "and none of it went on the air";
+  ASSERT_EQ(server.results().size(), 1u);
+  const std::string done = server.results()[0].body;
+  EXPECT_EQ(server.results()[0].jobId, 14050);
+  EXPECT_EQ(memberOf(done, "outcome"), "ok") << done;
+  EXPECT_EQ(memberOf(done, "transactions"), "0") << done;
+  EXPECT_EQ(done.find("wake budget"), std::string::npos) << "the job that used to be refused: " << done;
+  EXPECT_GT(mesh.mostInAnyMinute(), mm::kDefaultMaxTransactionsPerMinute)
+      << "thirty-four exchanges inside one minute, which no budget of the air would allow";
+  EXPECT_LT(platform.millis(), 400u * 1000u) << "and the wake it was priced against really held it";
+
+  // The same job, the same wake, and a door keyed to **another** repeater: priced as air, 952 s,
+  // and refused exactly as it was before this task - `failed`, *wake budget*, nothing sent.
+  mesh.setLocalDoorKey(self());
+  server.queue(fake::Job(14051, "config.read")
+                   .atClass("admin")
+                   .leasedUntil(kNow + 1800)
+                   .withAdminPassword("adm1n-pass")
+                   .withPayload(thirtyKeyPayload(mesh))
+                   .json());
+  const size_t sendsBefore = mesh.sends().size();
+
+  const mm::WakeReport onTheAir = loop.wake(hourly(60), budget);
+
+  EXPECT_EQ(onTheAir.jobsClaimed, 1);
+  EXPECT_EQ(onTheAir.jobsRun, 0) << "a door for somebody else's repeater is no door for this job";
+  EXPECT_EQ(onTheAir.jobsNotRun, 1);
+  EXPECT_EQ(onTheAir.jobs, mm::StepOutcome::NoTime);
+  EXPECT_EQ(onTheAir.transactionsSpent, 0) << "nothing went on the air for it either";
+  EXPECT_EQ(mesh.sends().size(), sendsBefore) << "and the radio was never asked";
+  ASSERT_EQ(server.results().size(), 2u) << "a job claimed is always answered";
+  const std::string refused = server.results()[1].body;
+  EXPECT_EQ(server.results()[1].jobId, 14051);
+  EXPECT_EQ(memberOf(refused, "outcome"), "failed") << refused;
+  EXPECT_EQ(memberOf(refused, "transactions"), "0") << refused;
+  EXPECT_NE(refused.find("needs about 952 s"), std::string::npos) << "the air's price, unmoved: " << refused;
+  EXPECT_EQ(refused.find("answered without the air"), std::string::npos) << refused;
+  EXPECT_TRUE(fake::followsShapeOf(refused, fake::contract("JobResultReport"))) << refused;
+  EXPECT_EQ(loop.counters().consecutiveFailures, 0u) << "neither answer is a failure of the server's";
+}
+
+TEST_F(LoopTest, ALocalJobTooLargeForItsWakeIsRefusedAtTheLocalPriceAndSaysSo) {
+  // The bound has not gone away, it has moved: a wake of 100 s cannot hold even the reply waits,
+  // and the refusal says what the job was priced at and why that price - which is what the server
+  // reads, and a bench after it.
+  ASSERT_GT(kReadThroughTheDoorS, 100u);
+  server.answerHeartbeat(mm::kDefaultMaxTransactionsPerMinute, mm::kDefaultMinGapSeconds, 3600, true,
+                         platform.clock().now());
+  mesh.setLocalDoorKey(repeater());
+  mesh.grant(self(), mm::kPermAdmin);
+  server.queue(fake::Job(14052, "config.read")
+                   .atClass("admin")
+                   .leasedUntil(kNow + 1800)
+                   .withAdminPassword("adm1n-pass")
+                   .withPayload(thirtyKeyPayload(mesh))
+                   .json());
+  mm::Budget budget;
+  budget.wakeSeconds = 100;
+
+  const mm::WakeReport report = loop.wake(hourly(60), budget);
+
+  EXPECT_EQ(report.jobsRun, 0);
+  EXPECT_EQ(report.jobsNotRun, 1);
+  EXPECT_EQ(report.jobs, mm::StepOutcome::NoTime);
+  ASSERT_EQ(server.results().size(), 1u);
+  const std::string body = server.results()[0].body;
+  EXPECT_EQ(memberOf(body, "outcome"), "failed") << body;
+  EXPECT_EQ(memberOf(body, "transactions"), "0") << body;
+  EXPECT_NE(body.find("needs about 272 s"), std::string::npos) << "the replies, not the gaps: " << body;
+  EXPECT_NE(body.find("answered without the air"), std::string::npos) << body;
+  EXPECT_EQ(body.find("needs about 952 s"), std::string::npos) << body;
+  EXPECT_TRUE(fake::followsShapeOf(body, fake::contract("JobResultReport"))) << body;
+}
+
+// The wake's **transaction** cap is the other half of the price, and a local job is not under it
+// at all: it spends none, so a cap on the air has nothing of it to refuse. The *claim* is still
+// sized by that cap - a wake with no transactions left asks for no jobs, local or not, because
+// nothing can know which a claim will bring back - so this is about jobs already claimed, under
+// the very cap that turned the second of them away when they were priced as air.
+TEST_F(LoopTest, ALocalJobCostsTheWakesTransactionCapNothing) {
+  server.answerHeartbeat(60, 1, 3600, true, platform.clock().now());
+  mesh.setLocalDoorKey(repeater());
+  mesh.grant(self(), mm::kPermAdmin);
+  server.queue(std::vector<std::string>{
+      fake::Job(14060, "status")
+          .atClass("acl")
+          .leasedUntil(kLease)
+          .withAclLevel(mm::kPermReadOnly)
+          .withPayload("{\"version\":false}")
+          .groupedWith(14061)
+          .json(),
+      fake::Job(14061, "telemetry").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly).json(),
+  });
+
+  // Four transactions - the cap of AJobTheWakesTransactionCapHasNoRoomForIsFailedTheSameWay,
+  // where the first job spent three of them and the second would not fit. Through the door the
+  // first spends none, so the second fits.
+  const mm::WakeReport report = loop.wake(hourly(4), mm::Budget());
+
+  EXPECT_EQ(report.jobsClaimed, 2);
+  EXPECT_EQ(report.jobsRun, 2) << "neither job was priced out: both are answered off the air";
+  EXPECT_EQ(report.jobsNotRun, 0);
+  EXPECT_EQ(report.jobs, mm::StepOutcome::Done);
+  EXPECT_EQ(report.transactionsSpent, 0);
+  ASSERT_EQ(server.results().size(), 2u);
+  EXPECT_EQ(memberOf(server.results()[0].body, "outcome"), "ok") << server.results()[0].body;
+  EXPECT_EQ(memberOf(server.results()[1].body, "outcome"), "ok") << server.results()[1].body;
+  EXPECT_EQ(server.results()[1].body.find("wake budget"), std::string::npos) << server.results()[1].body;
 }
 
 TEST_F(LoopTest, NoWakeEverLeavesAJobLeasedAndSilent) {
