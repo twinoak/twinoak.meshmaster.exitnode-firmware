@@ -22,6 +22,30 @@ pull request, as `docs/` moves with code.
 
 ## Unreleased
 
+- **An empty `get` reply is a value, not a raw line** (task p1.10-44). **Nothing
+  of a pin moved** - not a method of `IMesh`, `IUplink`, `IPlatform`, `IClock`,
+  `IJobExtension`, `JobContext`, `ResultWriter` or `TextOut`, not
+  `kMeshReplyDataCap` or `kMeshPathCap`, not a fixture, not the version - and
+  nothing of yours stops compiling. What moved is **what one free function
+  reads**: `mm::cliReplyValue` (`agent/ConfigRead.h`) now reads a **bare `>` as
+  the empty value** rather than as "not a `get` reply". `CommonCLI::handleGetCmd`
+  prints every key it knows with one `sprintf(reply, "> %s", ...)`, so a key
+  whose value *is* the empty string - an unset `guest.password`, an unset
+  `owner.info` - answers `"> "`, which `JobRunner`'s `trimInPlace` makes `">"`;
+  that used to be kept as a `raw` line and the key left out of the snapshot.
+  `">"`, `"> "` and `">  "` now all give `""`, a value keeps every space inside
+  it, and `">240"` with no space at all is still nullptr. **Where you will see
+  it**: a `config.read` or a `config.apply` re-read of a key with an empty value
+  carries that key in `values` (or `reRead`) as `""` instead of in `raw` (or
+  `reReadRaw`) - the same thing the .NET agent carries since meshmaster.dk's task
+  p4.23-165 (`CliReplies.ValueOf`), so the two agents' snapshots of one repeater
+  agree. It matters because meshmaster.dk reads an **empty** `guest.password` as
+  *this repeater has no guest password* and clears the stored one: through this
+  library that answer never arrived as a value, so a guest password taken off a
+  repeater stayed stored on the server until somebody cleared it by hand. Nothing
+  was ever stored *wrongly* - absent was read as "not known", never as "none" -
+  so this closes a gap and does not fix a fault.
+
 - **A job your mesh answers locally is *priced* as local by a wake, not as air**
   (task p1.10-43). **One method was added to `IMesh`**, `virtual` **with a body**
   — `bool answersLocallyFor(const char* publicKeyHex) const`, defaulting to

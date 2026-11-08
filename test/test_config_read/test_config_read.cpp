@@ -247,6 +247,45 @@ TEST(CliReply, AGetAnswersWithAnAngleBracketAndAnythingElseIsRaw) {
   EXPECT_STREQ(mm::trimInPlace(text), "OK");
 }
 
+// A key whose value is the empty string: `handleGetCmd` prints `sprintf(reply, "> %s", ...)` for
+// every key it knows, so an unset `guest.password` answers `"> "` - and JobRunner trims the reply
+// before it reads it, which makes that `">"`. All three spellings are the empty value, as the .NET
+// agent's `CliReplies.ValueOf` reads them (meshmaster.dk task p4.23-165): meshmaster.dk reads an
+// empty `guest.password` as *this repeater has no guest password* and clears the stored one, which
+// it cannot do if the answer never arrives as a value at all (task p1.10-44).
+TEST(CliReply, AnEmptyGetReplyIsTheEmptyValueAndNotARawLine) {
+  EXPECT_STREQ(mm::cliReplyValue("> "), "") << "what handleGetCmd prints for an empty value";
+  EXPECT_STREQ(mm::cliReplyValue(">"), "") << "the same reply, after trimInPlace";
+  EXPECT_STREQ(mm::cliReplyValue(">  "), "");
+  EXPECT_STREQ(mm::cliReplyValue("  >  \r\n"), "") << "whitespace around it is not a value";
+
+  // A value keeps the spaces inside it; only the one space of the `> ` prefix goes.
+  EXPECT_STREQ(mm::cliReplyValue("> Grenaa  Chimney #1"), "Grenaa  Chimney #1");
+  EXPECT_STREQ(mm::cliReplyValue(">  two spaces"), " two spaces") << "the second space is the value's";
+  EXPECT_STREQ(mm::cliReplyValue("> off "), "off ") << "a trailing space is trimInPlace's, not this one's";
+
+  // Nothing else of a reply moved: with no space at all there is still no `get` reply to read.
+  EXPECT_EQ(mm::cliReplyValue(">240"), nullptr);
+  EXPECT_EQ(mm::cliReplyValue("??: guest.password"), nullptr);
+  EXPECT_EQ(mm::cliReplyValue(""), nullptr) << "no reply at all is not the empty value";
+  EXPECT_EQ(mm::cliReplyValue("   "), nullptr);
+
+  // What the read loop does with it: a value in the snapshot like any other, no raw line, and the
+  // result carries it as an empty string - which is what meshmaster.dk settles `none` on.
+  mm::ConfigSnapshot s;
+  s.clear();
+  char reply[] = "> ";
+  const char* value = mm::cliReplyValue(mm::trimInPlace(reply));
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(s.put("guest.password", value));
+  EXPECT_EQ(s.valuesRead(), 1);
+  EXPECT_EQ(s.rawCount, 0) << "not a raw line";
+  char out[mm::kMinConfigReadResultCap];
+  const size_t n = mm::writeConfigReadResult(s, out, sizeof out);
+  ASSERT_GT(n, 0u);
+  EXPECT_NE(std::strstr(out, "\"guest.password\":\"\""), nullptr) << out;
+}
+
 // The datagram a repeater answers a CLI line with: timestamp, the flags byte with the text type
 // in its upper bits, the text - the bytes of contact-msg-recv-v3.hex's reply to `get
 // advert.interval`, in the shape they have on the air rather than on the cable.
