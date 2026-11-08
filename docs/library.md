@@ -468,7 +468,7 @@ Arduino and the ESP-IDF directly, and nothing more.
 
 | Method | Contract |
 |---|---|
-| `millis()` | Milliseconds since boot, monotonic, wrapping every 49.7 days. Every comparison in the library is a signed difference, so the wrap is handled — but it must not jump backwards *within* a boot. After a deep sleep it may start again at zero; that is what `WakeState` exists for (§6) |
+| `millis()` | Milliseconds since boot, monotonic, wrapping every 49.7 days. Every comparison in the library is a signed difference, so the wrap is handled — but it must not jump backwards *within* a boot. After a deep sleep it may start again at zero; that is what `WakeState` exists for (§6), and why `restore()` is told how long the sleep was rather than being left to guess |
 | `delayMs(ms)` | Yield for at least this long. Called with 1 in the idle loop between pumps, and with longer waits nowhere. On a host fake this *is* the passage of time |
 | `random()` | Thirty-two random bits: a result's `clientId`, the backoff's jitter, a batch's id. It does not have to be cryptographic; it does have to differ between two units that booted together |
 | `clock()` | The wall clock, below. Called on every heartbeat, every result and every lease check |
@@ -613,13 +613,33 @@ neighbour list alone is more than the 8 kB of stack the Arduino loop task has.
      `report.acceptedIntervalS`, but never less than `report.sleepAtLeastS`,
      and call it again.
 7. **Across a sleep**: `const mm::WakeState s = agent.state();` into retained
-   storage as bytes before you sleep, and `agent.restore(s)` after the next boot,
-   before the wake. It is a trivially copyable POD of 76 bytes; every duration in
-   it is a *duration* and not a deadline, because `millis()` restarts at zero,
-   and `restore()` re-bases them against the clock it finds. It refuses a blob of
-   another `version` and changes nothing. What it carries: the backoff and how
-   long the present run of failures has lasted, the accepted interval, the
-   airtime budget, a 401, and the counters the heartbeat reports.
+   storage as bytes before you sleep, and `agent.restore(s, awayMs)` after the
+   next boot, before the wake. It is a trivially copyable POD of 76 bytes; every
+   duration in it is a *duration* and not a deadline, because `millis()` restarts
+   at zero, and `restore()` re-bases them against the clock it finds. It refuses
+   a blob of another `version` and changes nothing. What it carries: the backoff
+   and how long the present run of failures has lasted, the accepted interval,
+   the airtime budget, a 401, and the counters the heartbeat reports.
+
+   **`awayMs` is how long you were away**, between that `state()` and this
+   `restore()`, measured on a clock that ran through the sleep — yours, because
+   the library's only clock is `millis()` and the sleep kills it. The rule is
+   that a duration is re-based against the new clock **after the time away is
+   taken off it**: a hold is what is left of `holdForMs` and never less than
+   nothing, whether it was a backoff or a Retry-After the server named, because
+   either way the server asked for a number of seconds of *real* time; and
+   `failingForMs` is longer by it, because the run of failures lasted through the
+   sleep as well. Measure it so it is **never more than really passed** — a timer
+   wake has slept the interval it asked for, less the timer's own error; a wake
+   on something else has no measure and passes nothing — and `restore(s)` with
+   one argument still means *no time passed*, which is what a power-on wants and
+   is exactly the behaviour this call had before task p1.10-42. Getting it wrong
+   the other way is what that task fixed: the sleep used to count for nothing, so
+   a unit waking every fifteen minutes spent a 30 s hold five or six seconds at a
+   time, sent nothing at any of those wakes (`report.why` is *a wait the server
+   asked for is still running*), and was quiet for about ninety minutes after one
+   failed call — six hours at an hourly wake, and a whole day at the backoff's
+   two-minute ceiling.
 8. **What the sleep keeps** (optional, §5.1): `agent.setRetained(&store,
    scratch, sizeof scratch)` once after `begin()`, with a store of yours and a
    scratch the image is built in — the library allocates nothing, so the RAM is
@@ -641,7 +661,7 @@ static uint8_t keptScratch[20480];        // yours: the image is built here
 MyRetained kept;                          // : mm::IRetained, over a flash region
 
 agent.setRetained(&kept, keptScratch, sizeof keptScratch);
-agent.restore(savedState);                // the WakeState, from retained memory
+agent.restore(savedState, awayMs);        // the WakeState, and how long the sleep was
 agent.restoreKept();                      // the results and the adverts, from the store
 const mm::WakeReport r = agent.wake(intent, budget);   // ... and the image is written here
 ```
@@ -1005,6 +1025,7 @@ them moves alone. Report both versions from your firmware: yours, and
 | change what the library *writes* — an envelope, a result shape | the fixtures' manifest commit moves. Nothing of yours stops compiling, and that is the dangerous one |
 | change what the library *reads* of a repeater's reply | the companion fixtures move, and the pinned MeshCore tag in `platformio.ini`'s `[meshcore]` with them |
 | add a job type, a log line, a console report | nothing; new behaviour behind the same interfaces |
+| add a defaulted argument to a method of `AgentLoop` — `restore()`'s `awayMs` (task p1.10-42) | **nothing stops compiling**, and what changed is the meaning of a call you already make: read the changelog's entry and pass the figure if you have it. A device that never sleeps has nothing to do |
 | change `WakeState`'s layout | `WakeState::kVersion` goes up, and `restore()` refuses your stored blob rather than misreading it. You lose a backoff across one sleep, which is the right failure |
 | change the kept image's layout (§5.1) | `kKeptImageVersion` goes up, and `restoreKept()` refuses the image in your store whole, counts it, and the next wake writes a fresh one. You lose what one sleep kept, once, across the update — and the counter says so |
 
@@ -1082,7 +1103,7 @@ already has (`components/interfaces/`, `components/platform/`):
 
 | `IPlatform` | Its source |
 |---|---|
-| `millis()` | `esp_timer_get_time() / 1000`, which is `interfaces::Clock::nowMs()` already. It restarts at zero after a deep sleep — that is what `WakeState` is for |
+| `millis()` | `esp_timer_get_time() / 1000`, which is `interfaces::Clock::nowMs()` already. It restarts at zero after a deep sleep — that is what `WakeState` is for, and the wake cycle's own measure of the sleep is what `restore()`'s second argument wants |
 | `delayMs(ms)` | `vTaskDelay(pdMS_TO_TICKS(ms))`, which is `interfaces::Clock::delayMs()` |
 | `random()` | `esp_random()` |
 | `clock()` | `interfaces::WallClock` behind `mm::IClock`: `now(WallTime*)` gives the epoch and its source, `fromNetwork()` is source 1 (the cellular network) or 2 (the server), `sourceName()` is that as a word, and `takeServerTime()` is the heartbeat reply offering a time — which for a unit with no RTC fitted is often the first time it has |

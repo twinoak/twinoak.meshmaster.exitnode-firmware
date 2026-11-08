@@ -147,7 +147,7 @@ loop hands out a POD:
 ```cpp
 const mm::WakeState saved = loop.state();   // to retained storage, as bytes
 ...
-loop.restore(saved);                        // after the next boot, before the wake
+loop.restore(saved, awayMs);                // after the next boot, before the wake
 ```
 
 Every duration in it is a duration and not a deadline — what was left of a
@@ -155,6 +155,18 @@ hold, how long the present run of failures has lasted — and `restore()` re-bas
 them against the clock it finds. It carries the backoff, the consecutive
 failures, the accepted interval, the budget, a 401, and the error counters the
 heartbeat reports, and it refuses a blob of another `version`.
+
+`awayMs` is how long the board was away, and it is the **caller's** measure
+because the library's only clock dies with the sleep: a duration is re-based
+*after* that time is taken off it, so a hold is what the sleep did not spend and
+`failingForMs` is longer by it (task p1.10-42). A test of that rule needs no
+store and no image — only a fresh loop over the same fakes, which is
+`LoopTest::woken()`, and the `restore()` call is the test's own, because one
+argument means *no time passed* and two mean the sleep. The cases under *A wait
+counts the sleep* are the arithmetic: a hold the sleep outlasts, a sleep shorter
+than the hold, a `Retry-After` the server named, the one-argument call that is
+exactly today's figures, and the reboot guard, which only reaches its ninety
+minutes when the sleep counts — and is still only reported.
 
 What it does **not** carry is the offline buffer and the observation ring, and
 since task p1.6-22 a store behind `mm::IRetained` does (`docs/library.md` §5.1):
