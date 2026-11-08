@@ -22,6 +22,35 @@ pull request, as `docs/` moves with code.
 
 ## Unreleased
 
+- **A wait counts the sleep: `restore()` is told how long the board was away**
+  (task p1.10-42). **No method of `IMesh`, `IUplink`, `IPlatform`, `IClock`,
+  `IJobExtension`, `JobContext`, `ResultWriter` or `TextOut` moved**, and nothing
+  of yours stops compiling: what moved is `AgentLoop::restore()`, which took a
+  **second argument with a default** - `bool restore(const WakeState&, uint32_t
+  awayMs = 0)`. `awayMs` is the milliseconds between that `state()` and this
+  `restore()`, on a clock that ran through the sleep; **you** measure it, because
+  the only clock this library has is `millis()` and the sleep kills it. Every
+  duration of a `WakeState` is now re-based against the new clock *after* that
+  time is taken off it: the hold is what is left of `holdForMs` and never less
+  than nothing - a backoff or a Retry-After alike, since either way the server
+  asked for a number of seconds of **real** time - and `failingForMs` is longer
+  by it. `restore(s)` with one argument still means *no time passed* and is
+  **exactly** the behaviour it had before, which is what a power-on wants and
+  what a consumer that cannot measure its sleep should keep passing. `WakeState`
+  itself did not move: same 76 bytes, same `kVersion` 1, so the blob in your NVS
+  still restores. **For a consumer that sleeps this is the fix of a silence**: on
+  8 November 2026 the first repeater-v2 unit woke every fifteen minutes all night
+  and meshmaster.dk heard it on about every sixth wake, because a 30 s hold was
+  spent five or six seconds at a time - one failed call bought about ninety
+  minutes of quiet at fifteen-minute wakes, six hours at hourly ones, and a whole
+  day at the backoff's two-minute ceiling. One consequence to know about: with
+  the time away counted, `failingForMs` can now reach the reboot guard's ninety
+  minutes on a board that sleeps, so `report.rebootWanted` and `rebootWhy` will
+  be set where they never were. **Nothing restarts because of it** - in one-wake
+  mode the guard is told and not taken, as it always was - but if you act on that
+  flag, this is the release in which it starts arriving. Nothing else of a pin
+  moved: not `kMeshReplyDataCap` or `kMeshPathCap`, not a fixture, not the
+  version.
 - **A job your mesh answers locally logs in with no password, at every class**
   (task p1.10-41). **No method of `IMesh` moved**; what moved is one free
   function of a public header, `loginMaterialFor`

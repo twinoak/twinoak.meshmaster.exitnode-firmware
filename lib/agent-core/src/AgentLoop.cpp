@@ -847,7 +847,7 @@ WakeState AgentLoop::state() const {
   return saved;
 }
 
-bool AgentLoop::restore(const WakeState& saved) {
+bool AgentLoop::restore(const WakeState& saved, uint32_t awayMs) {
   if (platform_ == nullptr) return false;
   if (saved.version != WakeState::kVersion) {
     LOG_W("wake: a state of version %lu was handed back and this firmware writes %lu; it is ignored",
@@ -858,17 +858,34 @@ bool AgentLoop::restore(const WakeState& saved) {
   counters_ = saved.counters;
   counters_.consecutiveFailures = saved.consecutiveFailures;
   backoffMs_ = saved.backoffMs;
-  holdUntil_ = now + saved.holdForMs;
-  firstFailureAtMillis_ = now - saved.failingForMs;
+  // The sleep counts (task p1.10-42). A hold is a number of seconds of *real* time - the
+  // backoff's thirty, or the Retry-After the server named - so what is still owed is what the
+  // time away left of it, and nothing below zero. Until this, the sleep counted for nothing: the
+  // first repeater-v2 unit woke every fifteen minutes on 8 November 2026 and spent a
+  // thirty-second hold five or six seconds at a time, each of those wakes sending nothing, so one
+  // failed call bought about ninety minutes of silence - and at the Walter's usual hour, six.
+  const uint32_t owedMs = saved.holdForMs > awayMs ? saved.holdForMs - awayMs : 0;
+  holdUntil_ = now + owedMs;
+  // And the run of failures lasted through the sleep as well, because the reboot guard's ninety
+  // minutes are ninety minutes of real time. Saturating, so a board that has been failing for
+  // forty-nine days reads as *still failing* rather than wrapping round to *just started*; and
+  // zero while nothing is failing, which is what `state()` saves in that case too.
+  const uint64_t failing = static_cast<uint64_t>(saved.failingForMs) + awayMs;
+  const uint32_t failingForMs = saved.consecutiveFailures == 0
+                                    ? 0
+                                    : static_cast<uint32_t>(failing > UINT32_MAX ? UINT32_MAX : failing);
+  firstFailureAtMillis_ = now - failingForMs;
   pollIntervalS_ = saved.pollIntervalS > 0 ? saved.pollIntervalS : 30;
   budget_ = saved.budget;
   jobs_->setBudget(budget_);
   halted_ = saved.halted;
   everHeartbeated_ = saved.everHeartbeated;
   lastHeartbeatAtEpoch_ = saved.lastHeartbeatAtEpoch;
-  if (saved.holdForMs > 0) {
+  // Only what is still owed *after* the time away is worth a line: a hold the sleep spent whole
+  // is not a wait any more, and saying so at every wake would be the noise that hid this bug.
+  if (owedMs > 0) {
     LOG_I("wake: %lu s of a wait the server asked for is still owed from before the sleep",
-          static_cast<unsigned long>(saved.holdForMs / 1000u));
+          static_cast<unsigned long>(owedMs / 1000u));
   }
   return true;
 }

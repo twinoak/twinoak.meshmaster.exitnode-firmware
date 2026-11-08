@@ -234,6 +234,21 @@ class LoopTest : public ::testing::Test {
     return b;
   }
 
+  // A boot after a sleep that only the `WakeState` survives (task p1.10-42): a fresh loop and
+  // runner over the same world, wired as `main.cpp` wires them, with no store - so what the test
+  // hands `restore()` is all that comes back. It does not restore anything itself, because the
+  // call being measured is the caller's: one argument is *no time passed* and two is the sleep.
+  Boot woken() {
+    Boot b;
+    b.jobs.reset(new mm::JobRunner());
+    b.loop.reset(new mm::AgentLoop());
+    b.jobs->begin(mesh, server, platform, &pumpDuringAJob);
+    b.loop->begin(server, platform, mesh, *b.jobs, identity);
+    b.loop->setIdentity(self().c_str());
+    g_loop = b.loop.get();
+    return b;
+  }
+
   fake::FakePlatform platform;
   fake::FakeMesh mesh{platform};
   fake::FakeUplink server{platform};
@@ -1429,6 +1444,194 @@ TEST_F(LoopTest, AServerThatIsAwayIsABackoffTheCallerSleepsThroughAndTheNextWake
   EXPECT_FALSE(server.calls().empty());
   EXPECT_GE(again.counters.consecutiveFailures, saved.consecutiveFailures + 1);
   EXPECT_GE(again.sleepAtLeastS, 45u) << "a minute at the second step, jittered - not thirty again";
+}
+
+// ---------------------------------------------------------------------------------------------
+// A wait counts the sleep (task p1.10-42)
+//
+// `restore()`'s second argument is how long the board was away, on a clock that ran through the
+// sleep - the caller's, because the only clock this library has dies with the RAM. A hold is a
+// number of seconds of real time, so the sleep spends it: these cases are the arithmetic of
+// that, and the one-argument call that still means *no time passed*.
+
+TEST_F(LoopTest, AHoldTheSleepOutlastsIsSpentAndTheNextWakeHeartbeats) {
+  server.failAlways(fake::FakeUplink::Fault::Unreachable);
+  server.setRetryAfter(0);
+  const mm::WakeReport away = loop.wake(hourly(), mm::Budget());
+  ASSERT_EQ(away.heartbeat, mm::StepOutcome::Failed);
+  EXPECT_GT(away.sleepAtLeastS, 0u);
+
+  const mm::WakeState saved = loop.state();
+  ASSERT_GT(saved.holdForMs, 0u);
+  ASSERT_LT(saved.holdForMs, 900000u) << "an early step of the backoff: fifteen minutes is longer than all of it";
+
+  // Fifteen minutes away - the unit of 8 November - is more than the hold had left, so nothing
+  // of it is owed and the wake is a wake like any other.
+  fake::LogCapture::the().clear();
+  Boot b = woken();
+  ASSERT_TRUE(b.loop->restore(saved, 900000));
+  EXPECT_EQ(b.loop->retrySeconds(), 0u);
+  EXPECT_FALSE(fake::LogCapture::the().holds("still owed from before the sleep"))
+      << "a hold the sleep spent whole is not a wait any more";
+
+  server.answerAgain();
+  server.answerHeartbeat(60, 1, 900, false, platform.clock().now());
+  server.forgetCalls();
+  const mm::WakeReport next = b.loop->wake(hourly(), mm::Budget());
+  EXPECT_EQ(next.heartbeat, mm::StepOutcome::Done) << next.why;
+  EXPECT_STREQ(next.why, "");
+  EXPECT_EQ(next.sleepAtLeastS, 0u);
+}
+
+TEST_F(LoopTest, ASleepShorterThanTheHoldLeavesTheRestOfItOwedAndTheWakeSendsNothing) {
+  server.failAlways(fake::FakeUplink::Fault::Unreachable);
+  server.setRetryAfter(0);
+  ASSERT_EQ(loop.wake(hourly(), mm::Budget()).heartbeat, mm::StepOutcome::Failed);
+
+  const mm::WakeState saved = loop.state();
+  // One wake is two failed calls - the config and the heartbeat - so the step it ends on is the
+  // second, 60 s plus or minus a quarter (agent/Backoff.h). The arithmetic below is therefore on
+  // what was actually saved and not on a round number: ten seconds away leaves the rest of it.
+  ASSERT_GE(saved.holdForMs, 44000u);
+  ASSERT_LE(saved.holdForMs, 75000u);
+  const uint32_t awayMs = 10000;
+  const uint32_t owedMs = saved.holdForMs - awayMs;
+
+  fake::LogCapture::the().clear();
+  Boot b = woken();
+  ASSERT_TRUE(b.loop->restore(saved, awayMs));
+  EXPECT_EQ(b.loop->retrySeconds(), owedMs / 1000) << "what the sleep did not spend, and no more";
+  EXPECT_TRUE(fake::LogCapture::the().holds("still owed from before the sleep"));
+
+  server.answerAgain();
+  server.answerHeartbeat(60, 1, 900, false, platform.clock().now());
+  server.forgetCalls();
+  const mm::WakeReport tooSoon = b.loop->wake(hourly(), mm::Budget());
+  EXPECT_TRUE(server.calls().empty()) << "the rest of the wait was not honoured";
+  EXPECT_STREQ(tooSoon.why, "a wait the server asked for is still running");
+  EXPECT_GT(tooSoon.sleepAtLeastS, 0u);
+
+  // And the wake after the rest of it does send: the wait was twenty seconds, not thirty again.
+  platform.advance(owedMs + 1);
+  const mm::WakeReport next = b.loop->wake(hourly(), mm::Budget());
+  EXPECT_FALSE(server.calls().empty());
+  EXPECT_EQ(next.heartbeat, mm::StepOutcome::Done) << next.why;
+}
+
+TEST_F(LoopTest, ARetryAfterTheServerNamedLosesTheTimeAwayToo) {
+  // A 429 with a Retry-After of ten minutes: the wait is the server's own, to the second, and it
+  // is ten minutes of real time like any other.
+  server.failAlways(fake::FakeUplink::Fault::RateLimited);
+  server.setRetryAfter(600);
+  const mm::WakeReport limited = loop.wake(hourly(), mm::Budget());
+  ASSERT_EQ(limited.heartbeat, mm::StepOutcome::Failed);
+
+  const mm::WakeState saved = loop.state();
+  ASSERT_GE(saved.holdForMs, 599000u);
+  ASSERT_LE(saved.holdForMs, 600000u);
+  EXPECT_EQ(saved.consecutiveFailures, 0u) << "a server that answered and named a time has not gone unanswered";
+
+  fake::LogCapture::the().clear();
+  Boot b = woken();
+  ASSERT_TRUE(b.loop->restore(saved, 900000));
+  EXPECT_EQ(b.loop->retrySeconds(), 0u) << "fifteen minutes away is longer than the ten it asked for";
+  EXPECT_FALSE(fake::LogCapture::the().holds("still owed from before the sleep"));
+
+  server.answerAgain();
+  server.answerHeartbeat(60, 1, 900, false, platform.clock().now());
+  server.forgetCalls();
+  const mm::WakeReport next = b.loop->wake(hourly(), mm::Budget());
+  EXPECT_EQ(next.heartbeat, mm::StepOutcome::Done) << next.why;
+}
+
+TEST_F(LoopTest, RestoreWithOneArgumentIsExactlyTheFiguresItAlwaysWas) {
+  server.failAlways(fake::FakeUplink::Fault::Unreachable);
+  server.setRetryAfter(0);
+  const mm::WakeReport first = loop.wake(hourly(), mm::Budget());
+  ASSERT_EQ(first.heartbeat, mm::StepOutcome::Failed);
+  platform.advanceSeconds(first.sleepAtLeastS + 1);
+  ASSERT_EQ(loop.wake(hourly(), mm::Budget()).heartbeat, mm::StepOutcome::Failed);
+
+  const mm::WakeState saved = loop.state();
+  ASSERT_GT(saved.holdForMs, 0u);
+  ASSERT_GT(saved.failingForMs, 0u);
+  ASSERT_GE(saved.consecutiveFailures, 2u);
+
+  // One argument is a caller that cannot measure the sleep - a power-on, or the Heltec, which
+  // never sleeps at all: every duration comes back whole, against the clock it finds.
+  fake::LogCapture::the().clear();
+  Boot b = woken();
+  ASSERT_TRUE(b.loop->restore(saved));
+  const mm::WakeState again = b.loop->state();
+  EXPECT_EQ(again.holdForMs, saved.holdForMs);
+  EXPECT_EQ(again.failingForMs, saved.failingForMs);
+  EXPECT_EQ(again.backoffMs, saved.backoffMs);
+  EXPECT_EQ(again.consecutiveFailures, saved.consecutiveFailures);
+  EXPECT_EQ(b.loop->retrySeconds(), saved.holdForMs / 1000);
+  EXPECT_TRUE(fake::LogCapture::the().holds("still owed from before the sleep"));
+}
+
+TEST_F(LoopTest, TheTimeAwayIsAddedToTheRunOfFailures) {
+  server.failAlways(fake::FakeUplink::Fault::Unreachable);
+  server.setRetryAfter(0);
+  const mm::WakeReport first = loop.wake(hourly(), mm::Budget());
+  ASSERT_EQ(first.heartbeat, mm::StepOutcome::Failed);
+  platform.advanceSeconds(first.sleepAtLeastS + 1);
+  ASSERT_EQ(loop.wake(hourly(), mm::Budget()).heartbeat, mm::StepOutcome::Failed);
+
+  const mm::WakeState saved = loop.state();
+  ASSERT_GT(saved.failingForMs, 0u);
+
+  // The run of unanswered calls lasted through the sleep: it is longer by exactly the time away.
+  Boot b = woken();
+  ASSERT_TRUE(b.loop->restore(saved, 900000));
+  EXPECT_EQ(b.loop->state().failingForMs, saved.failingForMs + 900000u);
+}
+
+TEST_F(LoopTest, TheRebootGuardOnASleepingBoardReachesItsNinetyMinutesOnlyWhenTheSleepCounts) {
+  // Twelve unanswered calls over ninety minutes, on a board that sleeps between them: the state
+  // carries the run of failures and now the time away with it, so the guard measures the ninety
+  // minutes it was written to measure. It is still only **told**: in one-wake mode the library
+  // never asks the platform to restart anything (task p1.5-18), and the Walter's own
+  // `rebootForHealth` is a door it keeps shut, so the honest figure costs nothing.
+  server.failAlways(fake::FakeUplink::Fault::Unreachable);
+  server.setRetryAfter(0);
+
+  mm::WakeState saved;  // a board that has just been provisioned: nothing failing, nothing held
+  bool wanted = false;
+  std::string why;
+  int wakes = 0;
+  for (; wakes < 12 && !wanted; wakes++) {
+    Boot b = woken();
+    ASSERT_TRUE(b.loop->restore(saved, 900000)) << "fifteen minutes between wakes, as the unit of 8 November";
+    const mm::WakeReport report = b.loop->wake(hourly(), mm::Budget());
+    ASSERT_EQ(report.heartbeat, mm::StepOutcome::Failed) << report.why;
+    wanted = report.rebootWanted;
+    why = report.rebootWhy;
+    saved = b.loop->state();
+  }
+  EXPECT_TRUE(wanted) << saved.consecutiveFailures << " failure(s) over " << saved.failingForMs
+                      << " ms and the guard said nothing";
+  EXPECT_NE(why.find("server calls unanswered"), std::string::npos) << why;
+  EXPECT_TRUE(platform.reboots().empty()) << "a wake does not restart the device";
+  EXPECT_EQ(platform.selfReboots(), 0u);
+
+  // And with no time away - today's behaviour, which one argument still gets - the same wakes
+  // never get that far: the hold is owed again whole at every one of them, so the second call is
+  // never even made and the run of failures stays at the two of the first wake. That is the bug
+  // this task is about, held here so it cannot come back.
+  mm::WakeState blind;
+  bool wantedBlind = false;
+  for (int wake = 0; wake < 12 && !wantedBlind; wake++) {
+    Boot b = woken();
+    ASSERT_TRUE(b.loop->restore(blind));
+    const mm::WakeReport report = b.loop->wake(hourly(), mm::Budget());
+    wantedBlind = report.rebootWanted;
+    blind = b.loop->state();
+  }
+  EXPECT_FALSE(wantedBlind);
+  EXPECT_LE(blind.consecutiveFailures, 2u) << "the wakes after the first one send nothing at all";
+  EXPECT_LT(blind.failingForMs, 5u * 60000u) << "and the run of failures is only the wakes' own milliseconds";
 }
 
 TEST_F(LoopTest, TheWakeStateRoundTripsThroughBytesAndARestoreOfAnotherVersionIsRefused) {
