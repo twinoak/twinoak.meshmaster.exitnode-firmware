@@ -593,9 +593,14 @@ int AgentLoop::claimMax() const {
   return left / kTransactionsPerJobAtLeast;
 }
 
-uint32_t AgentLoop::estimateJobMs(const ClaimedJob& job) const {
+uint32_t AgentLoop::estimateJobMs(const ClaimedJob& job, bool answeredLocally) const {
   const int n = transactionsOf(job);
-  const uint32_t gapMs = static_cast<uint32_t>(budget_.minGapSeconds > 0 ? budget_.minGapSeconds : 0) * 1000u;
+  // A job the mesh answers without the air waits for no slot between its exchanges, because
+  // `spend` returns before the gate for it (task p1.10-40): its cost is the replies and nothing
+  // else. The exchanges themselves are unchanged in number - a 34-line read is thirty-four lines
+  // either way - so only the gap falls away here.
+  const uint32_t gapMs =
+      answeredLocally ? 0u : static_cast<uint32_t>(budget_.minGapSeconds > 0 ? budget_.minGapSeconds : 0) * 1000u;
   const uint32_t replyMs = static_cast<uint32_t>(job.loginMs > 0 ? job.loginMs : 8000);
   return static_cast<uint32_t>(n > 0 ? n : 1) * (gapMs + replyMs);
 }
@@ -693,11 +698,19 @@ void AgentLoop::wakeJobs(WakeReport& report) {
       if (report.jobs == StepOutcome::Skipped) report.jobs = StepOutcome::Done;
       continue;
     }
-    const int price = transactionsOf(job);
+    // A job the mesh answers without the air is priced as what it is (task p1.10-43), from the
+    // same door the run itself reads: no transaction, because `spend` counts none for it and the
+    // wake's cap is a cap on the air; and no gap, because it waits for no slot. Asked once here,
+    // before either bound is applied, so that the two agree with each other and with the run.
+    // Priced as air instead, a 34-line local `config.read` looked like 952 s at the conservative
+    // budget and a wake slice shorter than that refused - in seconds, at no transaction - the very
+    // job the local door had just made fast.
+    const bool local = jobs_->meshAnswersLocally(job);
+    const int price = local ? 0 : transactionsOf(job);
     const int left = transactionsLeft();
-    const uint32_t needMs = estimateJobMs(job);
+    const uint32_t needMs = estimateJobMs(job, local);
     const uint32_t leftMs = wakeMsLeft();
-    char why[128];
+    char why[160];
     // A job this wake cannot finish is reported `failed` with *wake budget* and nothing is sent
     // for it: what must never happen is a job claimed, leased, and silent (EXIT-NODES §6 as
     // built in meshmaster.dk's task 121 - what is left behind is queued and bound to nothing,
@@ -715,9 +728,10 @@ void AgentLoop::wakeJobs(WakeReport& report) {
       continue;
     }
     if (needMs > leftMs) {
-      std::snprintf(why, sizeof why, "wake budget: about %lu s left of this wake and %s needs about %lu s",
+      std::snprintf(why, sizeof why, "wake budget: about %lu s left of this wake and %s needs about %lu s%s",
                     static_cast<unsigned long>(leftMs / 1000u), job.type,
-                    static_cast<unsigned long>(needMs / 1000u));
+                    static_cast<unsigned long>(needMs / 1000u),
+                    local ? ", answered without the air" : "");
       jobs_->reportNotRun(i, why);
       report.jobsNotRun++;
       report.jobs = StepOutcome::NoTime;
