@@ -5,7 +5,7 @@ of this pile. A session reads this file before it starts (RUNBOOK.md section 0)
 and treats every open item tagged for its task as part of the task. Only the
 reviewer ticks an item.
 
-- [ ] **[44] An empty `get` reply is a value, not a raw line.** `cliReplyValue`
+- [x] **[44] An empty `get` reply is a value, not a raw line.** `cliReplyValue`
   (`lib/agent-core/src/ConfigRead.cpp`) wants `'>'` *and a space*, and
   `JobRunner` calls `trimInPlace` on the reply first, so a key whose value is
   the empty string - `handleGetCmd` prints one `sprintf(reply, "> %s", ...)`
@@ -19,5 +19,8 @@ reviewer ticks an item.
   "none" - so this is a gap and not a fault. The .NET agent was fixed in the
   same task (`CliReplies.ValueOf` reads a bare `>` as the empty value); this is
   the same one line here, plus a `test_config_read` case. Raised by
-  meshmaster.dk task p4.23-165.
+  meshmaster.dk task p4.23-165. **Done by task p1.10-44**
+  (`tasks/phase-1.10/reports/44.md`): `cliReplyValue` reads a bare `>` as the
+  empty value, `CliReply.AnEmptyGetReplyIsTheEmptyValueAndNotARawLine` covers
+  `"> "`, `">"` and `">  "`, and nothing else of reply parsing moved.
 
