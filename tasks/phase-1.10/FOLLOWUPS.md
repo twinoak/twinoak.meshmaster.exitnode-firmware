@@ -24,3 +24,26 @@ reviewer ticks an item.
   empty value, `CliReply.AnEmptyGetReplyIsTheEmptyValueAndNotARawLine` covers
   `"> "`, `">"` and `">  "`, and nothing else of reply parsing moved.
 
+
+## The review of 45 and 46 (12 November)
+
+Both merged (#49, #50) with their pull requests' ci green. Nothing in either diff needs changing.
+45 was right to follow the spec against this pile's own task file on the empty owner info: `""` is
+a reading and absent is not.
+
+- [ ] **[the release that carries 45 and 46] Not before meshmaster.dk's pile 4.30 is deployed.**
+  46 turns an `acl` login answered at guest into an `ok` with `loggedInAs`. A server without 180
+  ignores the field and reads that `ok` as the pair verifying itself - in the flow's verify step,
+  as the ACL entry working. The order is the server first, then this firmware.
+- [ ] **[later] `loggedInAs` on an outcome that is neither `ok` nor `unauthorized`.** Report 46
+  says the server reads the tier "on an `ok` and on a refusal alike". It does, and on nothing
+  else: `AclLoginFellShort` judges `unauthorized` and `ok`, so an `unreachable` that carries
+  `loggedInAs: guest` moves no association. Nothing is lost that the next read does not bring;
+  the sentence in the report is wider than the server.
+- [ ] **[bench] The two walks of reports 45 and 46 are Thomas's**, with a board: the owner info at
+  `acl` and at guest (`docs/console.md`), and item 21 for the guest answer. The first one that
+  matters is AAR_LH through Risskov.
+- [ ] **[by hand] The driver could not delete five remote branches:**
+  `task/p1.10-41-no-password-for-a-local-login`, `task/p1.10-43-a-local-job-is-priced-as-local`,
+  `task/p1.10-44-an-empty-get-is-a-value`, `task/p1.10-45-the-owner-info-whole` and
+  `task/p1.10-46-a-guest-answer-the-job-can-use`.

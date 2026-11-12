@@ -21,6 +21,16 @@ meshmaster.dk task whose contract it follows has merged: 45 after 181 (the owner
 whole, at any class), 46 after 180 (an `acl` login answered at guest still runs `status` and
 `neighbours`). Run them after that pile. The Walter takes them at its next agent-core sync.
 
+**12 November: 47–50 added** from the review of meshmaster.dk's associations. Replies arrive later
+than this board waits, and three things followed from that in production: a late reply read as a
+refused login (which parked ten working ACL associations), a `setperm` for our own key failing
+when only its "OK" was missed (20 grants), and nothing to stop a late console reply being taken for
+the next line's. 47 and 48 are those; 49 is the third, which nobody has seen yet. 50 follows
+meshmaster.dk's pile 4.33 task 191 and stops at its *First* until that has merged. Run with
+`-From 47`. **These four, with 45 and 46, are what the next release is for**: meshmaster.dk's
+pile 4.32 protects every exit node from the first of them without flashing, and only a release
+ends the other two.
+
 ## Order and dependencies
 
 | # | Task | Depends on | What it leaves behind |
@@ -34,6 +44,10 @@ whole, at any class), 46 after 180 (an `acl` login answered at guest still runs 
 | 44 | [an-empty-get-is-a-value](44-an-empty-get-is-a-value.md) | — | `"> "` is the empty value, so an empty `guest.password` reaches meshmaster.dk as *none* |
 | 45 | [the-owner-info-whole](45-the-owner-info-whole.md) | meshmaster.dk 181 merged | the owner-info reply kept whole (`nodeName`, `ownerInfo`) and asked for at any class when the claim wants it, never below firmware level 2 |
 | 46 | [a-guest-answer-the-job-can-use](46-a-guest-answer-the-job-can-use.md) | meshmaster.dk 180 merged | an `acl` login answered at guest still runs `status` and `neighbours`, `ok` with `loggedInAs` beside the data; `telemetry` and the rest refused as before |
+| 47 | [only-a-login-reply-answers-a-login](47-only-a-login-reply-answers-a-login.md) | — | while a login is awaited, a response that is not a login reply is dropped and the wait goes on; a late reply is known by its tag; nothing says *refused* of a login |
+| 48 | [a-line-that-cannot-be-asked-twice](48-a-line-that-cannot-be-asked-twice.md) | 47 | `setperm` for our own key is sent once and its silence checked with a blank login (grant, restore, removal); a grant drops the session so the verify logs in |
+| 49 | [a-console-reply-belongs-to-its-line](49-a-console-reply-belongs-to-its-line.md) | 47 | console lines carry the firmware's two-character prefix where the repeater reflects it, and only a reply with it is the answer |
+| 50 | [nothing-of-ours-left-behind](50-nothing-of-ours-left-behind.md) | 48, meshmaster.dk 191 merged | `acl: 0` on an admin claim: the session ends by taking this board's own key off the repeater |
 
 ```powershell
 .\tasks\run-all.ps1 -Phase '1.10'
@@ -41,7 +55,7 @@ whole, at any class), 46 after 180 (an `acl` login answered at guest still runs 
 
 ## Models
 
-- **Opus** — 38–46.
+- **Opus** — 38–50.
 
 ## Follow-ups
 
