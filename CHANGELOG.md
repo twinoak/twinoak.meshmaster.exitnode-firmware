@@ -22,6 +22,48 @@ pull request, as `docs/` moves with code.
 
 ## Unreleased
 
+- **The owner-info reply is kept whole, and asked for at every class** (task
+  p1.10-45). **The fixture manifest moved** - `tests/fixtures/contracts` is now
+  copied from meshmaster.dk `cd872a7` - and **three free functions of the library
+  changed shape**, which is a compile error in your tree if you call them
+  directly (no method of `IMesh`, `IUplink`, `IPlatform`, `IClock`,
+  `IJobExtension`, `JobContext`, `ResultWriter` or `TextOut` moved, and neither
+  `kMeshReplyDataCap` nor `kMeshPathCap` did):
+
+  - `mm::parseOwnerInfoFirmware(data, len, char*, cap)` is gone, replaced by
+    `mm::parseOwnerInfo(data, len, mm::OwnerInfoReply&)` (`agent/ReplyCodec.h`),
+    which splits `REQ_TYPE_GET_OWNER_INFO`'s reply at its **first two** newlines:
+    the firmware version, the node name, and the owner info as the rest of the
+    reply verbatim - `set owner.info a|b` stores a line break, so the third line
+    may carry newlines of its own. `kMaxNodeNameLen` (31) and `kMaxOwnerInfoLen`
+    (119) are the firmware's own `node_name[32]` and `owner_info[120]`; a longer
+    line is kept, cut, with `nodeNameCut` / `ownerInfoCut` set.
+  - `mm::writeStatusResult(…, const char* firmware, …)` now takes
+    `const OwnerInfoReply* owner` in that place (`agent/JobResults.h`).
+    **nullptr** is a read that made no owner-info request and writes none of the
+    three fields; a line the reply carried **empty** is written as `""` rather
+    than left out, because at the other end an empty reading is stored and an
+    absent one is not.
+  - `mm::readsFirmwareVersion(job)` is now `mm::readsOwnerInfo(job)`
+    (`agent/JobEnvelopes.h`) and **the credential class is no longer part of the
+    answer**: the claim's `StatusPayload.version` is the whole of it.
+    `mm::transactionsFor("status", class)` is therefore **2 at every class** and
+    not 1 below `acl`, so a guest-class status read is priced one transaction
+    higher than it was; `transactionsOf` still takes it back to 1 for a claim
+    that said the reply is not wanted.
+
+  **What moved behind them**: a `status` read makes the owner-info request at
+  **any** class the job goes at, because `MyMesh::handleRequest` checks no
+  permission at all for that request and its reply carries the node name and the
+  owner info as well as the version - which meshmaster.dk now shows on every
+  repeater page (its task p4.30-181). The result carries `nodeName` and
+  `ownerInfo` beside `firmware`. **One repeater is not asked**: a login reply
+  that said `FIRMWARE_VER_LEVEL` below 2 (`kOwnerInfoVerLevel`) does not know the
+  request and would answer it with silence, so it is skipped and the job's log
+  says why; a job that reused an earlier job's session was told no level, and not
+  knowing is not a reason to skip. A job your mesh answers locally
+  (`answersLocally`) follows the same rule and spends no airtime on it.
+
 - **An empty `get` reply is a value, not a raw line** (task p1.10-44). **Nothing
   of a pin moved** - not a method of `IMesh`, `IUplink`, `IPlatform`, `IClock`,
   `IJobExtension`, `JobContext`, `ResultWriter` or `TextOut`, not

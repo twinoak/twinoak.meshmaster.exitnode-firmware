@@ -21,10 +21,14 @@ namespace {
 // ------------------------------------------------------------------ the price
 
 TEST(TransactionCosts, TheFourTypesCostWhatThePlannedLoadPricesThem) {
-  // status: one request, and two at class acl - the firmware version comes from a second,
-  // owner-info request, and the association's verify step records the version it was proved on.
-  EXPECT_EQ(mm::transactionsFor("status", mm::CredentialClass::Guest), 1);
-  EXPECT_EQ(mm::transactionsFor("status", mm::CredentialClass::Admin), 1);
+  // status: the status request, and the owner-info request beside it - two at **every** class
+  // since meshmaster.dk's task p4.30-181, which took the class parameter off
+  // `TransactionCosts.StatusRequests` because `handleRequest` checks no permission for that
+  // request and its reply carries the node name and the owner info as well as the version. This
+  // is §7's row - the ceiling - and `transactionsOf` is what takes it back down to one for a
+  // claim whose payload said the reply is not wanted.
+  EXPECT_EQ(mm::transactionsFor("status", mm::CredentialClass::Guest), 2);
+  EXPECT_EQ(mm::transactionsFor("status", mm::CredentialClass::Admin), 2);
   EXPECT_EQ(mm::transactionsFor("status", mm::CredentialClass::Acl), 2);
 
   EXPECT_EQ(mm::transactionsFor("telemetry", mm::CredentialClass::Acl), 1);
@@ -41,9 +45,10 @@ TEST(TransactionCosts, TheFourTypesCostWhatThePlannedLoadPricesThem) {
 }
 
 // MONITORING §2's own arithmetic, in the guidance printed beside the schedule fields: a
-// status+telemetry pair is one login and two requests - three transactions through a guest
-// fallback pair, four through an acl association, where the status read fetches the firmware
-// version as well.
+// status+telemetry pair is one login and two requests, and the status read's own second request
+// makes it four - at either class since meshmaster.dk's task p4.30-181, which is the read that
+// fetches the owner-info reply; the twenty-three daily reads whose claim says the reply is fresh
+// are three, as `transactionsOf` prices them.
 // The writes (tasks p4-53, 54, 55): an apply is n + m + 1 with m = n, two commands being five
 // transactions and a login; every other write is one command, one reply, sent once.
 TEST(TransactionCosts, TheWritesCostWhatThePlannedLoadPricesThem) {
@@ -56,12 +61,12 @@ TEST(TransactionCosts, TheWritesCostWhatThePlannedLoadPricesThem) {
   }
 }
 
-TEST(TransactionCosts, TheStatusAndTelemetryPairCostsThreeOrFour) {
+TEST(TransactionCosts, TheStatusAndTelemetryPairCostsFourAtEitherClass) {
   const int guestPair = mm::kTransactionsForLogin + mm::transactionsFor("status", mm::CredentialClass::Guest) +
                         mm::transactionsFor("telemetry", mm::CredentialClass::Guest);
   const int aclPair = mm::kTransactionsForLogin + mm::transactionsFor("status", mm::CredentialClass::Acl) +
                       mm::transactionsFor("telemetry", mm::CredentialClass::Acl);
-  EXPECT_EQ(guestPair, 3);
+  EXPECT_EQ(guestPair, 4);
   EXPECT_EQ(aclPair, 4);
 }
 

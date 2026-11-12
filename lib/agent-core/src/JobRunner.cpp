@@ -216,6 +216,11 @@ JobRunner::LoginResult JobRunner::loginOnce(const ClaimedJob& job, Context& ctx,
   char level[24] = {0};
   if (login.hasFirmwareLevel) {
     std::snprintf(level, sizeof level, ", firmware level %u", static_cast<unsigned>(login.firmwareLevel));
+    // Kept for the owner-info request, which no repeater below kOwnerInfoVerLevel knows (task
+    // p4.30-181). Set whatever the login came to: a reply answered below the class the job asked
+    // for still told us the level, and the job that follows it on the same repeater may use it.
+    ctx.hasFirmwareLevel = true;
+    ctx.firmwareLevel = login.firmwareLevel;
   }
   if (stored == nullptr || !stored->satisfies(job.credentialClass)) {
     // A login judged against the class it was for, the moment it comes back (task p3.5-41):
@@ -546,25 +551,48 @@ Outcome JobRunner::runStatus(const ClaimedJob& job, Context& ctx, size_t& dataLe
     return Outcome::Failed;
   }
 
-  char firmware[kMaxFirmwareVersionLen + 1] = {0};
-  if (readsFirmwareVersion(job)) {
-    // The verify step of an association records the firmware it proved the ACL login on
-    // (EXIT-NODES §4.1 step 5); the version string is only readable through the owner-info
-    // request, one more transaction, so it is fetched for acl-class reads alone - and since
-    // meshmaster.dk's task p4.3-68 only when the claim asks for it, which is when the server's
-    // record is stale or this pair has recorded none. Forty-seven of a repeater's forty-eight
-    // daily reads are one transaction instead of two.
-    if (request(job, ctx, "owner info (firmware)", kReqTypeGetOwnerInfo, nullptr, 0) == Outcome::Ok) {
-      const MeshReply& owner = mesh_->reply();
-      parseOwnerInfoFirmware(owner.data, owner.len, firmware, sizeof firmware);
+  OwnerInfoReply owner;
+  bool haveOwner = false;
+  if (readsOwnerInfo(job)) {
+    // **The owner-info request**, one more transaction (EXIT-NODES §7). Its reply is three lines -
+    // `FIRMWARE_VERSION\nnode_name\nowner_info` - and this library kept the first until
+    // meshmaster.dk's task p4.30-181. The verify step of an association records the firmware it
+    // proved the ACL login on (§4.1 step 5), which is why it was fetched at all; the other two
+    // are what a repeater's owner put on the air for anybody who logs in, which a person wants
+    // for somebody else's repeater above all.
+    //
+    // Since meshmaster.dk's task p4.3-68 it is made only when the claim asks for it - the
+    // server's record of one of the three is stale, or this pair has recorded no version - and
+    // since 181 at **every class**, because `handleRequest` checks no permission for this
+    // request. A payload that says nothing is an older server and still means "read it".
+    if (ctx.hasFirmwareLevel && ctx.firmwareLevel < kOwnerInfoVerLevel) {
+      // No repeater below that level knows the request, and an unknown request is answered with
+      // silence: asking would buy one timeout and nothing else.
+      g_log.add("owner info not asked for: the login said firmware level %u, and the request arrived at level %u",
+                static_cast<unsigned>(ctx.firmwareLevel), static_cast<unsigned>(kOwnerInfoVerLevel));
+    } else if (request(job, ctx, "owner info", kReqTypeGetOwnerInfo, nullptr, 0) == Outcome::Ok) {
+      const MeshReply& reply2 = mesh_->reply();
+      haveOwner = parseOwnerInfo(reply2.data, reply2.len, owner);
+      if (haveOwner) {
+        if (owner.nodeNameCut) {
+          g_log.add("the node name was longer than the %u characters the firmware's field holds, and the rest is "
+                    "dropped",
+                    static_cast<unsigned>(kMaxNodeNameLen));
+        }
+        if (owner.ownerInfoCut) {
+          g_log.add("the owner info was longer than the %u characters the firmware's field holds, and the rest is "
+                    "dropped",
+                    static_cast<unsigned>(kMaxOwnerInfoLen));
+        }
+      }
     } else {
-      g_log.add("the firmware version was not read; the status itself stands");
+      g_log.add("the owner info was not read; the status itself stands");
     }
   }
 
   ErrorCounter errors[kMaxStatusErrors];
   const int errorCount = statusErrors(reading, errors, kMaxStatusErrors);
-  dataLen = writeStatusResult(reading, errors, errorCount, firmware[0] != '\0' ? firmware : nullptr, g_data, kDataCap);
+  dataLen = writeStatusResult(reading, errors, errorCount, haveOwner ? &owner : nullptr, g_data, kDataCap);
   return dataLen > 0 ? Outcome::Ok : Outcome::Failed;
 }
 

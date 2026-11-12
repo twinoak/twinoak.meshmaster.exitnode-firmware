@@ -22,8 +22,12 @@ int neighbourPages(int neighbours) {
 int transactionsFor(const char* type, CredentialClass credentialClass, int items) {
   if (type == nullptr) return 1;
   if (std::strcmp(type, "status") == 0) {
-    // The firmware version comes from a second request, and only this class needs it.
-    return credentialClass == CredentialClass::Acl ? 2 : 1;
+    // The owner-info reply comes from a second request, which EXIT-NODES §7 prices into the row
+    // at **every** class since meshmaster.dk's task p4.30-181. This is the row's own number -
+    // the ceiling, as `TransactionCosts.StatusRequests()` with no payload is - and
+    // transactionsOf() takes it back down to one for a claim that said the reply is not wanted.
+    (void)credentialClass;
+    return 2;
   }
   if (std::strcmp(type, "neighbours") == 0) return neighbourPages(items);
   if (std::strcmp(type, "config.read") == 0) {

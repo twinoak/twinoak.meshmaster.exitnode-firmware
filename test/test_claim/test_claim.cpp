@@ -699,7 +699,7 @@ TEST(Claim, TheCredentialFixtureIsAShapeAndEveryFieldOfItIsRead) {
 // StatusPayload.Version (meshmaster.dk's task p4.3-68). The payload is the only place the claim
 // says it, and absent is "read it": tests/fixtures/contracts/StatusPayload.json is `{}` for that
 // reason, and so is ClaimedJob.json's payload. What the firmware then does with the field is
-// readsFirmwareVersion(), which test_job_results holds to both answers.
+// readsOwnerInfo(), which test_job_results holds to both answers.
 TEST(Claim, TheStatusPayloadsVersionIsReadAndAbsentMeansReadIt) {
   std::string reply = fixture("ClaimResponse");
   mm::ClaimedJob jobs[mm::kClaimMax];

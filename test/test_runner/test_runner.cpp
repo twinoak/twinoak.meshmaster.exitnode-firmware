@@ -420,7 +420,11 @@ TEST(Citations, TheFakesLoginReplyIsTheFixturesBytes) {
 // ---------------------------------------------------------------------------------------------
 // The four reads
 
-TEST_F(RunnerTest, AStatusReadAtGuestIsOneTransactionAndOneLogin) {
+// A guest-class read asks for the owner-info reply too since meshmaster.dk's task p4.30-181:
+// `handleRequest` checks no permission at all for `REQ_TYPE_GET_OWNER_INFO`, and the node name
+// and the owner info are wanted for every repeater a person can see - somebody else's above all,
+// which is exactly the repeater a guest-door pair reads.
+TEST_F(RunnerTest, AStatusReadAtGuestAsksForTheOwnerInfoToo) {
   mesh.setGuestPassword("gu3st-pass");
   const std::string body = run(fake::Job(12345, "status")
                                    .atClass("guest")
@@ -428,10 +432,10 @@ TEST_F(RunnerTest, AStatusReadAtGuestIsOneTransactionAndOneLogin) {
                                    .withGuestPassword("gu3st-pass"));
 
   EXPECT_EQ(outcomeOf(body), "ok");
-  EXPECT_EQ(transactionsOf(body), 2) << "one login and the status request (EXIT-NODES §7)";
+  EXPECT_EQ(transactionsOf(body), 3) << "the login, the status request and the owner-info request (EXIT-NODES §7)";
   EXPECT_EQ(mesh.logins(), 1);
   EXPECT_EQ(mesh.requestsOf(mm::kReqTypeGetStatus), 1);
-  EXPECT_EQ(mesh.requestsOf(mm::kReqTypeGetOwnerInfo), 0) << "the version is read at class acl alone";
+  EXPECT_EQ(mesh.requestsOf(mm::kReqTypeGetOwnerInfo), 1) << "at every class since task p4.30-181";
 
   // The envelope and the data, against the shapes ContractsJson writes.
   EXPECT_TRUE(fake::followsShapeOf(body, fake::contract("JobResultReport")));
@@ -441,12 +445,15 @@ TEST_F(RunnerTest, AStatusReadAtGuestIsOneTransactionAndOneLogin) {
   EXPECT_NE(data.find("\"batteryMv\":4012"), std::string::npos) << data;
   EXPECT_NE(data.find("\"uptimeS\":864000"), std::string::npos) << data;
   EXPECT_NE(data.find("\"lastSnr\":6.25"), std::string::npos) << data;
-  EXPECT_EQ(data.find("\"firmware\""), std::string::npos) << "no owner-info request was made";
+  // And the owner-info reply's three lines, from binary-response-owner-info.hex.
+  EXPECT_NE(data.find("\"firmware\":\"v1.17.1\""), std::string::npos) << data;
+  EXPECT_NE(data.find("\"nodeName\":\"Grenaa Chimney #1\""), std::string::npos) << data;
+  EXPECT_NE(data.find("\"ownerInfo\":\"TwinOak\""), std::string::npos) << data;
   EXPECT_EQ(memberOf(body, "pathUsed"), "[\"a1\",\"7f\"]") << "the path the claim carried, reported back";
   EXPECT_EQ(memberOf(body, "hops"), "2");
 }
 
-TEST_F(RunnerTest, AStatusReadAtAclAlsoFetchesTheFirmwareVersion) {
+TEST_F(RunnerTest, AStatusReadAtAclAlsoFetchesTheOwnerInfo) {
   mesh.grant(self(), mm::kPermReadOnly);
   const std::string body =
       run(fake::Job(12345, "status").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
@@ -460,7 +467,7 @@ TEST_F(RunnerTest, AStatusReadAtAclAlsoFetchesTheFirmwareVersion) {
   EXPECT_EQ(mesh.timesSent("setperm " + self() + " 1"), 0);
 }
 
-TEST_F(RunnerTest, AStatusReadTheClaimSaysNeedsNoVersionSpendsNothingOnIt) {
+TEST_F(RunnerTest, AStatusReadTheClaimSaysNeedsNoOwnerInfoSpendsNothingOnIt) {
   mesh.grant(self(), mm::kPermReadOnly);
   const std::string body = run(fake::Job(12345, "status")
                                    .atClass("acl")
@@ -470,6 +477,132 @@ TEST_F(RunnerTest, AStatusReadTheClaimSaysNeedsNoVersionSpendsNothingOnIt) {
 
   EXPECT_EQ(outcomeOf(body), "ok");
   EXPECT_EQ(transactionsOf(body), 2);
+  EXPECT_EQ(mesh.requestsOf(mm::kReqTypeGetOwnerInfo), 0);
+  const std::string data = dataOf(body);
+  EXPECT_EQ(data.find("\"firmware\""), std::string::npos) << data;
+  EXPECT_EQ(data.find("\"nodeName\""), std::string::npos) << data;
+  EXPECT_EQ(data.find("\"ownerInfo\""), std::string::npos) << data;
+}
+
+// And the same at guest: the payload is the whole of the claim's say, at every class.
+TEST_F(RunnerTest, AGuestStatusReadTheClaimSaysNeedsNoOwnerInfoDoesNotAsk) {
+  mesh.setGuestPassword("gu3st-pass");
+  const std::string body = run(fake::Job(12345, "status")
+                                   .atClass("guest")
+                                   .leasedUntil(kLease)
+                                   .withGuestPassword("gu3st-pass")
+                                   .withPayload("{\"version\":false}"));
+
+  EXPECT_EQ(outcomeOf(body), "ok");
+  EXPECT_EQ(transactionsOf(body), 2);
+  EXPECT_EQ(mesh.requestsOf(mm::kReqTypeGetOwnerInfo), 0);
+  EXPECT_EQ(dataOf(body).find("\"ownerInfo\""), std::string::npos) << dataOf(body);
+}
+
+// **Not below level 2.** `REQ_TYPE_GET_OWNER_INFO` is commented `FIRMWARE_VER_LEVEL >= 2`, and a
+// repeater that does not know a request type answers it with silence - so asking an older one
+// buys a timeout and nothing else. The level the login reply carried is what says so, and the
+// log says why, which is the difference between a request that was skipped and one that failed.
+TEST_F(RunnerTest, ARepeaterWhoseLoginSaidFirmwareLevelOneIsNotAskedForTheOwnerInfo) {
+  mesh.setFirmwareVerLevel(1);
+  mesh.grant(self(), mm::kPermReadOnly);
+  const std::string body =
+      run(fake::Job(12345, "status").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
+
+  EXPECT_EQ(outcomeOf(body), "ok");
+  EXPECT_EQ(transactionsOf(body), 2) << "the login and the status request; the owner info was never asked for";
+  EXPECT_EQ(mesh.requestsOf(mm::kReqTypeGetOwnerInfo), 0);
+  const std::string data = dataOf(body);
+  EXPECT_EQ(data.find("\"firmware\""), std::string::npos) << data;
+  EXPECT_EQ(data.find("\"nodeName\""), std::string::npos) << data;
+  EXPECT_EQ(data.find("\"ownerInfo\""), std::string::npos) << data;
+  EXPECT_NE(memberOf(body, "log").find("owner info not asked for: the login said firmware level 1"),
+            std::string::npos)
+      << memberOf(body, "log");
+}
+
+// An owner info of two lines - `set owner.info a|b`, which the firmware stores with a newline -
+// reaches the server as one value with its newline kept and escaped. And an empty one is `""`
+// and not left out: *the owner has written nothing* is not *nobody has asked*.
+TEST_F(RunnerTest, TheOwnerInfosOwnNewlinesTravelAndAnEmptyOneIsStillAValue) {
+  mesh.grant(self(), mm::kPermReadOnly);
+  mesh.setOwnerInfoReply("v1.18.0\nGrenaa Chimney #1\nTwinOak\nthomas@twinoak.dk");
+  const std::string twoLines =
+      run(fake::Job(12345, "status").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
+  EXPECT_EQ(outcomeOf(twoLines), "ok");
+  EXPECT_NE(dataOf(twoLines).find("\"ownerInfo\":\"TwinOak\\nthomas@twinoak.dk\""), std::string::npos)
+      << dataOf(twoLines);
+
+  mesh.setOwnerInfoReply("v1.18.0\nGrenaa Chimney #1\n");
+  const std::string empty =
+      run(fake::Job(12346, "status").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
+  EXPECT_EQ(outcomeOf(empty), "ok");
+  EXPECT_NE(dataOf(empty).find("\"nodeName\":\"Grenaa Chimney #1\",\"ownerInfo\":\"\"}"), std::string::npos)
+      << dataOf(empty);
+
+  mesh.setOwnerInfoReply("v1.18.0");
+  const std::string versionOnly =
+      run(fake::Job(12347, "status").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
+  EXPECT_EQ(outcomeOf(versionOnly), "ok");
+  EXPECT_NE(dataOf(versionOnly).find("\"firmware\":\"v1.18.0\"}"), std::string::npos) << dataOf(versionOnly);
+  EXPECT_EQ(dataOf(versionOnly).find("\"nodeName\""), std::string::npos) << dataOf(versionOnly);
+}
+
+// A value longer than the firmware's own field is kept, cut, and the job's log says it was.
+//
+// **No stock repeater can send one.** `node_name[32]` and `owner_info[120]` bound the reply at
+// 8 + 31 + 1 + 119 = 159 bytes and `Mesh::createDatagram` refuses a plaintext past 167, so the
+// two cannot even be over-long at once - which is why the two cases are two reads here. A
+// firmware with wider fields is what this guards against, and neither its name nor its note is
+// dropped for being long: it arrives cut, and the log says so rather than the server guessing.
+TEST_F(RunnerTest, ACutNameOrOwnerInfoSaysSoInTheLog) {
+  mesh.grant(self(), mm::kPermReadOnly);
+  mesh.setOwnerInfoReply("v1.18.0\n" + std::string(mm::kMaxNodeNameLen + 3, 'n') + "\nTwinOak");
+  const std::string name =
+      run(fake::Job(12345, "status").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
+
+  EXPECT_EQ(outcomeOf(name), "ok");
+  EXPECT_NE(dataOf(name).find("\"nodeName\":\"" + std::string(mm::kMaxNodeNameLen, 'n') + "\",\"ownerInfo\":\"TwinOak\""),
+            std::string::npos)
+      << dataOf(name);
+  EXPECT_NE(memberOf(name, "log").find("the node name was longer than the 31 characters"), std::string::npos)
+      << memberOf(name, "log");
+
+  mesh.setOwnerInfoReply("v1.18.0\nGrenaa\n" + std::string(mm::kMaxOwnerInfoLen + 5, 'o'));
+  const std::string info =
+      run(fake::Job(12346, "status").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
+
+  EXPECT_EQ(outcomeOf(info), "ok");
+  EXPECT_NE(dataOf(info).find("\"ownerInfo\":\"" + std::string(mm::kMaxOwnerInfoLen, 'o') + "\""), std::string::npos)
+      << dataOf(info);
+  EXPECT_NE(memberOf(info, "log").find("the owner info was longer than the 119 characters"), std::string::npos)
+      << memberOf(info, "log");
+}
+
+// A job the mesh answers **without the air** (tasks p1.10-40 and 41) follows the same rule: the
+// claim's payload decides, the request is made through the door, and it costs the airtime budget
+// nothing - which is the point of the door and not an exception to this rule.
+TEST_F(RunnerTest, ALocalJobAsksForTheOwnerInfoOnTheSameRuleAndSpendsNoAirtime) {
+  mesh.grant(self(), mm::kPermReadOnly);
+  mesh.setLocalDoorKey(repeater());
+  const std::string body =
+      run(fake::Job(12345, "status").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
+
+  EXPECT_EQ(outcomeOf(body), "ok");
+  EXPECT_EQ(transactionsOf(body), 0) << "none of it was on the air";
+  EXPECT_EQ(mesh.requestsOf(mm::kReqTypeGetOwnerInfo), 1);
+  const std::string data = dataOf(body);
+  EXPECT_NE(data.find("\"nodeName\":\"Grenaa Chimney #1\""), std::string::npos) << data;
+  EXPECT_NE(data.find("\"ownerInfo\":\"TwinOak\""), std::string::npos) << data;
+
+  // And the claim still has the last word on a local job as on one on the air.
+  mesh.forgetSends();
+  const std::string quiet = run(fake::Job(12346, "status")
+                                    .atClass("acl")
+                                    .leasedUntil(kLease)
+                                    .withAclLevel(mm::kPermReadOnly)
+                                    .withPayload("{\"version\":false}"));
+  EXPECT_EQ(outcomeOf(quiet), "ok");
   EXPECT_EQ(mesh.requestsOf(mm::kReqTypeGetOwnerInfo), 0);
 }
 

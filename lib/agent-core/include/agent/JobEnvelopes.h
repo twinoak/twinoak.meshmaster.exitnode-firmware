@@ -110,11 +110,15 @@ struct ClaimedJob {
   bool advertFlood = true;  // AdvertRequestPayload.Flood defaults to true: the flood is what refreshes paths
 
   // StatusPayload.Version (meshmaster.dk's task p4.3-68): whether this status read also makes
-  // the owner-info request that carries the firmware version. **Absent is "read it"** - what
-  // every claim said before that task - and `false` is the claim saying the server's record is
-  // fresh enough to spend nothing on, which at the default schedules is forty-seven of a
-  // repeater's forty-eight daily reads. readsFirmwareVersion() below is the rule; this is only
-  // what the payload said.
+  // the owner-info request. **Absent is "read it"** - what every claim said before that task -
+  // and `false` is the claim saying the server's record is fresh enough to spend nothing on,
+  // which at the default schedules is twenty-three of a repeater's twenty-four daily reads.
+  // readsOwnerInfo() below is the rule; this is only what the payload said.
+  //
+  // **The field is still called `version` on the wire** (meshmaster.dk's task p4.30-181): what it
+  // suppresses grew from one line of the reply to three - the version, the node name and the
+  // owner info - but a server that renamed the field would have gone silent to every exit node
+  // built before that task. The name is the history; the meaning is readsOwnerInfo().
   bool statusVersion = true;
   PasswordField passwordField = PasswordField::None;
 
@@ -150,11 +154,20 @@ bool canRun(const ClaimedJob& job, char* why, size_t whyCap);
 // they are for is the session cache's own answer to the same question.
 bool sharesLogin(const ClaimedJob& a, const ClaimedJob& b);
 
-// Whether a status job also fetches the firmware version, which is one transaction more
-// (EXIT-NODES §7). One rule, in one place, as StatusPayload.ReadsVersion is on the server:
-// class `acl` - only the association's verify step needs the version at all - unless the
-// claim's payload says the server does not want it this time. A job of another type is false.
-bool readsFirmwareVersion(const ClaimedJob& job);
+// Whether a status job also makes the owner-info request, which is one transaction more
+// (EXIT-NODES §7). One rule, in one place, as StatusPayload.ReadsOwnerInfo is on the server:
+// **every class a status read goes at**, unless the claim's payload says the server does not
+// want the reply this time. A job of another type is false.
+//
+// Class `acl` alone fetched it until meshmaster.dk's task p4.30-181, because only the
+// association's verify step needed the firmware version. The reply's other two lines - the node
+// name and the owner info - are wanted for every repeater a person can see, somebody else's
+// included, and `MyMesh::handleRequest` checks no permission at all for this request, so a guest
+// login is answered it. The class is therefore no longer part of the question.
+//
+// It is not the whole of *when*: the firmware level the login reply carried is the other half,
+// and a repeater below kOwnerInfoVerLevel is not asked (JobRunner's runStatus).
+bool readsOwnerInfo(const ClaimedJob& job);
 
 // Whether the lease this job was claimed under has run out (task 06). A claim's jobs are run one
 // at a time and a job is minutes of airtime, so a server that went away under a claim - or a

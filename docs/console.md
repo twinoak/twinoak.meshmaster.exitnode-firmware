@@ -281,15 +281,29 @@ claim carried no admin password is still `unauthorized` with nothing sent at all
 (`the claim carried no admin material; nothing to log in with`): there is no admin
 login without one.
 
-An `acl`-class `status` is the one read whose transaction count moves with what
-the claim asked for: it fetches the firmware version with a second request
-(`owner info (firmware)`) only when the claim's payload wants it, which the
-server asks for once a day per repeater and not on the other forty-seven reads
-(meshmaster.dk's task p4.3-68). So `jobs` shows that read as **2
-transaction(s)** the first time after a grant and after each day's refresh, and
-**1** the rest of the time; a payload that says nothing at all - an older
-server - is two every time, which is what the count was before. Nothing is
-logged when the request is skipped, because nothing was sent.
+A `status` is the one read whose transaction count moves with what the claim
+asked for: it makes a second request (`owner info`) only when the claim's
+payload wants the reply, which the server asks for once a day per repeater and
+not on the other reads of that day (meshmaster.dk's task p4.3-68). So `jobs`
+shows such a read as **2 transaction(s)** the first time after a grant and after
+each day's refresh, and **1** the rest of the time; a payload that says nothing
+at all - an older server - is two every time, which is what the count was
+before. Nothing is logged when the claim's payload is what skipped it, because
+nothing was sent.
+
+That request goes at **every class** since meshmaster.dk's task p4.30-181, not
+at `acl` alone: its reply is three lines - the firmware version, the node name
+and the owner info - and `handleRequest` checks no permission at all for it, so a
+guest login is answered the whole of it. The result carries all three
+(`firmware`, `nodeName`, `ownerInfo`), each absent when the request was not made;
+a value longer than the firmware's own field (31 characters for the name, 119 for
+the owner info) is kept, cut, and the log says it was cut. **One repeater is not
+asked**: a login reply that said `FIRMWARE_VER_LEVEL` below 2 is a repeater that
+does not know the request and would answer it with silence, so the request is
+skipped and the log says why in one line - `owner info not asked for: the login
+said firmware level 1, and the request arrived at level 2`. A job that reused an
+earlier job's session was told no level, and *not knowing is not a reason to
+skip*: it asks.
 
 The writes (task 05) say what they sent and what came back, and the .NET agent's
 words for it: `apply plan 3f2a…: 2 command(s), single attempt, stop at the first

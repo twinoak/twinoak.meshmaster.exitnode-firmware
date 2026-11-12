@@ -128,9 +128,9 @@ bool canRun(const ClaimedJob& job, char* why, size_t whyCap) {
   return true;
 }
 
-bool readsFirmwareVersion(const ClaimedJob& job) {
+bool readsOwnerInfo(const ClaimedJob& job) {
   if (std::strcmp(job.type, "status") != 0) return false;
-  return job.credentialClass == CredentialClass::Acl && job.statusVersion;
+  return job.statusVersion;
 }
 
 bool sharesLogin(const ClaimedJob& a, const ClaimedJob& b) {

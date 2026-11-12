@@ -195,13 +195,94 @@ TEST(Status, AStatsStructShorterThanTheFixedFieldsIsRefused) {
   EXPECT_FALSE(mm::parseRepeaterStats(nullptr, 56, s));
 }
 
-TEST(OwnerInfo, OnlyTheFirmwareVersionIsKeptAndTheNameAndOwnerAreNot) {
+// All three lines of the reply, which this library kept the first of until meshmaster.dk's task
+// p4.30-181. The transcribed frame is the firmware's own `sprintf`: the version, the node name
+// and the owner info, one newline between each.
+TEST(OwnerInfo, TheThreeLinesOfTheReplyAreAllKept) {
   const auto data = afterTag("binary-response-owner-info");
-  char firmware[mm::kMaxFirmwareVersionLen + 1] = {0};
-  ASSERT_TRUE(mm::parseOwnerInfoFirmware(data.data(), data.size(), firmware, sizeof firmware));
-  EXPECT_STREQ(firmware, "v1.17.1");
-  EXPECT_EQ(std::string(firmware).find("Grenaa"), std::string::npos);
-  EXPECT_EQ(std::string(firmware).find("TwinOak"), std::string::npos);
+  mm::OwnerInfoReply owner;
+  ASSERT_TRUE(mm::parseOwnerInfo(data.data(), data.size(), owner));
+  EXPECT_STREQ(owner.firmware, "v1.17.1");
+  EXPECT_TRUE(owner.hasNodeName);
+  EXPECT_STREQ(owner.nodeName, "Grenaa Chimney #1");
+  EXPECT_TRUE(owner.hasOwnerInfo);
+  EXPECT_STREQ(owner.ownerInfo, "TwinOak");
+  EXPECT_FALSE(owner.nodeNameCut);
+  EXPECT_FALSE(owner.ownerInfoCut);
+}
+
+// A helper that reads a reply written as text, which is what the firmware's `sprintf` leaves
+// behind the four-byte tag.
+mm::OwnerInfoReply parsed(const std::string& text, bool expected = true) {
+  mm::OwnerInfoReply owner;
+  EXPECT_EQ(mm::parseOwnerInfo(reinterpret_cast<const uint8_t*>(text.data()), text.size(), owner), expected) << text;
+  return owner;
+}
+
+// `set owner.info a|b` stores a line break (`CommonCLI.cpp` translates `|` to a newline), so the
+// owner info is the **rest** of the reply and the split stops at the second newline.
+TEST(OwnerInfo, AnOwnerInfoOfTwoLinesKeepsItsOwnNewline) {
+  const mm::OwnerInfoReply owner = parsed("v1.18.0\nGrenaa Chimney #1\nTwinOak\nthomas@twinoak.dk");
+  EXPECT_STREQ(owner.firmware, "v1.18.0");
+  EXPECT_STREQ(owner.nodeName, "Grenaa Chimney #1");
+  EXPECT_STREQ(owner.ownerInfo, "TwinOak\nthomas@twinoak.dk");
+}
+
+TEST(OwnerInfo, AReplyWithTheVersionAloneCarriesNeitherOtherField) {
+  const mm::OwnerInfoReply owner = parsed("v1.11.0");
+  EXPECT_STREQ(owner.firmware, "v1.11.0");
+  EXPECT_FALSE(owner.hasNodeName);
+  EXPECT_FALSE(owner.hasOwnerInfo);
+}
+
+// An **empty** line is the owner's own answer - nothing written - and an **absent** one is a
+// reply that did not carry the field. The firmware's `sprintf` writes both newlines whatever the
+// two fields hold, so an empty `owner_info` arrives as a third line that is empty.
+TEST(OwnerInfo, AnEmptyLineIsPresentAndAnAbsentOneIsNot) {
+  const mm::OwnerInfoReply both = parsed("v1.18.0\n\n");
+  EXPECT_TRUE(both.hasNodeName);
+  EXPECT_STREQ(both.nodeName, "");
+  EXPECT_TRUE(both.hasOwnerInfo);
+  EXPECT_STREQ(both.ownerInfo, "");
+
+  const mm::OwnerInfoReply nameOnly = parsed("v1.18.0\nGrenaa");
+  EXPECT_TRUE(nameOnly.hasNodeName);
+  EXPECT_FALSE(nameOnly.hasOwnerInfo) << "two lines: the third is absent, not empty";
+}
+
+// Trailing NUL bytes are a cipher block's padding and never the firmware's, which writes no
+// terminator of its own into the frame (the .NET agent's `TrimEnd('\0')`). A reply that is
+// nothing but padding is no reply at all.
+TEST(OwnerInfo, ThePaddingOfTheCipherBlockIsNotPartOfTheOwnerInfo) {
+  const mm::OwnerInfoReply owner = parsed(std::string("v1.18.0\nGrenaa\nTwinOak") + std::string(5, '\0'));
+  EXPECT_STREQ(owner.ownerInfo, "TwinOak");
+
+  mm::OwnerInfoReply nothing;
+  const std::string padding(8, '\0');
+  EXPECT_FALSE(mm::parseOwnerInfo(reinterpret_cast<const uint8_t*>(padding.data()), padding.size(), nothing));
+  EXPECT_STREQ(nothing.firmware, "");
+  EXPECT_FALSE(mm::parseOwnerInfo(nullptr, 0, nothing));
+}
+
+// A line longer than the firmware's own field is a firmware this library does not know: it is
+// kept, cut to the field's width, and the cut is said out loud so the job's log can carry it.
+TEST(OwnerInfo, ALineLongerThanTheFirmwaresFieldIsCutAndSaysSo) {
+  const std::string name(mm::kMaxNodeNameLen + 4, 'n');
+  const std::string info(mm::kMaxOwnerInfoLen + 7, 'o');
+  const mm::OwnerInfoReply owner = parsed("v1.18.0\n" + name + "\n" + info);
+  EXPECT_EQ(std::string(owner.nodeName).size(), mm::kMaxNodeNameLen);
+  EXPECT_TRUE(owner.nodeNameCut);
+  EXPECT_EQ(std::string(owner.ownerInfo).size(), mm::kMaxOwnerInfoLen);
+  EXPECT_TRUE(owner.ownerInfoCut);
+
+  // The firmware's own fields, less their terminators: `node_name[32]` and `owner_info[120]` of
+  // src/helpers/CommonCLI.h, and StatusResult's MaxNodeName and MaxOwnerInfo on the server.
+  EXPECT_EQ(mm::kMaxNodeNameLen, 31u);
+  EXPECT_EQ(mm::kMaxOwnerInfoLen, 119u);
+  const mm::OwnerInfoReply exact =
+      parsed("v1.18.0\n" + std::string(mm::kMaxNodeNameLen, 'n') + "\n" + std::string(mm::kMaxOwnerInfoLen, 'o'));
+  EXPECT_FALSE(exact.nodeNameCut) << "a value that fits exactly is not a cut";
+  EXPECT_FALSE(exact.ownerInfoCut);
 }
 
 // ------------------------------------------------------------------ telemetry
