@@ -572,6 +572,149 @@ Outcome JobRunner::adminSession(const ClaimedJob& job, Context& ctx) {
   return Outcome::Ok;
 }
 
+// ------------------------------------------------------------------ a line that cannot be asked twice
+//
+// **`setperm <our own key> <level>` is sent once, and its silence is checked with a blank login**
+// (task p1.10-48; meshmaster.dk's tasks p4.32-188 and p4.32-189 are the server's half).
+//
+// The line runs on a session whose key is, at that moment, admin, and on stock firmware the
+// session *is* the ACL entry: `ClientACL::applyPermissions` writes the `ClientInfo` the login
+// filled (src/helpers/ClientACL.cpp:121-144 at 81dbae59). So once the line has run the key is at
+// `<level>`, and `onPeerDataRecv` runs a console line only for a sender that `isAdmin()`,
+// dropping every further line from this key without a word
+// (examples/simple_repeater/MyMesh.cpp:702). The retry of EXIT-NODES §5 is therefore
+// unanswerable, and until this task the job ended `unreachable` with the line having done its
+// work: meshmaster.dk, 12 November 2026, 32 grants confirmed and 20 failed this way after an
+// answered admin login (jobs 4558, 4568, 4590, 4644, 21870, 26068), and the restore after an
+// admin job the same - association 3 found *elevated* seven times in 39 days.
+//
+// What the line did is read back instead, with a **blank login**: this board's own key, no secret
+// at all, one transaction, and a reply that carries the entry's own permission byte
+// (`handleLoginReq`: a blank password is the ACL lookup alone, and `reply_data[7]` is
+// `client->permissions`, MyMesh.cpp:91-99 and 135-144).
+//
+//   answered at the level asked for   the line ran, and its "OK" was lost: confirmed, by the
+//                                     login and not by an "OK"
+//   answered at admin                 the line did not arrive. The session is admin again, so
+//                                     the line is sent once more and checked once more. **Two
+//                                     rounds at most**
+//   answered at guest, level 0        the confirmation that the key is off: `applyPermissions`
+//                                     **deletes** a guest-role entry, so the blank login falls
+//                                     through to the password compare and a repeater with no
+//                                     guest password answers it at guest
+//   no answer                         not confirmed. A repeater with a guest password answers a
+//                                     key it does not hold with silence, and so does one that is
+//                                     off the air: nothing is known, and the result says the line
+//                                     went out and could not be confirmed
+//
+// Level 0 has a reason of its own to need this. `applyPermissions` deletes the entry by moving
+// the later ones down, while `onPeerDataRecv` holds a pointer into the slot the sender had
+// *before* `handleCommand` ran (`client = acl.getClientByIdx(i)`, MyMesh.cpp:670) and addresses
+// the reply to whatever sits in it afterwards (MyMesh.cpp:751). Unless our own entry was the last
+// one in the table, the "OK" is addressed to another client and cannot reach us at all. That is
+// how the pinned source reads; nobody has tried it on a board, and `test/support/FakeMesh.h` is
+// the second reading of it.
+
+bool JobRunner::readOwnEntryLevel(const ClaimedJob& job, Context& ctx, const char* what, uint8_t& role) {
+  role = 0;
+  if (!spend(job, ctx)) {
+    g_log.add("%s: not sent, the lease ran out", what);
+    return false;
+  }
+  uint32_t tag = 0;
+  const FloodMode mode = scopeTheNextSend();
+  const SendResult sent = mesh_->sendLogin("", tag);
+  noteSend(sent, mode);
+  if (sent == SendResult::Failed) {
+    g_log.add("%s: the packet could not be built", what);
+    return false;
+  }
+  char how[48];
+  describeSend(sent, mode, how, sizeof how);
+  // The wait every login of this file shares (task p1.10-47), and nowhere does it matter more:
+  // the reply this one may have to drop is the very "OK" whose loss it is checking, and a text
+  // frame read as a login reply would have made its bytes into the entry's level. `ctx.stage` is
+  // deliberately left where the line put it - this login is the *check* and not the job's own,
+  // so a job that fails here still reports the step it failed at (task p1.7-28).
+  LoginReply login;
+  if (!awaitLoginReply(job, ctx, what, login)) {
+    g_log.add("%s: no reply (%s)", what, how);
+    return false;
+  }
+  flood_.answered();
+  // No session is stored from this reply, whatever it says: a grant keeps none and a restore
+  // stores its own at the level it put back.
+  const uint8_t permissions = login.hasAclPermissions ? login.aclPermissions : login.role();
+  role = static_cast<uint8_t>(permissions & kPermRoleMask);
+  g_log.add("%s: answered at %s%s (%s)", what, permissionName(role), login.legacy ? " (a legacy reply)" : "", how);
+  LOG_I("jobs: job %lld: %s: answered at %s", job.id, what, permissionName(role));
+  return true;
+}
+
+JobRunner::OwnEntryWrite JobRunner::writeOwnEntry(const ClaimedJob& job, Context& ctx, const char* command, int level,
+                                                  const char* what) {
+  OwnEntryWrite wrote;
+  // The rounds and the checks between them are one flooded transaction's retries
+  // (agent/FloodScope.h): nestable, so each line's own transaction nests inside this one.
+  const FloodTransaction transaction(flood_);
+  const uint8_t asked = static_cast<uint8_t>(level & kPermRoleMask);
+  for (int round = 1; round <= 2; round++) {
+    // **Sent once.** `retry` false, because the retry is the whole fault: it can be answered
+    // only if the line never arrived, which is the one case the check below finds out about
+    // anyway - and then the line goes again, deliberately, with the session known to be admin.
+    const Outcome sent = cliLine(job, ctx, what, command, false);
+    wrote.sent = sent;
+    if (sent != Outcome::Ok && sent != Outcome::Unreachable) return wrote;  // nothing went out
+    wrote.wentOut = true;
+    trimInPlace(g_cliReply);
+    if (sent == Outcome::Ok) {
+      g_log.add("the repeater answered '%s'", g_cliReply);
+      wrote.confirmed = startsWithOk(g_cliReply);
+      return wrote;
+    }
+    g_log.add("%s: no answer, and this line cannot be asked twice - if it ran, this key is no longer admin and the "
+              "repeater drops a retry from it without a word. What it did is read back with a blank login instead "
+              "(task p1.10-48)",
+              what);
+    uint8_t role = 0;
+    if (!readOwnEntryLevel(job, ctx, "the entry check (blank login)", role)) {
+      g_log.add("the blank login was not answered either: a repeater with a guest password answers a key it does "
+                "not hold with silence, and so does one that is off the air - nothing is known, and the line went "
+                "out and could not be confirmed (task p1.10-48)");
+      return wrote;
+    }
+    if (role == asked) {
+      wrote.confirmed = true;
+      wrote.byLogin = true;
+      if (level == 0) {
+        g_log.add("the blank login was answered at guest, which is what a repeater answers a key its access list "
+                  "does not hold: this exit node's key is off it, so the line ran - confirmed by the login and not "
+                  "by an \"OK\" (task p1.10-48)");
+      } else {
+        g_log.add("the blank login was answered at %s, which is the level the line asked for: the line ran and its "
+                  "\"OK\" was lost - confirmed by the login and not by an \"OK\" (task p1.10-48)",
+                  permissionName(asked));
+      }
+      return wrote;
+    }
+    if (role == kPermAdmin) {
+      if (round == 1) {
+        g_log.add("the blank login was answered at admin: the line did not arrive, and the session is admin again - "
+                  "sending it once more (task p1.10-48)");
+        continue;
+      }
+      g_log.add("the blank login was answered at admin again: the line did not arrive twice, so it is not confirmed "
+                "(task p1.10-48)");
+      return wrote;
+    }
+    g_log.add("the blank login was answered at %s, which is neither %s nor admin: the line is not confirmed "
+              "(task p1.10-48)",
+              permissionName(role), permissionName(asked));
+    return wrote;
+  }
+  return wrote;
+}
+
 // ------------------------------------------------------------------ the restore (task p4.1-60)
 
 int JobRunner::restoreAcl(const ClaimedJob& job, Context& ctx, Outcome outcome) {
@@ -613,28 +756,38 @@ int JobRunner::restoreAcl(const ClaimedJob& job, Context& ctx, Outcome outcome) 
   std::snprintf(g_command, sizeof g_command, "setperm %s %d", publicKey_, job.aclLevel);
   char what[48];
   std::snprintf(what, sizeof what, "restore: cli 'setperm <own key> %d'", job.aclLevel);
-  const Outcome sent = cliLine(job, ctx, what, g_command, false);
-  trimInPlace(g_cliReply);
-  if (sent == Outcome::Ok && startsWithOk(g_cliReply)) {
+  // One line, and its silence checked with a blank login (task p1.10-48): this is the same line
+  // as the grant and it cannot be asked twice, which is where meshmaster.dk's *elevated* came
+  // from - association 3 seven times in 39 days, each of them a restore that very likely ran and
+  // an "OK" nobody heard.
+  const OwnEntryWrite wrote = writeOwnEntry(job, ctx, g_command, job.aclLevel, what);
+  if (wrote.confirmed) {
     // On stock firmware the entry *is* the session (ClientACL::applyPermissions finds the same
     // ClientInfo the login filled): the repeater now holds us at the granted level and the cache
-    // says so - reusable by the next acl-class job, invisible to an admin-class one.
+    // says so - reusable by the next acl-class job, invisible to an admin-class one. The restore
+    // **keeps** its session whichever way it was confirmed, because the blank login that
+    // confirmed it was itself a login at that very level.
     sessions_.put(job.repeaterKey, CredentialClass::Acl, static_cast<uint8_t>(job.aclLevel), millis());
     ctx.sessionRole = static_cast<uint8_t>(job.aclLevel);
-    g_log.add("the ACL entry of this exit node's key is back at %s, as granted; the session is now %s (task 60)",
-              granted, granted);
+    g_log.add("the ACL entry of this exit node's key is back at %s, as granted%s; the session is now %s (task 60)",
+              granted, wrote.byLogin ? ", which the blank login confirmed and no \"OK\" did" : "", granted);
     return 1;
   }
   sessions_.invalidate(job.repeaterKey);
   ctx.hasSession = false;
-  if (sent == Outcome::Ok) {
+  if (!wrote.wentOut) {
+    g_log.add("the ACL entry of this exit node's key may still be at admin: the restore got %s before the line went "
+              "out; the session is dropped, and the next login from this key will put it right (task 60)",
+              outcomeName(wrote.sent));
+  } else if (wrote.sent == Outcome::Ok) {
     g_log.add("the ACL entry of this exit node's key may still be at admin: the repeater answered '%s'; the session "
               "is dropped, and the next login from this key will put it right (task 60)",
               g_cliReply);
   } else {
-    g_log.add("the ACL entry of this exit node's key may still be at admin: the restore got %s; the session is "
-              "dropped, and the next login from this key will put it right (task 60)",
-              outcomeName(sent));
+    g_log.add("the ACL entry of this exit node's key is not known to be back at %s: the line went out, its answer "
+              "was not heard and the check could not confirm it either; the session is dropped, and the next login "
+              "from this key will put it right (tasks 60 and p1.10-48)",
+              granted);
   }
   return 0;
 }
@@ -994,34 +1147,65 @@ Outcome JobRunner::runAclSet(const ClaimedJob& job, Context& ctx, size_t& dataLe
   std::snprintf(g_command, sizeof g_command, "setperm %s %d", job.aclSetKey, job.aclSetLevel);
   char what[48];
   std::snprintf(what, sizeof what, "cli 'setperm %.12s... %d'", job.aclSetKey, job.aclSetLevel);
-  const Outcome sent = cliLine(job, ctx, what, g_command, true);
-  if (sent != Outcome::Ok) {
-    dataLen = writeAclSetResult(job.aclSetKey, job.aclSetLevel, false, nullptr, g_data, kDataCap);
-    return sent;
-  }
-  trimInPlace(g_cliReply);
-  g_log.add("the repeater answered '%s'", g_cliReply);
-  const bool confirmed = startsWithOk(g_cliReply);
-  if (confirmed && sameKey(job.aclSetKey, publicKey_)) {
-    // The entry that was just written is our own session: on stock firmware `applyPermissions`
-    // finds the same ClientInfo the login filled, so from here the repeater holds this exit node
-    // at the level sent - read-only after a grant, nothing after a revoke - and the cache must
-    // say the same, or the next admin-class job would reuse a session the repeater no longer
-    // honours at admin. No second setperm follows: the command is the level.
-    if (job.aclSetLevel == 0) {
-      sessions_.invalidate(job.repeaterKey);
-      ctx.hasSession = false;
-    } else {
-      sessions_.put(job.repeaterKey, CredentialClass::Acl, static_cast<uint8_t>(job.aclSetLevel), millis());
-      ctx.sessionRole = static_cast<uint8_t>(job.aclSetLevel);
+
+  if (!sameKey(job.aclSetKey, publicKey_)) {
+    // Somebody else's key. The line does not touch our own entry, so the session is still admin
+    // after it and the bounded retry of EXIT-NODES §5 can be answered: the line goes out as it
+    // always did. (An association's grant and its revoke are always this exit node's own key -
+    // EXIT-NODES §4.1 step 3 - so this is the branch nothing of meshmaster.dk takes.)
+    const Outcome sent = cliLine(job, ctx, what, g_command, true);
+    if (sent != Outcome::Ok) {
+      dataLen = writeAclSetResult(job.aclSetKey, job.aclSetLevel, false, nullptr, g_data, kDataCap);
+      return sent;
     }
-    ctx.aclRestoreDone = true;
-    g_log.add("the entry set is this exit node's own: the session is now %s",
-              job.aclSetLevel == 0 ? "gone" : permissionName(static_cast<uint8_t>(job.aclSetLevel)));
+    trimInPlace(g_cliReply);
+    g_log.add("the repeater answered '%s'", g_cliReply);
+    const bool confirmed = startsWithOk(g_cliReply);
+    dataLen = writeAclSetResult(job.aclSetKey, job.aclSetLevel, confirmed, g_cliReply, g_data, kDataCap);
+    if (dataLen == 0) return Outcome::Failed;
+    return confirmed ? Outcome::Ok : Outcome::Failed;
   }
-  dataLen = writeAclSetResult(job.aclSetKey, job.aclSetLevel, confirmed, g_cliReply, g_data, kDataCap);
+
+  // **Our own key: the line is sent once and its silence checked with a blank login** (task
+  // p1.10-48, writeOwnEntry above). The entry the line writes is this session, so a retry of it
+  // reaches a repeater that has just stopped seeing this key as admin.
+  const OwnEntryWrite wrote = writeOwnEntry(job, ctx, g_command, job.aclSetLevel, what);
+  ctx.aclRestoreDone = true;  // no second setperm follows this one: the command is the level
+  if (!wrote.wentOut) {
+    // Nothing went out, so there is nothing for the server to settle and this result carries no
+    // `AclSetResult` at all: it is there with `confirmed: false` **exactly** when the line went
+    // out, which is what meshmaster.dk's p4.32-188 reads to tell a grant that may be on the
+    // device from one that cannot be.
+    g_log.add("the line never went out, so this exit node's own entry is untouched and this result carries no "
+              "grant to settle (task p1.10-48)");
+    return wrote.sent;
+  }
+  // The repeater answered the line and did nothing (`Err - ...`): the entry is where it was, and
+  // this session is still the admin one that sent the line. Anything else - the line confirmed,
+  // or its fate unknown - leaves a session this board must not spend as admin again.
+  const bool refused = wrote.sent == Outcome::Ok && !wrote.confirmed;
+  if (!refused) {
+    // **A grant drops the session** (EXIT-NODES §4.1 steps 3 and 4, task p1.10-48): after a
+    // confirmed `acl.set` on our own key the session is not kept, so the verify that follows
+    // logs in with this board's own key - which is the thing that verify exists to prove, and
+    // the transaction the spec prices for it. On meshmaster.dk's job 26077 it reused the grant's
+    // session instead (*session reused (acl, read-only, 146 s old)*) and the pair went active as
+    // *acl login ok* with no login made. After a revoke there is no entry to log in with at all,
+    // and after a line whose fate is unknown a kept admin session would be a guess.
+    sessions_.invalidate(job.repeaterKey);
+    ctx.hasSession = false;
+    g_log.add("the entry set is this exit node's own: the session is %s, so the next job for this repeater logs in "
+              "by key (task p1.10-48)",
+              job.aclSetLevel == 0 ? "gone with the entry" : "not kept");
+  }
+  dataLen = writeAclSetResult(job.aclSetKey, job.aclSetLevel, wrote.confirmed,
+                              g_cliReply[0] == '\0' ? nullptr : g_cliReply, g_data, kDataCap);
   if (dataLen == 0) return Outcome::Failed;
-  return confirmed ? Outcome::Ok : Outcome::Failed;
+  if (wrote.confirmed) return Outcome::Ok;
+  // The line went out and nothing confirms it: `unreachable` with `confirmed: false`, which is
+  // the grant meshmaster.dk's p4.32-188 carries on to the verify rather than failing outright. A
+  // line the repeater refused is `failed`, as it always was.
+  return refused ? Outcome::Failed : wrote.sent;
 }
 
 // ------------------------------------------------------------------ config.read (CONFIGURATION §3, §8)

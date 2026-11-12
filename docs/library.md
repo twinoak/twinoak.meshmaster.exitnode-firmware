@@ -16,7 +16,8 @@ the file is named — but it is named as an example, not as a thing to copy.
 ## 1. What it is, and what it is not
 
 **It is the agent.** Thirteen job types and their rules; the login sequence and
-its four classes; the ACL restore that ends an admin session; the config read and
+its four classes; the ACL restore that ends an admin session, and the check that
+tells whether the one line of it that cannot be asked twice ran (§3.7); the config read and
 the config apply engines; the session cache; the airtime budget; the agent API's
 envelopes and result shapes; the reply codec that reads what a stock MeshCore
 repeater answers; the observation ring; the offline result buffer; the rate
@@ -335,7 +336,7 @@ wake's `Budget` is how you refuse such a job rather than be surprised by it (§6
 | `awaitReply` false after a login | silence. Stock firmware answers a login it will not take with **silence**, and that cannot be told from a repeater that is off the air: the sequence (`agent/LoginSequence.h`) tries **twice** and reports `unreachable` — or `unauthorized`, when a blank probe login between the two tries *was* answered and only the password's try was silent. A `discover` job escalates further on its own: `forgetPath()`, a flooded login, and the path-discovery request last. Since `0.4.0` the result also says **where** it failed: `failedAt: "login"` (§6.2) |
 | `awaitReply` **true** after a login, with something that is not a login reply | **dropped, and the wait goes on** (unreleased, task p1.10-47): one log line, the same wait's remainder, and then the silence above. A login is awaited with tag 0 — *the next response from this peer* — because a login reply carries the repeater's clock and no tag of ours, so your mesh will hand the runner the late reply to a request that has just timed out. The library drops it; you need do nothing (§3.6) |
 | `awaitReply` false after a request on a reused session | one retry with a **fresh login**, then `unreachable`. `failedAt` is `"request"` when the fresh login was answered and the second try was not, and `"login"` when the fresh login was not answered either — the step the job *ended* at (§6.2) |
-| `awaitText` false after a CLI line | **nothing is sent again.** One send per command is the rail: a `set` sent twice is a change made twice. The line is recorded as unanswered and the sequence stops |
+| `awaitText` false after a CLI line | **nothing is sent again.** One send per command is the rail: a `set` sent twice is a change made twice. The line is recorded as unanswered and the sequence stops. **One line is checked rather than retried** (unreleased, task p1.10-48): `setperm <own key> <level>`, whose silence is read back with a blank login because the line has moved this key off admin and a retry of it could not be answered (§3.7) |
 | a login the repeater answered **below** the job's class | the refusal it is: `unauthorized` at the login, the tier and the need in the result's data, nothing sent after it, and the session cached at the class it can carry. **Except for a `status` or a `neighbours` at class `acl` answered at guest**, which the firmware serves whole and which therefore *runs*, `ok`, with the tier on the envelope's `loggedInAs` (§6.3) |
 | a reply the codec cannot read | a **request's** reply that will not parse is `failed`; a response that reaches a *login's* wait and is not a login reply is dropped and the wait goes on (the row above, §3.6). Either way the bytes never reach a log line |
 
@@ -412,6 +413,56 @@ the half that protects an exit node nobody has flashed.
 hold for a mesh that filters nothing, and an in-process mesh that *can* drop a
 tag it did not wait for is free to — `AgentMesh` does so on every wait but a
 login's, where it cannot. You are not asked to know the job's tags.
+
+### 3.7 The one line that cannot be asked twice
+
+`setperm <this unit's own key> <level>` is the one command the library sends
+**once and then checks**, rather than retrying it. There are two places it goes
+out: the grant of an association ([EXIT-NODES §4.1](https://github.com/twinoak/meshmaster.dk/blob/master/spec/EXIT-NODES.md#41-the-onboarding-flow)
+step 3, an `acl.set` on our own key) and the restore that ends every
+admin-password session on a repeater that holds a grant for this unit
+(§3.5's last paragraph, [§7](https://github.com/twinoak/meshmaster.dk/blob/master/spec/EXIT-NODES.md#7-agent--mesh-the-transaction-model)).
+
+On stock firmware the login table **is** the access list, and a login fills the
+same `ClientInfo` that `setperm` then writes: so the moment that line has run,
+this unit's key is at `<level>` and no longer admin, and `onPeerDataRecv` runs a
+console line only for a sender that `isAdmin()` — it drops every further line
+from this key without a word. The retry of §3.4's row above is therefore
+unanswerable, and a lost "OK" used to end the job `unreachable` with the line
+having done its work. On meshmaster.dk, 12 November 2026: 20 of 52 failed grants
+were exactly this, and the restore the same — one association found *elevated*
+seven times in 39 days.
+
+So the line is sent once, and what it did is read back with a **blank login**:
+this unit's own key, no secret, one transaction, and a reply whose permission
+byte is the entry's own.
+
+| the blank login is answered | what the library decides |
+|---|---|
+| at the level the line asked for | the line ran and its "OK" was lost: **confirmed**, and the job's log says it was confirmed by the login and not by an "OK" |
+| at **admin** | the line did not arrive, and the session is admin again: the line goes **once more** and is checked once more. Two rounds at most |
+| at **guest**, for a level-0 line | the entry is off the repeater, which is what a revoke asked for: **confirmed**. `applyPermissions` *deletes* a guest-role entry rather than holding one, so the blank login falls through to the password compare and a repeater with no guest password answers it at guest |
+| not at all | **not confirmed**, and nothing is guessed: a repeater with a guest password answers a key it does not hold with silence, and so does one that is off the air. The result says the line went out and could not be confirmed, and the server decides — for a grant, by the verify that follows it |
+
+Two consequences worth knowing about:
+
+- **a confirmed grant keeps no session.** After an `acl.set` on our own key the
+  session cache is cleared for that repeater, so the verify that follows logs in
+  with this unit's own key — which is the only thing that verify proves. The
+  **restore** keeps its session, at the level it put back, as it always did.
+- **the price went up by the check.** `mm::kTransactionsForAclRestore` and
+  `transactionsFor("acl.set")` are **2** rather than 1
+  (`mm::kTransactionsForOwnEntryWrite`): the line, and the blank login it needs
+  when the line is not answered. A repeater that answers the line still costs
+  the one transaction [§7](https://github.com/twinoak/meshmaster.dk/blob/master/spec/EXIT-NODES.md#7-agent--mesh-the-transaction-model)
+  prices, so a `config.read` through a pair with a grant is 21 transactions when
+  nothing is lost and 22 when the restore has to be checked. The **second round**
+  is not in the estimate, exactly as the login's own second try is not
+  (`kTransactionsForLogin` is 1 and the sequence tries twice): the lease and the
+  gate bound those, and pricing them here would refuse the daily probes of every
+  pair that holds a grant - a wake slice twice what such a job has ever needed.
+
+**For your `IMesh`: do nothing.** As with §3.6, the rule is the library's.
 
 ## 4. `IUplink` — meshmaster.dk
 

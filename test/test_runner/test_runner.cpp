@@ -826,7 +826,7 @@ TEST_F(RunnerTest, AnAclSetWritesTheEntryAndSendsNoRestoreOfItsOwn) {
   EXPECT_NE(data.find("\"confirmed\":true"), std::string::npos) << data;
 }
 
-TEST_F(RunnerTest, AnAclSetOnOurOwnKeyIsTheSessionsLevelToo) {
+TEST_F(RunnerTest, AnAclSetOnOurOwnKeyIsSentOnceAndKeepsNoSession) {
   mesh.grant(self(), mm::kPermReadOnly);
   const std::string body = run(fake::Job(12361, "acl.set")
                                    .atClass("admin")
@@ -839,6 +839,213 @@ TEST_F(RunnerTest, AnAclSetOnOurOwnKeyIsTheSessionsLevelToo) {
   EXPECT_EQ(mesh.timesSent("setperm " + self() + " 1"), 1) << "once, and it is the restore as well";
   EXPECT_EQ(mesh.levelOf(self()), mm::kPermReadOnly);
   EXPECT_NE(logOf(body).find("the entry set is this exit node's own"), std::string::npos) << body;
+  EXPECT_NE(logOf(body).find("the session is not kept, so the next job for this repeater logs in by key"),
+            std::string::npos)
+      << "a confirmed grant keeps no session (task p1.10-48)";
+}
+
+// ---------------------------------------------------------------------------------------------
+// A line that cannot be asked twice (task p1.10-48; meshmaster.dk's p4.32-188 and p4.32-189)
+//
+// `setperm <own key> <level>` is the session's own level, so a repeater that ran it drops the
+// retry without a word: the line is sent **once** and its silence read back with a blank login,
+// whose reply carries the entry's permission byte. Four readings, and the second round.
+
+TEST_F(RunnerTest, AGrantWhoseOkWasLostIsConfirmedByTheBlankLogin) {
+  // The field case: job 4558 of meshmaster.dk's association 14 and nineteen others of 12
+  // November 2026. The admin login was answered, the line ran, and its "OK" never came home.
+  const std::string line = "setperm " + self() + " 1";
+  mesh.loseTheNextLineReplies(line, 1);
+
+  const std::string body = run(fake::Job(12365, "acl.set")
+                                   .atClass("admin")
+                                   .leasedUntil(kLease)
+                                   .withAdminPassword("adm1n-pass")
+                                   .withAclLevel(mm::kPermReadOnly)
+                                   .withPayload("{\"publicKey\":\"" + self() + "\",\"level\":1}"));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << body;
+  EXPECT_EQ(transactionsOf(body), 3) << "the login, the line and the one blank login that checked it";
+  EXPECT_EQ(mesh.timesSent(line), 1) << "sent once: the retry could not have been answered";
+  EXPECT_EQ(mesh.logins(), 2);
+  EXPECT_EQ(mesh.loginsWithMaterial(), 1) << "the check is a blank login: this board's own key and no secret";
+  EXPECT_EQ(mesh.levelOf(self()), mm::kPermReadOnly) << "the line did run";
+
+  const std::string data = dataOf(body);
+  EXPECT_TRUE(fake::followsShapeOf(data, fake::contract("AclSetResult")));
+  EXPECT_NE(data.find("\"confirmed\":true"), std::string::npos) << data;
+  EXPECT_EQ(data.find("\"reply\""), std::string::npos) << "there was no reply to record: the login is the evidence";
+  const std::string log = logOf(body);
+  EXPECT_NE(log.find("no answer, and this line cannot be asked twice"), std::string::npos) << log;
+  EXPECT_NE(log.find("the entry check (blank login): answered at read-only"), std::string::npos) << log;
+  EXPECT_NE(log.find("confirmed by the login and not by an \"OK\""), std::string::npos) << log;
+}
+
+TEST_F(RunnerTest, AGrantWhoseLineNeverArrivedIsSentOnceMoreAndThenConfirmed) {
+  // The other reading of a silence: the line was lost on the way out, so the entry - and with it
+  // the session - is still admin, and a second line can be answered.
+  const std::string line = "setperm " + self() + " 1";
+  mesh.loseTheNextLines(line, 1);
+
+  const std::string body = run(fake::Job(12366, "acl.set")
+                                   .atClass("admin")
+                                   .leasedUntil(kLease)
+                                   .withAdminPassword("adm1n-pass")
+                                   .withAclLevel(mm::kPermReadOnly)
+                                   .withPayload("{\"publicKey\":\"" + self() + "\",\"level\":1}"));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << body;
+  EXPECT_EQ(transactionsOf(body), 4) << "the login, the lost line, the check and the line again";
+  EXPECT_EQ(mesh.timesSent(line), 2) << "the check found the key still at admin, so the line went once more";
+  EXPECT_EQ(mesh.levelOf(self()), mm::kPermReadOnly);
+  const std::string data = dataOf(body);
+  EXPECT_NE(data.find("\"confirmed\":true"), std::string::npos) << data;
+  EXPECT_NE(data.find("\"reply\":\"OK\""), std::string::npos) << "this one was confirmed by an \"OK\"";
+  const std::string log = logOf(body);
+  EXPECT_NE(log.find("the entry check (blank login): answered at admin"), std::string::npos) << log;
+  EXPECT_NE(log.find("the line did not arrive, and the session is admin again - sending it once more"),
+            std::string::npos)
+      << log;
+}
+
+TEST_F(RunnerTest, AGrantLostTwiceIsNotConfirmedAndTheSessionIsDropped) {
+  class Out : public mm::TextOut {
+   public:
+    void write(const char* text, size_t len) override { out.append(text, len); }
+    std::string out;
+  };
+  const std::string line = "setperm " + self() + " 1";
+  mesh.loseTheNextLines(line, 2);
+
+  const std::string body = run(fake::Job(12367, "acl.set")
+                                   .atClass("admin")
+                                   .leasedUntil(kLease)
+                                   .withAdminPassword("adm1n-pass")
+                                   .withAclLevel(mm::kPermReadOnly)
+                                   .withPayload("{\"publicKey\":\"" + self() + "\",\"level\":1}"));
+
+  EXPECT_EQ(outcomeOf(body), "unreachable") << body;
+  EXPECT_EQ(transactionsOf(body), 5) << "the login, two lines and the two checks between and after them";
+  EXPECT_EQ(mesh.timesSent(line), 2) << "two rounds at most";
+  EXPECT_EQ(mesh.levelOf(self()), mm::kPermAdmin) << "neither line arrived: the entry is where the login left it";
+  const std::string data = dataOf(body);
+  EXPECT_TRUE(fake::followsShapeOf(data, fake::contract("AclSetResult")));
+  EXPECT_NE(data.find("\"confirmed\":false"), std::string::npos) << data;
+  EXPECT_NE(logOf(body).find("the line did not arrive twice, so it is not confirmed"), std::string::npos) << body;
+
+  // The session is dropped whatever the line came to, so no later job spends an admin session
+  // this board cannot know the repeater still honours.
+  Out sessions;
+  runner.reportSessions(sessions);
+  EXPECT_NE(sessions.out.find("live      none"), std::string::npos) << sessions.out;
+}
+
+TEST_F(RunnerTest, ARestoreWhoseOkWasLostIsConfirmedByTheBlankLoginAndTheReadSaysSo) {
+  // The same line at the other end of an admin session, which is where meshmaster.dk's
+  // *elevated* came from: association 3 seven times in 39 days.
+  mesh.grant(self(), mm::kPermReadOnly);
+  const std::string line = "setperm " + self() + " 1";
+  mesh.loseTheNextLineReplies(line, 1);
+
+  const std::string body = run(fake::Job(12368, "config.read")
+                                   .atClass("admin")
+                                   .leasedUntil(kLease)
+                                   .withAdminPassword("adm1n-pass")
+                                   .withAclLevel(mm::kPermReadOnly));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << body;
+  EXPECT_EQ(transactionsOf(body), 22) << "the twenty-one of task p4.1-60 and the blank login that checked the restore";
+  EXPECT_EQ(mesh.timesSent(line), 1);
+  EXPECT_EQ(mesh.logins(), 2);
+  EXPECT_EQ(mesh.levelOf(self()), mm::kPermReadOnly) << "the restore did run";
+  EXPECT_NE(dataOf(body).find("\"aclRestored\":true"), std::string::npos) << dataOf(body);
+  EXPECT_NE(logOf(body).find("as granted, which the blank login confirmed and no \"OK\" did"), std::string::npos)
+      << logOf(body);
+}
+
+TEST_F(RunnerTest, ARevokeIsConfirmedByABlankLoginAnsweredAtGuest) {
+  // Level 0 cannot be answered at all unless our own entry was the last one in the table:
+  // `applyPermissions` deletes it and moves the later entries down, and `onPeerDataRecv`
+  // addresses the "OK" to whichever client sits in that slot afterwards. Here ours is the first
+  // of two, so nothing comes back - and the blank login that follows is answered **at guest**,
+  // because the key it carries is no longer in the access list and this repeater has no guest
+  // password. That is the confirmation.
+  mesh.grant(self(), mm::kPermReadOnly);
+  mesh.grant(stranger(), mm::kPermReadWrite);
+  const std::string line = "setperm " + self() + " 0";
+
+  const std::string body = run(fake::Job(12369, "acl.set")
+                                   .atClass("admin")
+                                   .leasedUntil(kLease)
+                                   .withAdminPassword("adm1n-pass")
+                                   .withPayload("{\"publicKey\":\"" + self() + "\",\"level\":0}"));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << body;
+  EXPECT_EQ(transactionsOf(body), 3) << "the login, the line and the blank login that checked it";
+  EXPECT_EQ(mesh.timesSent(line), 1);
+  EXPECT_EQ(mesh.levelOf(self()), mm::kPermGuest) << "the entry is off the repeater";
+  const std::string data = dataOf(body);
+  EXPECT_NE(data.find("\"confirmed\":true"), std::string::npos) << data;
+  EXPECT_NE(data.find("\"level\":0"), std::string::npos) << data;
+  const std::string log = logOf(body);
+  EXPECT_NE(log.find("the entry check (blank login): answered at guest"), std::string::npos) << log;
+  EXPECT_NE(log.find("this exit node's key is off it, so the line ran"), std::string::npos) << log;
+  EXPECT_NE(log.find("the session is gone with the entry"), std::string::npos) << log;
+}
+
+TEST_F(RunnerTest, ARevokeOnARepeaterWithAGuestPasswordCannotBeConfirmed) {
+  // The same revoke on a repeater that **has** a guest password: a key it does not hold is
+  // answered with silence, exactly as a repeater off the air answers, so nothing is known. The
+  // result says the line went out and could not be confirmed, and the log has the line.
+  mesh.setGuestPassword("gu3st-pass");
+  mesh.grant(self(), mm::kPermReadOnly);
+  mesh.grant(stranger(), mm::kPermReadWrite);
+  const std::string line = "setperm " + self() + " 0";
+
+  const std::string body = run(fake::Job(12370, "acl.set")
+                                   .atClass("admin")
+                                   .leasedUntil(kLease)
+                                   .withAdminPassword("adm1n-pass")
+                                   .withPayload("{\"publicKey\":\"" + self() + "\",\"level\":0}"));
+
+  EXPECT_EQ(outcomeOf(body), "unreachable") << body;
+  EXPECT_EQ(transactionsOf(body), 3);
+  EXPECT_EQ(mesh.timesSent(line), 1) << "sent once, and not asked again";
+  const std::string data = dataOf(body);
+  EXPECT_TRUE(fake::followsShapeOf(data, fake::contract("AclSetResult")));
+  EXPECT_NE(data.find("\"confirmed\":false"), std::string::npos) << data;
+  const std::string log = logOf(body);
+  EXPECT_NE(log.find("cli 'setperm " + self().substr(0, 12) + "... 0'"), std::string::npos)
+      << "the line that went out is in the log: " << log;
+  EXPECT_NE(log.find("the blank login was not answered either"), std::string::npos) << log;
+  EXPECT_NE(log.find("could not be confirmed"), std::string::npos) << log;
+}
+
+TEST_F(RunnerTest, AfterAConfirmedGrantTheNextAclJobLogsIn) {
+  // The verify of EXIT-NODES §4.1 step 4 proves the repeater honours the ACL entry for this
+  // board's own key, and it can prove nothing on the session the grant opened with a password.
+  // meshmaster.dk's job 26077: *session reused (acl, read-only, 146 s old)*, and the pair went
+  // active as *acl login ok* with no login made.
+  run(fake::Job(12371, "acl.set")
+          .atClass("admin")
+          .leasedUntil(kLease)
+          .withAdminPassword("adm1n-pass")
+          .withAclLevel(mm::kPermReadOnly)
+          .withPayload("{\"publicKey\":\"" + self() + "\",\"level\":1}"));
+  ASSERT_EQ(mesh.logins(), 1);
+  ASSERT_EQ(mesh.levelOf(self()), mm::kPermReadOnly);
+
+  const std::string verify = run(fake::Job(12372, "status")
+                                     .atClass("acl")
+                                     .leasedUntil(kLease)
+                                     .withAclLevel(mm::kPermReadOnly)
+                                     .withPayload("{\"version\":false}"));
+
+  EXPECT_EQ(outcomeOf(verify), "ok") << verify;
+  EXPECT_EQ(mesh.logins(), 2) << "the grant kept no session, so the verify logged in by key";
+  EXPECT_EQ(mesh.loginsWithMaterial(), 1) << "and it carried no password doing it";
+  EXPECT_NE(logOf(verify).find("logged in as read-only"), std::string::npos) << verify;
+  EXPECT_EQ(logOf(verify).find("session reused"), std::string::npos) << verify;
 }
 
 TEST_F(RunnerTest, AConfigReadOfTheDefaultListEndsWithTheRestoreAndSaysSo) {

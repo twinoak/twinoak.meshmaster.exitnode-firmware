@@ -28,10 +28,29 @@ namespace mm {
 // The login, when there is no session for this repeater yet.
 constexpr int kTransactionsForLogin = 1;
 
+// **A line that cannot be asked twice, and the check that confirms it** (task p1.10-48).
+// `setperm <own key> <level>` is sent **once** - its retry cannot be answered, because if the
+// line ran it has moved this key off admin and the repeater drops a console line from anybody
+// below it - and its silence is read back with a blank login. So such a line is **two**
+// transactions where EXIT-NODES §7's row is one: the line, and the check it needs when the line
+// is not answered.
+//
+// A check answered at admin means the line never arrived, and then the line goes once more and
+// is checked once more - two rounds at most, four transactions. That second round is as far
+// beyond this estimate as the login's own second try has always been (`kTransactionsForLogin`
+// is one and `loginSequence` tries twice, with a blank probe between them on one path), and
+// what bounds both is the lease and the gate rather than the estimate. Counting it here instead
+// would price every ordinary probe through a pair with a grant at six transactions - a wake
+// slice twice what such a job has ever needed - because the restore below is counted wherever
+// there is a grant, and the daily status and neighbour reads are what that would refuse.
+constexpr int kTransactionsForOwnEntryWrite = 2;
+
 // The restore (task p4.1-60): `setperm <own key> <granted level>` as the last command of every
 // admin session on a repeater where this exit node holds a grant - one more on every admin
-// type through an `acl` pair, and on a blank login the repeater answered above the grant.
-constexpr int kTransactionsForAclRestore = 1;
+// type through an `acl` pair, and on a blank login the repeater answered above the grant. Since
+// task p1.10-48 that line is checked when it is not answered, so it is the two above; what it
+// costs on a repeater that answers the line is still the one §7 prices.
+constexpr int kTransactionsForAclRestore = kTransactionsForOwnEntryWrite;
 
 // What one run of `type` at `credentialClass` costs, without the login. `items` is what the job
 // is as long as - the number of neighbours for `neighbours` - and -1 is what the system assumes

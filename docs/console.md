@@ -242,6 +242,39 @@ command (`restore: cli 'setperm <own key> 1': ok`, then `the ACL entry of this
 exit node's key is back at read-only, as granted; the session is now read-only
 (task 60)`). A password is never an argument of any of those lines.
 
+**That last line cannot be asked twice** (task p1.10-48), and neither can the
+grant, which is the same line: the login table is the access list, so once
+`setperm <own key> <level>` has run this board is no longer admin on that
+repeater and every further console line from it is dropped without a word. It is
+therefore sent **once**, and when nothing answers it the entry is read back with
+a blank login instead of the line being retried:
+
+    cli 'setperm c3d4e5f60718... 1' try 1: no reply (direct)
+    cli 'setperm c3d4e5f60718... 1': no answer, and this line cannot be asked
+      twice - if it ran, this key is no longer admin and the repeater drops a
+      retry from it without a word. What it did is read back with a blank login
+      instead (task p1.10-48)
+    the entry check (blank login): answered at read-only (direct)
+    the blank login was answered at read-only, which is the level the line asked
+      for: the line ran and its "OK" was lost - confirmed by the login and not by
+      an "OK" (task p1.10-48)
+
+A check answered **at admin** means the line never arrived: the line goes once
+more and is checked once more (`the line did not arrive, and the session is
+admin again - sending it once more`), two rounds at most, and after that it is
+not confirmed. A check answered **at guest** confirms a level-0 line - the key
+is off the access list, which is what a revoke asked for - and a check nothing
+answers confirms nothing at all (`the blank login was not answered either: a
+repeater with a guest password answers a key it does not hold with silence, and
+so does one that is off the air`). So `jobs` shows an `acl.set` or an admin job
+whose restore had to be checked at **one transaction more** than before, and the
+result of a grant that could not be confirmed says so for meshmaster.dk's verify
+step to settle. After a **confirmed** grant of this board's own key the session
+is **not kept** (`the entry set is this exit node's own: the session is not
+kept, so the next job for this repeater logs in by key`), so the verify that
+follows is a login by this board's key and not a reuse of the password's
+session.
+
 A login is tried twice: `login (admin) try 1: no reply (flood, scope dk)`, then
 `try 2: … (flood, unscoped)` — the word beside `direct` or `flood` is the
 *shape* the packet went out in, which since task p1.8-32 names the flood scope
@@ -572,3 +605,40 @@ server comes back. What the four lines say is a pure function of a struct
     a repeater with **no neighbours** at all: its empty page is the one reply
     that would have read as *logged in as guest*, so such a read must still say
     `logged in as read-only` and carry no tier on the result.
+23. A grant whose "OK" is lost (task p1.10-48; meshmaster.dk's p4.32-188). On a
+    test repeater, take the entry off from its own console (`setperm <this exit
+    node's key> 0`) and run the association wizard's grant again from
+    meshmaster.dk - or press *Run the grant again* on a pair in
+    `needs-regrant`. The ordinary run is unchanged: `cli 'setperm
+    <key>... 1' try 1: ok`, `the repeater answered 'OK'`, and `jobs` counts
+    **2**. Then make the answer go missing: the surest way on a bench is to put
+    the repeater at the far end of the garden, or to run the grant while it is
+    busy answering something else, so that the reply misses the 16 s wait. The
+    job's log must then read `no answer, and this line cannot be asked twice`,
+    `the entry check (blank login): answered at read-only` and `confirmed by the
+    login and not by an "OK"`; `jobs` counts **3** and the job is **ok**, with
+    `confirmed: true` on its page and no `reply` beside it. `get acl` on the
+    repeater's own console must list this board's key at `01`. What must never
+    happen again is a grant that ends `unreachable` with the entry set - 20 of
+    meshmaster.dk's 52 failed grants of 12 November 2026 were that. Watch the
+    **next** job too: the pair's verify must show a login of its own (`login
+    (acl) try 1: logged in as read-only`) and never `session reused`.
+24. A revoke of a key that is not last in the table (the same task). This one is
+    read off the firmware and has never been tried on a board, which is why it
+    is here. Grant two keys on a test repeater - this exit node's **first**, then
+    any other key (`setperm <some other key> 1`) - and then *Revoke* the pair
+    from meshmaster.dk. `applyPermissions` deletes our entry and moves the later
+    one down, while `onPeerDataRecv` addresses the reply to the slot the sender
+    held before the line ran, so the "OK" should go to the *other* key and never
+    come back to us: the log must read `no answer, and this line cannot be asked
+    twice`, then `the entry check (blank login): answered at guest` and `this
+    exit node's key is off it, so the line ran`, and the job must be **ok** with
+    `confirmed: true` at **3** transactions. `get acl` must show our key gone and
+    the other key still at its level. Then the same revoke with ours **last** in
+    the table: the "OK" should come home as usual, at 2 transactions. If the
+    first case answers its line after all, the reading of the pinned source in
+    `test/support/FakeMesh.h` is wrong and this walk is how we find out. A
+    repeater with a **guest password** set is the third case: there the blank
+    login is silence, the job is `unreachable` with `confirmed: false`, and
+    meshmaster.dk's p4.32-188 says the command went out and no answer came back,
+    which is usual for a key's own removal.

@@ -994,8 +994,9 @@ TEST_F(LoopTest, AJobTheWakesTransactionCapHasNoRoomForIsFailedTheSameWay) {
           .withAclLevel(mm::kPermReadOnly)
           .json(),
   });
-  // Four transactions buy two jobs at the cheapest price, and the first spends three of them -
-  // a login, the status request and the ACL restore - so the second will not fit.
+  // Four transactions buy two jobs at the cheapest price, and the first is priced at all four of
+  // them - a login, the status request, and the ACL restore with the blank login that checks it
+  // (task p1.10-48) - so the second will not fit. What it *spends* is the two it needed.
   const mm::WakeReport report = loop.wake(hourly(4), mm::Budget());
 
   ASSERT_EQ(server.claimMaxes().size(), 1u);

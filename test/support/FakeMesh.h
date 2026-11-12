@@ -56,6 +56,8 @@
 // answer: cli-retry             cite: fw repeater-v1.18.0 81dbae59 examples/simple_repeater/MyMesh.cpp:709-740 MyMesh::onPeerDataRecv -- a sender timestamp equal to the last is a retry: nothing is run and the empty reply is not sent, and one below it is a replay
 // answer: cli-reply             cite: fw repeater-v1.18.0 81dbae59 examples/simple_repeater/MyMesh.cpp:741-758 MyMesh::onPeerDataRecv -- a non-empty reply is a TXT_MSG of the repeater's own clock, TXT_TYPE_CLI_DATA in the flags byte, then the text
 // answer: cli-setperm           cite: fw repeater-v1.18.0 81dbae59 examples/simple_repeater/MyMesh.cpp:1241-1262 MyMesh::handleCommand -- `setperm <pubkey-hex> <level>` answers OK, or Err - bad params / Err - bad pubkey / Err - invalid params
+// answer: cli-setperm-zero      cite: fw companion-v1.18.0 81dbae59 src/helpers/ClientACL.cpp:122-134 ClientACL::applyPermissions -- a setperm at the guest role **deletes** the entry and moves the later ones down; it is not an entry held at guest, and a second setperm for the same key is then `Err - invalid params`
+// answer: cli-setperm-zero      cite: fw repeater-v1.18.0 81dbae59 examples/simple_repeater/MyMesh.cpp:670-751 MyMesh::onPeerDataRecv -- the reply is addressed to `client`, a pointer into the slot the sender held **before** handleCommand ran, so a deletion at or below that slot sends the "OK" to whichever client now sits in it and it never reaches us (task p1.10-48)
 // answer: cli-region-load       cite: fw repeater-v1.18.0 81dbae59 examples/simple_repeater/MyMesh.cpp:1199-1231 MyMesh::handleCommand -- in load mode a region line is answered with nothing and the blank line ends the load with `OK - loaded N regions`
 // answer: cli-reboot            cite: fw companion-v1.18.0 81dbae59 src/helpers/CommonCLI.cpp:196-197 CommonCLI::handleCommand -- `reboot` is _board->reboot(), which does not return: the silence is the answer
 // answer: cli-advert            cite: fw companion-v1.18.0 81dbae59 src/helpers/CommonCLI.cpp:202-209 CommonCLI::handleCommand -- `advert` answers `OK - Advert sent` and `advert.zerohop` answers `OK - zerohop advert sent`
@@ -293,6 +295,16 @@ class FakeMesh : public mm::IMesh {
   // late reply survives the sends that follow it, so the login after a timed-out request finds
   // it waiting.
   void deliverTheNextReplyLate(int sends) { lateSends_ = sends; }
+  // **The next `times` sends of this line never reach the repeater**: not run, not answered -
+  // the line lost on the way out. `silenceLine` above is a line the repeater has and will not
+  // answer, and `beSilent` counts every send, which a line checked by a login between two lines
+  // cannot use (task p1.10-48).
+  void loseTheNextLines(const std::string& line, int times) { lostLines_[line] = times; }
+  // **The next `times` sends of this line run and their replies never come home**: the lost "OK"
+  // of a line that cannot be asked twice, which is 20 of meshmaster.dk's 52 failed grants of 12
+  // November 2026. Not `silenceLine` (the line never ran) and not `replySlowly` (which counts
+  // every reply, a login's included).
+  void loseTheNextLineReplies(const std::string& line, int times) { lostLineReplies_[line] = times; }
 
   void setLatency(uint32_t directMs, uint32_t floodMs) {
     directLatencyMs_ = directMs;
@@ -570,6 +582,7 @@ class FakeMesh : public mm::IMesh {
     sends_.back().sensitive = sensitive;
     const mm::SendResult how = direct ? mm::SendResult::Direct : mm::SendResult::Flood;
     if (!reachable()) return how;
+    if (consume(lostLines_, text)) return how;  // the line never arrived: nothing ran
     if (!knownSender()) {
       // answer: forgotten-session
       return how;
@@ -590,6 +603,9 @@ class FakeMesh : public mm::IMesh {
       // answer: cli-reply — an empty reply is not sent at all
       return how;
     }
+    // The line **ran** and its reply is lost on the way home (task p1.10-48), which for a
+    // `setperm` on our own key is the fault the whole task is about.
+    if (consume(lostLineReplies_, text)) return how;
     arm(asText(answer));
     return how;
   }
@@ -717,6 +733,21 @@ class FakeMesh : public mm::IMesh {
       if (e.key == keyHex) return &e;
     }
     return nullptr;
+  }
+  // Which slot of the table a key sits in, or -1: what `ClientACL::getClient` answers as a
+  // pointer, and what the deletion of a level-0 setperm has to move the later entries into.
+  int indexOf(const std::string& keyHex) const {
+    for (size_t i = 0; i < acl_.size(); i++) {
+      if (acl_[i].key == keyHex) return static_cast<int>(i);
+    }
+    return -1;
+  }
+  // One of the counted, line-keyed faults above: true when this line is to be lost this time.
+  static bool consume(std::map<std::string, int>& faults, const std::string& line) {
+    const auto it = faults.find(line);
+    if (it == faults.end() || it->second <= 0) return false;
+    it->second--;
+    return true;
   }
   uint8_t levelOrZero(const std::string& keyHex) const {
     const AclEntry* e = find(keyHex);
@@ -905,13 +936,24 @@ class FakeMesh : public mm::IMesh {
       // our own key moves the session with it (task p4.1-60).
       const std::string target = resolve(hex);
       if (target.empty()) return "Err - invalid params";
-      if (level == 0) {
-        for (AclEntry& e : acl_) {
-          if (e.key == target) e.permissions = 0;
-        }
-      } else {
+      if (level != 0) {
         grant(target, static_cast<uint8_t>(level));
+        return "OK";
       }
+      // answer: cli-setperm-zero - the guest role is not an entry: `applyPermissions` **deletes**
+      // the entry and moves the later ones down, so a key taken off at level 0 is not in the
+      // table at all afterwards (which is why the blank login that follows falls through to the
+      // password compare) and a second level-0 line for the same key finds nothing.
+      const int gone = indexOf(target);
+      if (gone < 0) return "Err - invalid params";  // getClient found no such entry
+      const int ours = indexOf(selfKey_);
+      const int held = static_cast<int>(acl_.size());
+      acl_.erase(acl_.begin() + gone);
+      // And the reply is addressed to the slot the sender held before the line ran: unless our
+      // own entry was the last one in the table, a deletion at or below it sends the "OK" to
+      // whichever client sits in that slot now, and we never hear it (task p1.10-48). From here
+      // that is a silence, exactly as a lost reply is.
+      if (gone <= ours && ours != held - 1) return "";
       return "OK";
     }
 
@@ -1172,6 +1214,8 @@ class FakeMesh : public mm::IMesh {
   int somethingElseLogins_ = 0;
   int silentLogins_ = 0;
   int lateSends_ = 0;
+  std::map<std::string, int> lostLines_;
+  std::map<std::string, int> lostLineReplies_;
   uint32_t directLatencyMs_ = 400;
   uint32_t floodLatencyMs_ = 1500;
   bool pad_ = true;

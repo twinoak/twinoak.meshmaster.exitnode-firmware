@@ -25,7 +25,9 @@
 //               none is known, and the path its reply came back along - and the path-discovery
 //               request last, only when neither login was answered (tasks p3.5-39, 40, 41)
 //   acl.set     `setperm <key> <level>` on the admin session, the reply captured; on our own
-//               key the command is the session's level and the cache follows it (task p4.1-60)
+//               key the command is the session's level (task p4.1-60), it is sent **once** and
+//               its silence is read back with a blank login (task p1.10-48), and a confirmed
+//               grant keeps no session, so the verify logs in by key
 //   config.read the `get` list in order, `region` and `region default`, `ver` and `board`, and
 //               the access-list request last (admin only, 23 entries at most, its silence after
 //               keys were read tolerated: tasks p3.5-43, p4-49, p4-57)
@@ -71,6 +73,12 @@
 // `acl.set` on our own key sends no second `setperm`: the command is the level. Two types cannot
 // end that way (task 60 as built): `password.set` restores after its password line and only then
 // drops the session, and `reboot` restores not at all.
+//
+// **And that line cannot be asked twice** (task p1.10-48): it is the session's own level, so a
+// repeater that ran it drops the retry without a word. The restore and the grant therefore send
+// it once and read its silence back with a blank login - two rounds at most - which is what
+// `writeOwnEntry` below is, and what took meshmaster.dk's *elevated* and its 20 failed grants of
+// 12 November 2026 off the air.
 //
 // The pacing is the budget the heartbeat last carried (agent/Airtime.h): one transaction at a
 // time, the gap between two, the ceiling in a minute. A board has one thread, so a job's waiting
@@ -510,6 +518,29 @@ class JobRunner {
   // repeater confirmed the restore, 0 when it was sent and not confirmed (or could not be), -1
   // when there was nothing to restore.
   int restoreAcl(const ClaimedJob& job, Context& ctx, Outcome outcome);
+  // **A line that cannot be asked twice** (task p1.10-48; meshmaster.dk's tasks p4.32-188 and
+  // p4.32-189 are the server's half). `setperm <our own key> <level>` runs on a session whose
+  // key is, at that moment, admin - and on stock firmware the session *is* the entry, so once
+  // the line has run the key is at `<level>` and `onPeerDataRecv` drops every further console
+  // line from it without a word. So the line is sent **once** and its silence read back with a
+  // blank login, whose reply carries the entry's own permission byte; a check that finds the key
+  // still at admin means the line did not arrive, and the line is sent once more. Two rounds at
+  // most. The two callers are the two places this board sends that line: `runAclSet` for our own
+  // key, and `restoreAcl`.
+  struct OwnEntryWrite {
+    bool wentOut = false;        // a line left this board: the entry may be at the level now
+    bool confirmed = false;      // the entry is at the level the line asked for
+    bool byLogin = false;        // confirmed by the blank login and not by an "OK"
+    Outcome sent = Outcome::Ok;  // what the last line's own exchange came to
+  };
+  OwnEntryWrite writeOwnEntry(const ClaimedJob& job, Context& ctx, const char* command, int level, const char* what);
+  // The blank login that check is: one transaction through the gate, this board's own key and no
+  // secret at all, and a wait only a login reply ends (`awaitLoginReply`). True with `role` set
+  // to the level the repeater holds this exit node's key at; false is a silence, which proves
+  // nothing. **No session is stored**, as the rotation probe stores none - what becomes of the
+  // session depends on what the line was for, and that is the caller's to say (a grant does not
+  // keep it, a restore does).
+  bool readOwnEntryLevel(const ClaimedJob& job, Context& ctx, const char* what, uint8_t& role);
   // The budget's turn to speak, and the lease's. False when the lease ran out first - unless
   // `escape`: the region loader's terminator waits for the budget and ignores the lease, because
   // a repeater left in load mode reads every later CLI command as a region.

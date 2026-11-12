@@ -61,6 +61,26 @@ TEST(TransactionCosts, TheWritesCostWhatThePlannedLoadPricesThem) {
   }
 }
 
+// **The line that cannot be asked twice is priced with its check** (task p1.10-48). `setperm
+// <own key> <level>` is one command and one reply in §7's row, and that is what it costs on a
+// repeater that answers it - but it is sent once and its silence read back with a blank login,
+// so the row is the line **and** that check, and so is the restore, which is the same line. The
+// second round a check answered at admin leads to is beyond the estimate, exactly as the
+// login's own second try is (`kTransactionsForLogin` is one and the sequence tries twice): the
+// lease bounds those, and counting them here would refuse the daily probes of every pair that
+// holds a grant.
+TEST(TransactionCosts, TheLineThatCannotBeAskedTwiceIsPricedWithItsCheck) {
+  EXPECT_EQ(mm::kTransactionsForOwnEntryWrite, 2) << "the line, and the blank login that checks it";
+  EXPECT_EQ(mm::kTransactionsForLogin, 1) << "one, though the sequence tries twice: the same kind of estimate";
+  EXPECT_EQ(mm::transactionsFor("acl.set", mm::CredentialClass::Admin), mm::kTransactionsForOwnEntryWrite);
+  EXPECT_EQ(mm::kTransactionsForAclRestore, mm::kTransactionsForOwnEntryWrite)
+      << "the restore is the same line, checked the same way";
+  // And nothing else moved with it: the row of every other write is still one.
+  for (const char* type : {"cli", "advert.request", "clock.sync", "password.set", "reboot", "discover"}) {
+    EXPECT_EQ(mm::transactionsFor(type, mm::CredentialClass::Admin), 1) << type;
+  }
+}
+
 TEST(TransactionCosts, TheStatusAndTelemetryPairCostsFourAtEitherClass) {
   const int guestPair = mm::kTransactionsForLogin + mm::transactionsFor("status", mm::CredentialClass::Guest) +
                         mm::transactionsFor("telemetry", mm::CredentialClass::Guest);
@@ -266,7 +286,9 @@ TEST(Sessions, AnAclSetOfOurOwnKeyDropsTheAdminSessionToTheLevelSetAndARevokeDro
   sessions.put(key, mm::CredentialClass::Admin, mm::kPermAdmin, 0);
   ASSERT_NE(sessions.get(key, mm::CredentialClass::Admin, 0), nullptr);
 
-  // The grant: `setperm <own key> 1` confirmed - or the restore at the end of an admin session.
+  // The restore at the end of an admin session, confirmed by its "OK" or by the blank login that
+  // checked it (task p1.10-48). A **grant** of our own key keeps no session at all since that
+  // task - the verify logs in by key - so `invalidate` is both halves of this test's second part.
   const mm::RepeaterSession* after = sessions.put(key, mm::CredentialClass::Acl, mm::kPermReadOnly, 1000);
   ASSERT_NE(after, nullptr);
   EXPECT_EQ(after->credentialClass, mm::CredentialClass::Acl);
