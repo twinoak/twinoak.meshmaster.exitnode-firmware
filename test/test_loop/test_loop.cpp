@@ -1010,6 +1010,52 @@ TEST_F(LoopTest, AJobTheWakesTransactionCapHasNoRoomForIsFailedTheSameWay) {
   EXPECT_LE(report.transactionsSpent, 4) << "the cap was not exceeded";
 }
 
+TEST_F(LoopTest, AWakePricesTheRemovalOfOurOwnKeyAsItPricesTheRestore) {
+  // `acl: 0` is the removal that stands in for the restore where this exit node's key should hold
+  // nothing (task p1.10-50): one more line on the air, and the wake's estimate counts it exactly
+  // as it counts a restore - `transactionsOf` asks whether the claim carried a level and not what
+  // the level was, and `kTransactionsForAclRestore` is the line **and** the blank login that
+  // checks it when the line is not answered (task p1.10-48). So this job is priced at four and a
+  // cap of three has no room for it, and the reason the server is told names the number.
+  server.answerHeartbeat(60, 1, 3600, true, platform.clock().now());
+  server.queue(fake::Job(14032, "cli")
+                   .atClass("admin")
+                   .leasedUntil(kLease)
+                   .withAdminPassword("adm1n-pass")
+                   .withAclLevel(0)
+                   .withPayload("{\"command\":\"set tx 20\"}")
+                   .json());
+
+  const mm::WakeReport refused = loop.wake(hourly(3), mm::Budget());
+
+  EXPECT_EQ(refused.jobsClaimed, 1);
+  EXPECT_EQ(refused.jobsRun, 0);
+  EXPECT_EQ(refused.jobsNotRun, 1);
+  EXPECT_EQ(refused.jobs, mm::StepOutcome::NoBudget);
+  EXPECT_EQ(mesh.sends().size(), 0u) << "nothing went on the air for it";
+  ASSERT_EQ(server.results().size(), 1u) << "a job claimed is always answered";
+  EXPECT_EQ(memberOf(server.results()[0].body, "outcome"), "failed");
+  EXPECT_NE(server.results()[0].body.find("needs about 4"), std::string::npos) << server.results()[0].body;
+
+  // The same job with no level in its claim is the two it has always been, and the same cap runs
+  // it: what the difference prices is the removal and nothing else.
+  server.queue(fake::Job(14033, "cli")
+                   .atClass("admin")
+                   .leasedUntil(kLease)
+                   .withAdminPassword("adm1n-pass")
+                   .withPayload("{\"command\":\"set tx 20\"}")
+                   .json());
+
+  const mm::WakeReport ran = loop.wake(hourly(3), mm::Budget());
+
+  EXPECT_EQ(ran.jobsRun, 1);
+  EXPECT_EQ(ran.jobsNotRun, 0);
+  EXPECT_EQ(ran.transactionsSpent, 2) << "the login and the line";
+  ASSERT_EQ(server.results().size(), 2u);
+  EXPECT_EQ(memberOf(server.results()[1].body, "outcome"), "ok") << server.results()[1].body;
+  EXPECT_EQ(mesh.timesSent("setperm " + self() + " 0"), 0);
+}
+
 TEST_F(LoopTest, AJobTheMeshCannotCarryIsDeclinedBeforeItIsPricedAgainstTheWake) {
   // The 1.6 review's third finding (task p1.7-25). The heartbeat does not advertise a type the
   // mesh declines, so the server routes none of it here - but a job **bound** to this agent, or

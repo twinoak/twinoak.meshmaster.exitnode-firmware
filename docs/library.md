@@ -312,6 +312,12 @@ The library decides every timeout and hands it to you; you never choose one.
   three-hop request would, because nobody knows how far it went. `perHopMs` is
   the claim's, 4 000 ms by default — so 16 s for a flood.
 - a **login** waits the longer of that and `job.loginMs` (8 000 ms by default).
+- those two defaults are what the library assumes when a claim carries no
+  `timeouts` member at all. **meshmaster.dk itself sends 8 000 and 16 000** since
+  its task p4.32-187, measured on 12 November 2026 from one unanswered try for
+  every answered one — so a flood waits 32 s there
+  (`tests/fixtures/contracts/JobTimeouts.json` is the sample, and §9 is what
+  those files are).
 - between two sends there is the **airtime budget**: at the conservative default
   (EXIT-NODES §8) two transactions a minute, twenty seconds apart. The library
   waits that gap by calling `loop()` and `IPlatform::delayMs(1)` in a tight idle
@@ -371,6 +377,19 @@ task p4.1-60, the `setperm` that puts this unit's own entry back after an admin
 session rewrote it). It is gated on the **level the claim carried**, and a unit's
 own repeater is handed none — so nothing is restored on a repeater the unit is.
 
+And since unreleased (task p1.10-50) that level may be **0**, which is not a
+level to put the entry back to but *this key should hold nothing here*: an
+admin-password login writes it into the access list at admin and saves it to
+flash, so where there is no grant of ours to put back the session's last command
+is `setperm <own key> 0` and the entry comes off (§3.7). Two doors it never goes
+through, and both are a claim the server does not send: a job of any class but
+**admin** (a blank login answered above the grant is put back by the job that
+made it, and that is not evidence this key should hold nothing), and a job your
+mesh answers **locally** — a unit logs in to its own repeater as the repeater it
+is, so taking that key off would be the repeater forgetting itself, with nothing
+on the other side of the line to put it back. Each is refused with one line in
+the job's log.
+
 ### 3.6 What ends a login's wait, and why your mesh need not filter
 
 A login is awaited with **tag 0** — `awaitReply(0, …)`, *the next response from
@@ -417,11 +436,14 @@ login's, where it cannot. You are not asked to know the job's tags.
 ### 3.7 The one line that cannot be asked twice
 
 `setperm <this unit's own key> <level>` is the one command the library sends
-**once and then checks**, rather than retrying it. There are two places it goes
+**once and then checks**, rather than retrying it. There are three places it goes
 out: the grant of an association ([EXIT-NODES §4.1](https://github.com/twinoak/meshmaster.dk/blob/master/spec/EXIT-NODES.md#41-the-onboarding-flow)
-step 3, an `acl.set` on our own key) and the restore that ends every
+step 3, an `acl.set` on our own key), the restore that ends every
 admin-password session on a repeater that holds a grant for this unit
-(§3.5's last paragraph, [§7](https://github.com/twinoak/meshmaster.dk/blob/master/spec/EXIT-NODES.md#7-agent--mesh-the-transaction-model)).
+(§3.5's last paragraph, [§7](https://github.com/twinoak/meshmaster.dk/blob/master/spec/EXIT-NODES.md#7-agent--mesh-the-transaction-model)),
+and — since unreleased (task p1.10-50) — the **removal** that stands in for that
+restore where the claim says this key should hold nothing (`acl: 0`), which is
+the same line at level 0.
 
 On stock firmware the login table **is** the access list, and a login fills the
 same `ClientInfo` that `setperm` then writes: so the moment that line has run,
@@ -446,9 +468,12 @@ byte is the entry's own.
 
 Two consequences worth knowing about:
 
-- **a confirmed grant keeps no session.** After an `acl.set` on our own key the
-  session cache is cleared for that repeater, so the verify that follows logs in
-  with this unit's own key — which is the only thing that verify proves. The
+- **a confirmed grant keeps no session**, and neither does a confirmed removal.
+  After an `acl.set` on our own key the session cache is cleared for that
+  repeater, so the verify that follows logs in with this unit's own key — which
+  is the only thing that verify proves. A **removal** has no session left to keep
+  at all: the entry *is* the session, so taking the entry off takes the session
+  with it, and the job's log says *the session is gone with the entry*. The
   **restore** keeps its session, at the level it put back, as it always did.
 - **the price went up by the check.** `mm::kTransactionsForAclRestore` and
   `transactionsFor("acl.set")` are **2** rather than 1
@@ -456,7 +481,10 @@ Two consequences worth knowing about:
   when the line is not answered. A repeater that answers the line still costs
   the one transaction [§7](https://github.com/twinoak/meshmaster.dk/blob/master/spec/EXIT-NODES.md#7-agent--mesh-the-transaction-model)
   prices, so a `config.read` through a pair with a grant is 21 transactions when
-  nothing is lost and 22 when the restore has to be checked. The **second round**
+  nothing is lost and 22 when the restore has to be checked — and the same two
+  numbers for a read through a pair that holds **nothing**, whose last command is
+  the removal (task p1.10-50): one line either way, counted wherever the claim
+  carries a level at all, 0 included. The **second round**
   is not in the estimate, exactly as the login's own second try is not
   (`kTransactionsForLogin` is 1 and the sequence tries twice): the lease and the
   gate bound those, and pricing them here would refuse the daily probes of every

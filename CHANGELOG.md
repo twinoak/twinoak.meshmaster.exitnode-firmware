@@ -22,6 +22,59 @@ pull request, as `docs/` moves with code.
 
 ## Unreleased
 
+- **Nothing of ours left behind** (task p1.10-50; meshmaster.dk's p4.33-191 is
+  the server's half). **The fixture manifest moved**, which is the dangerous one
+  of the four: `tests/fixtures/contracts/MANIFEST.txt` now names meshmaster.dk
+  `299df66` rather than `cd872a7`, the commit that has 191. **No record changed
+  shape** - what moved in those bytes is meshmaster.dk's own task p4.32-187,
+  which doubled the two timeouts a claim carries: `JobTimeouts.json`,
+  `ClaimedJob.json` and `ClaimResponse.json` now say `perHopMs: 8000` and
+  `loginMs: 16000`. The library reads both off the claim and always has, and
+  `ClaimedJob`'s own defaults are unchanged (4 000 and 8 000, for a claim that
+  carries no `timeouts` member at all) - so what this moves for you is the
+  **wait**, not the code: a flood waits 32 s against meshmaster.dk now, and a
+  lease estimate built on the old numbers is half of what a job will take.
+  Nothing else of a pin moved - not a method of `IMesh`, `IUplink`, `IPlatform`,
+  `IClock`, `IJobExtension`, `JobContext`, `ResultWriter` or `TextOut`, not
+  `kMeshReplyDataCap` or `kMeshPathCap`, and **no constant changed its value**.
+
+  **What moved behind it**: the claim's `acl` level may now be **0**, and that is
+  not a level to put an entry back to but *this key should hold nothing here*. An
+  admin-password login writes this unit's key into the repeater's access list at
+  **admin** and saves it to flash, so where there is no grant of ours to put back
+  nothing had ever taken that entry off - a guest association whose exit node
+  carries the daily configuration read at admin, a flow that stopped before its
+  grant, a one-off admin job through an exit node with no association. The
+  session's last command is now `setperm <own key> 0` instead of a restore, sent
+  once and checked with the same blank login (task p1.10-48, where a check
+  answered at **guest** is the confirmation that the key is off), and then the
+  session is **gone with the entry**: the entry *is* the session on stock
+  firmware, so there is none left to keep. A `config.read` says what became of it
+  in the same `aclRestored` the restore uses.
+
+  **What it costs you**: nothing new in the estimate -
+  `mm::transactionsOf()` asks whether the claim carried a level and not what the
+  level was, so it has always priced this - but **one transaction more on the air**
+  for an admin job through a pair that holds no grant, where that job sent no
+  `setperm` at all before. At the default schedules that is one more transaction a
+  day per repeater whose primary is a guest pair.
+
+  **Three types send nothing**, and the reasons are the restore's own: a job that
+  ended in silence (a line sent now would go into the same silence, and no login
+  takes an entry off, so the log says the key may still be at admin and names the
+  job that will take it), a `reboot` (no session after it, and a line before it
+  would make the command unanswerable) and an `acl.set` on our own key, where the
+  command **is** the level. **Two claims are refused**, and both are a claim
+  meshmaster.dk does not send: a level of 0 on a job of any class but `admin`
+  (a blank login answered above the grant is put back by the job that made it,
+  and that is no evidence this key should hold nothing), and a level of 0 on a
+  job your mesh answers **locally** - a unit logs in to its own repeater as the
+  repeater it is, so taking that key off would be the repeater forgetting itself,
+  with nothing on the other side of the line to put it back. So if your `IMesh`
+  has a local door, `answersLocally()` is now read by the restore as well as by
+  the pacing: it must be true for the whole of a local job, as it already had to
+  be. [`docs/library.md` §3.5 and §3.7](docs/library.md) are the pages.
+
 - **A console reply belongs to its line** (task p1.10-49). **Nothing of a pin
   moved** - not a method of `IMesh`, `IUplink`, `IPlatform`, `IClock`,
   `IJobExtension`, `JobContext`, `ResultWriter` or `TextOut`, not

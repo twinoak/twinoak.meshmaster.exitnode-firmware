@@ -1118,6 +1118,209 @@ TEST_F(RunnerTest, AnAdminJobWithNoGrantOnThePairSendsNoRestore) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Nothing of ours left behind (task p1.10-50; meshmaster.dk's p4.33-191)
+//
+// An admin-password login writes this board's key into the repeater's access list **at admin**
+// and saves it to flash, so where no grant of ours is there to be put back nothing has ever taken
+// that entry off. The claim says so with `acl: 0` - *you should hold nothing here* - and the
+// session's last command is then `setperm <own key> 0` rather than a restore, checked the same
+// way (task p1.10-48), after which the session is gone with the entry.
+
+TEST_F(RunnerTest, AnAdminJobThroughAPairThatHoldsNothingEndsByTakingTheKeyOff) {
+  class Out : public mm::TextOut {
+   public:
+    void write(const char* text, size_t len) override { out.append(text, len); }
+    std::string out;
+  };
+  // The one-off admin job of EXIT-NODES §4.3: no association at all, so nothing of ours should be
+  // on this repeater once the job is over - and the entry the line takes off is the one this
+  // job's own login made.
+  const std::string body = run(fake::Job(12373, "cli")
+                                   .atClass("admin")
+                                   .leasedUntil(kLease)
+                                   .withAdminPassword("adm1n-pass")
+                                   .withAclLevel(0)
+                                   .withPayload("{\"command\":\"set tx 20\"}"));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << body;
+  EXPECT_EQ(transactionsOf(body), 3) << "the login, the line and the removal - priced where the restore is (§7)";
+  const std::vector<std::string> lines = mesh.lines();
+  ASSERT_EQ(lines.size(), 2u);
+  EXPECT_EQ(lines[0], "set tx 20");
+  EXPECT_EQ(lines[1], "setperm " + self() + " 0") << "the removal is the session's last command";
+  EXPECT_EQ(mesh.levelOf(self()), mm::kPermGuest) << "this board's key is off the access list";
+  const std::string log = logOf(body);
+  EXPECT_NE(log.find("removal: cli 'setperm <own key> 0'"), std::string::npos) << log;
+  EXPECT_NE(log.find("this exit node's key is off the repeater's access list"), std::string::npos) << log;
+  EXPECT_NE(log.find("nothing of ours is left behind"), std::string::npos) << log;
+  EXPECT_NE(log.find("the session is gone with the entry"), std::string::npos) << log;
+
+  // The entry *is* the session on stock firmware, so taking it off takes the session with it: no
+  // later job may spend one on this repeater.
+  Out sessions;
+  runner.reportSessions(sessions);
+  EXPECT_NE(sessions.out.find("live      none"), std::string::npos) << sessions.out;
+}
+
+TEST_F(RunnerTest, AConfigReadThatHoldsNoGrantTakesTheKeyOffAndTheReadSaysSo) {
+  // The daily configuration read of a **guest** association's primary, which is the case that
+  // leaves an entry behind every single day: the probe is planned at admin through a pair that
+  // holds nothing. Our key is already in the table at admin - the leftover of an earlier admin
+  // login, which is how meshmaster.dk's associations 14 and 6 stood on 12 November 2026 - and
+  // another key sits after it, so the deletion's "OK" is addressed to that other key and never
+  // comes home (task p1.10-48). The blank login is the confirmation, and no fault knob is needed
+  // for any of it.
+  mesh.grant(self(), mm::kPermAdmin);
+  mesh.grant(stranger(), mm::kPermReadWrite);
+  const std::string body = run(fake::Job(12374, "config.read")
+                                   .atClass("admin")
+                                   .leasedUntil(kLease)
+                                   .withAdminPassword("adm1n-pass")
+                                   .withAclLevel(0));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << body;
+  EXPECT_EQ(transactionsOf(body), 22) << "the twenty-one of task p4.1-60 and the blank login that checked the removal";
+  EXPECT_EQ(mesh.timesSent("setperm " + self() + " 0"), 1) << "sent once: this line cannot be asked twice";
+  EXPECT_EQ(mesh.logins(), 2);
+  EXPECT_EQ(mesh.loginsWithMaterial(), 1) << "the check is a blank login: this board's own key and no secret";
+  EXPECT_EQ(mesh.levelOf(self()), mm::kPermGuest) << "the key is off the access list";
+  EXPECT_EQ(mesh.levelOf(stranger()), mm::kPermReadWrite) << "and nobody else's entry moved";
+
+  const std::string data = dataOf(body);
+  EXPECT_TRUE(fake::followsShapeOf(data, fake::contract("ConfigReadResult")));
+  EXPECT_NE(data.find("\"aclRestored\":true"), std::string::npos)
+      << "what became of this exit node's own entry after the read: it came off. " << data;
+  // The access list was read **before** the removal, so it lists our key at the admin this read's
+  // own login put it at - which is why the result has to say what the last command did.
+  EXPECT_NE(memberOf(data, "acl").find(self().substr(0, 12) + ":3"), std::string::npos) << data;
+  const std::string log = logOf(body);
+  EXPECT_NE(log.find("the entry check (blank login): answered at guest"), std::string::npos) << log;
+  EXPECT_NE(log.find("which the blank login answered at guest confirmed and no \"OK\" did"), std::string::npos) << log;
+}
+
+TEST_F(RunnerTest, TheSameReadWithNoLevelInTheClaimSendsNothingAfterIt) {
+  // The difference between *hold nothing here* and *nothing was said*: a claim with no `acl`
+  // member at all is an admin **fallback** pair, whose probes carry the password every time, or a
+  // job over a unit's box link - and such a session ends with neither a restore nor a removal.
+  mesh.grant(self(), mm::kPermAdmin);
+  mesh.grant(stranger(), mm::kPermReadWrite);
+  const std::string body = run(fake::Job(12375, "config.read")
+                                   .atClass("admin")
+                                   .leasedUntil(kLease)
+                                   .withAdminPassword("adm1n-pass"));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << body;
+  EXPECT_EQ(transactionsOf(body), 20) << "the nineteen of the read and its login, and nothing after them";
+  EXPECT_EQ(mesh.cliLines(), 18) << "the read's own lines and no setperm";
+  EXPECT_EQ(mesh.timesSent("setperm " + self() + " 0"), 0);
+  EXPECT_EQ(mesh.levelOf(self()), mm::kPermAdmin) << "the entry is where this read's own login left it";
+  EXPECT_EQ(dataOf(body).find("aclRestored"), std::string::npos)
+      << "there was nothing to say about it: " << dataOf(body);
+}
+
+TEST_F(RunnerTest, ALevelOfZeroOnAJobOfAnotherClassChangesNothing) {
+  // A blank login answered **above** the grant is put back by the job that made it (§7, the third
+  // rule), and that is the one job whose session is admin with no admin password behind it. A
+  // claim of another class that says 0 is no evidence that this key should hold nothing, so
+  // nothing is sent: meshmaster.dk sends no such claim - `acl: 0` rides beside an admin password,
+  // and an `acl`-class claim carries the level its own login expects - and this is the firmware
+  // refusing to act on one if it ever arrived.
+  mesh.grant(self(), mm::kPermAdmin);
+  const std::string body = run(fake::Job(12376, "status")
+                                   .atClass("acl")
+                                   .leasedUntil(kLease)
+                                   .withAclLevel(0)
+                                   .withPayload("{\"version\":false}"));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << body;
+  EXPECT_EQ(transactionsOf(body), 2) << "the blank login and the status request";
+  EXPECT_EQ(mesh.cliLines(), 0) << "no console line at all";
+  EXPECT_EQ(mesh.levelOf(self()), mm::kPermAdmin) << "the entry is untouched";
+  EXPECT_NE(logOf(body).find("but this job's class is acl and not admin"), std::string::npos) << logOf(body);
+}
+
+TEST_F(RunnerTest, ARevokeCarryingALevelOfZeroBesideItSendsNoSecondLine) {
+  // meshmaster.dk's revoke is an `acl.set` of `(own key, 0)`, and since its task p4.33-191 the
+  // claim beside it carries `acl: 0` as every admin claim through a pair that holds nothing does
+  // (its own decision 4: the claim says what the key should be at, and which types send the
+  // command is the agent's rule). The command **is** the level: one line, and no removal after it.
+  mesh.grant(self(), mm::kPermReadOnly);
+  const std::string body = run(fake::Job(12377, "acl.set")
+                                   .atClass("admin")
+                                   .leasedUntil(kLease)
+                                   .withAdminPassword("adm1n-pass")
+                                   .withAclLevel(0)
+                                   .withPayload("{\"publicKey\":\"" + self() + "\",\"level\":0}"));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << body;
+  EXPECT_EQ(mesh.cliLines(), 1) << "one line in all";
+  EXPECT_EQ(mesh.timesSent("setperm " + self() + " 0"), 1) << "once, and the command is the level";
+  EXPECT_EQ(mesh.levelOf(self()), mm::kPermGuest);
+  EXPECT_EQ(logOf(body).find("removal: cli"), std::string::npos) << "no second line followed it: " << logOf(body);
+}
+
+TEST_F(RunnerTest, ARebootWithALevelOfZeroSendsNoRemovalAndSaysWhy) {
+  // For the reason the restore gives there: there is no session after a reboot to send a line on,
+  // and a line before it would leave a session the repeater answers no console line on. The key
+  // waits at admin - no login takes an entry off - and the log says so.
+  mesh.grant(self(), mm::kPermAdmin);
+  const std::string body = run(fake::Job(12378, "reboot")
+                                   .atClass("admin")
+                                   .leasedUntil(kLease)
+                                   .withAdminPassword("adm1n-pass")
+                                   .withAclLevel(0));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << body;
+  EXPECT_EQ(mesh.timesSent("setperm " + self() + " 0"), 0);
+  EXPECT_EQ(mesh.cliLines(), 1) << "the reboot and nothing else";
+  EXPECT_EQ(mesh.levelOf(self()), mm::kPermAdmin) << "the key waits at admin for the next admin job";
+  const std::string log = logOf(body);
+  EXPECT_NE(log.find("no restore and no removal on this session"), std::string::npos) << log;
+  EXPECT_NE(log.find("until the next admin job here takes it off"), std::string::npos) << log;
+}
+
+TEST_F(RunnerTest, ALocalJobNeverTakesItsOwnRepeatersKeyOff) {
+  // A unit logs in to its own repeater as the repeater it **is** (EXIT-NODES §4.1 step 3), so
+  // `setperm <own key> 0` over the box link is the repeater asked to forget itself - the job
+  // meshmaster.dk's p4.25-170 refuses to queue - and there is nothing on the other side of that
+  // line to put it back. No claim over that link carries a level at all; this is the firmware
+  // refusing to act on one that did.
+  mesh.setAnswersLocally(true);
+  mesh.grant(self(), mm::kPermAdmin);
+  const std::string body = run(fake::Job(12379, "cli")
+                                   .atClass("admin")
+                                   .leasedUntil(kLease)
+                                   .withAclLevel(0)
+                                   .withPayload("{\"command\":\"set tx 20\"}"));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << body;
+  EXPECT_EQ(mesh.cliLines(), 1) << "the job's own line and nothing after it";
+  EXPECT_EQ(mesh.levelOf(self()), mm::kPermAdmin) << "the ACL is as it was";
+  EXPECT_NE(logOf(body).find("no removal over the local door"), std::string::npos) << logOf(body);
+}
+
+TEST_F(RunnerTest, AJobThatEndedInSilenceSendsNoRemovalAndSaysTheKeyMayBeAtAdmin) {
+  // As the restore is not sent there either: a line sent now would go into the same silence. What
+  // differs is the remedy, because there is none of the restore's kind - no login takes an entry
+  // off - so the log says what is true and names the job that will take it.
+  mesh.silenceLine("set tx 20");
+  const std::string body = run(fake::Job(12380, "cli")
+                                   .atClass("admin")
+                                   .leasedUntil(kLease)
+                                   .withAdminPassword("adm1n-pass")
+                                   .withAclLevel(0)
+                                   .withPayload("{\"command\":\"set tx 20\"}"));
+
+  EXPECT_EQ(outcomeOf(body), "unreachable") << body;
+  EXPECT_EQ(mesh.timesSent("setperm " + self() + " 0"), 0) << "nothing is sent into a silence";
+  EXPECT_EQ(mesh.levelOf(self()), mm::kPermAdmin) << "where this job's own login put it";
+  const std::string log = logOf(body);
+  EXPECT_NE(log.find("the job ended unreachable, so the removal is not sent"), std::string::npos) << log;
+  EXPECT_NE(log.find("no login takes an entry off"), std::string::npos) << log;
+  EXPECT_NE(log.find("the next admin job here is what takes it"), std::string::npos) << log;
+}
+
+// ---------------------------------------------------------------------------------------------
 // A console reply belongs to its line (task p1.10-49)
 //
 // A CLI reply carries no tag, so until this task the first text of CLI data from the peer while

@@ -71,6 +71,9 @@ int transactionsOf(const ClaimedJob& job) {
   // what its check can cost when the line is not answered (`kTransactionsForAclRestore`). The
   // restore is counted wherever there is a grant, which over-states a guest-class job by the
   // whole of it: an estimate a battery spends against may be too high and must never be too low.
+  // A level of **0** is the removal that stands in for the restore where this key should hold
+  // nothing (task p1.10-50): one line, the same price, and the clause below has always counted it
+  // because what it asks is whether the claim carried a level and not what the level was.
   if (job.credentialClass != CredentialClass::None) n += kTransactionsForLogin;
   if (job.hasAclLevel && std::strcmp(job.type, "acl.set") != 0 && std::strcmp(job.type, "reboot") != 0) {
     n += kTransactionsForAclRestore;

@@ -259,6 +259,36 @@ a blank login instead of the line being retried:
       for: the line ran and its "OK" was lost - confirmed by the login and not by
       an "OK" (task p1.10-48)
 
+**And where this board should hold nothing, that last line is its removal**
+(task p1.10-50). An admin-password login puts this board's key in the repeater's
+access list at admin and saves it there, so an admin job through a repeater this
+exit node holds no grant on — a guest association whose daily configuration read
+goes at admin, a one-off job through an exit node with no association — used to
+leave it at admin for good. meshmaster.dk's claim now says `acl: 0` for those
+(its task p4.33-191), and the session's last line is `setperm <own key> 0`:
+
+    removal: cli 'setperm <own key> 0' try 1: no reply (direct)
+    the entry check (blank login): answered at guest (direct)
+    the blank login was answered at guest, which is what a repeater answers a key
+      its access list does not hold: this exit node's key is off it, so the line
+      ran - confirmed by the login and not by an "OK" (task p1.10-48)
+    this exit node's key is off the repeater's access list, which the blank login
+      answered at guest confirmed and no "OK" did: nothing of ours is left
+      behind, and the session is gone with the entry (task p1.10-50)
+
+So such a job costs **one transaction more** than it did, as a restore does, and
+`sessions` shows none for that repeater afterwards: the entry *is* the session, so
+taking the entry off takes the session with it. A `config.read` says what became
+of it in the same `aclRestored` the restore uses — what became of this board's own
+entry after the read, which here is whether the key came off. Three jobs send
+**nothing**: one that ended in silence (`the job ended unreachable, so the removal
+is not sent; no login takes an entry off, so the next admin job here is what takes
+it`), a `reboot` (`no restore and no removal on this session … until the next admin
+job here takes it off`), and an `acl.set` on this board's own key, where the
+command **is** the level. A claim of another class that says 0, or one over a
+unit's own box link, is refused with a line of its own: no login takes an entry
+off, and a unit logs in to its own repeater as the repeater it is.
+
 A check answered **at admin** means the line never arrived: the line goes once
 more and is checked once more (`the line did not arrive, and the session is
 admin again - sending it once more`), two rounds at most, and after that it is
@@ -391,7 +421,9 @@ max 64', and this line wanted 'OK'`), the re-read (`re-read 'get
 advert.interval' try 1: ok`), and `applied 1 of 3 command(s) as the repeater
 answered them; re-read 2 of 2 touched key(s)`; a `cli` says `the repeater
 answered 'neighbors': …`; a `reboot` says `no restore on this session … (task
-60)` and then `reboot sent; the firmware does not answer one`; a `password.set`
+60)` — or `no restore and no removal on this session …` where the claim said this
+board should hold nothing — and then `reboot sent; the firmware does not answer
+one`; a `password.set`
 says `cli 'password <new>' try 1: ok`, `the repeater confirmed the new admin
 password`, the restore, and `the session is dropped`.
 
@@ -706,3 +738,30 @@ server comes back. What the four lines say is a pure function of a struct
     repeater with a **full** map (close to the firmware's 160 characters) must
     come back whole and must not reboot the repeater: those three characters
     would have come out of the same buffer the map is written into.
+26. Nothing of ours left behind (task p1.10-50; meshmaster.dk's p4.33-191). This
+    is the walk for the entry an admin password leaves on a repeater we hold no
+    grant on, and it needs meshmaster.dk's 191 deployed so the claim carries
+    `acl: 0`. Take a test repeater with a **guest** association through this exit
+    node and the admin password stored — the daily configuration read of such a
+    pair is planned at admin, which is the case that leaves an entry behind every
+    day — and press *Read the configuration*. Before it, `get acl` on the
+    repeater's own console: our key is either absent or listed at `03` from an
+    earlier admin job. During it, the job's log must end with
+    `removal: cli 'setperm <own key> 0'` and then either the repeater's `OK` or
+    `the entry check (blank login): answered at guest` and *this exit node's key
+    is off it, so the line ran*; `jobs` counts **21** (or 22 with the check) and
+    the result's `aclRestored` is `true`. **After it, `get acl` must not list this
+    board's key at all**, and `sessions` must show none for that repeater. The
+    read's own `acl` value still lists us at `03`, because the access list is read
+    before the line — that is what the result says `aclRestored` for.
+
+    Then the three that send nothing, each one line in a log: a **reboot** of the
+    same repeater (`no restore and no removal on this session`, and `get acl`
+    still lists us at `03` until the next admin job); a job that ends
+    **unreachable** (pull the repeater's power mid-job: *no login takes an entry
+    off, so the next admin job here is what takes it*); and a *Revoke* of a pair,
+    whose `acl.set` of `(own key, 0)` must still be the **one** line of walk item
+    24 and never two. And the one that must not happen at all: a *Read the
+    configuration* of a unit's **own** repeater over the box link must send no
+    `setperm` of any level — if it ever logs `no removal over the local door`,
+    the server sent a level over that link and meshmaster.dk is the half to fix.

@@ -1,5 +1,5 @@
 # The contract fixtures of the .NET agent, copied - never edited here.
-# source: twinoak/meshmaster.dk/tests/fixtures/contracts at commit cd872a7c6c38653114e7686407f4394ce414e0cf
+# source: twinoak/meshmaster.dk/tests/fixtures/contracts at commit 299df666b549a1d7abfc88e7beec8be43307e37f
 # written by tools/sync-fixtures.ps1; see README.md in this directory
 #
 # sha256                                                           bytes  name
@@ -18,9 +18,9 @@ a7389b66dbacf0b120fef712c51b073f6c0d6942b291e09d50d32005de2425ca     260  AgentH
 f0362154dfac93d78c4274a0b00afc007700eca22c304545620bfa66e8b96931     381  AgentObserver.json
 c678c7403596ceb9d46ed4257f5c1979d2ae60f39a8de6147787a285cad2f6e9     204  AgentObserverSlot.json
 90c99cdfc099939b0782803cc17ecd758fb35b82de38c984c1320c70f7d8e6e6      51  AgentTransportList.json
-3fa33377dffa8e89994ce866cd3174e1574dbf0583167e0f8aeb417000366dea     422  ClaimedJob.json
+9e5f209fcc1c3cb2aa1d7218cba2d2665a69b72d9129a90a2efe643938db42ac     423  ClaimedJob.json
 c4014a3c623935dc4451d33152df277780772059953fca9bf5ada01723797db5      10  ClaimRequest.json
-af48c3e6a7efc745168c8665305d4eb9c32316281b866cc60e177b7f5a20d770     469  ClaimResponse.json
+27efa8a4cac2d53923ae78462f67307419e1d2e3639a7b3069ac09f6a119fd2b     470  ClaimResponse.json
 eca3b6d765c6e2c265dadd65640df25b8781a37fff3559b2f3389064312ae450      49  CliPayload.json
 44685f101c0b49962165fe3d31c5d44bc8efe62b08381e0541e15ba510943186      81  CliResult.json
 ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356       3  ClockSyncPayload.json
@@ -57,7 +57,7 @@ f39804cbd8b263563ddf42a595076e1102ed76a4dcbcc0baeeb70b009ea35865      65  JobRes
 1988b7bd8aeb5a4bcce7311fb33d82ca5e0207dd418364702bd4e948f5ec1683     598  JobResultReport.json
 b3d315b1ab6cf52d922d0b9df34ccbca7e63e7a9b286961b8d6862062c332eac     383  JobResultReportAtGuest.json
 0aef12f18aa353b60a291a93aaae9514e3a8b0ac06daf2e8b86699d7d965970b     247  JobResultReportFailed.json
-35e98e9b2f5470ade07dfca24441c5f7a3fc420bda6df6c56fdcb7dea2c00933      33  JobTimeouts.json
+1cf114904be010e71f73480bc32a02c81afc8158f3eab7e2fa8f6ca8a3104bab      34  JobTimeouts.json
 196a5c5249aad26ce839d5a5a525b18989a89f6273da54edad373d0a473643df     147  JsonEscaping.json
 ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356       3  NeighboursPayload.json
 a4137b88462e1f7ef8786145e5549ec97b2d9844eb18a0a4df08a099bd87ea22     105  NeighboursResult.json
