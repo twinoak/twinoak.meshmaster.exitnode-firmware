@@ -22,6 +22,41 @@ pull request, as `docs/` moves with code.
 
 ## Unreleased
 
+- **A line that cannot be asked twice** (task p1.10-48; meshmaster.dk's
+  p4.32-188 and p4.32-189 are the server's half). **Nothing of a pin moved** -
+  not a method of `IMesh`, `IUplink`, `IPlatform`, `IClock`, `IJobExtension`,
+  `JobContext`, `ResultWriter` or `TextOut`, not `kMeshReplyDataCap` or
+  `kMeshPathCap`, not the fixture manifest (still meshmaster.dk `cd872a7`) - and
+  nothing of yours stops compiling. **One constant of `agent/Airtime.h` changed
+  its value**, which a consumer that prices a wake will see in its arithmetic:
+
+  - `mm::kTransactionsForAclRestore` is **2**, not 1, and
+    `mm::transactionsFor("acl.set", ...)` answers 2 rather than 1. The new
+    `mm::kTransactionsForOwnEntryWrite` is where both come from: the line, and
+    the blank login that checks it when the line is not answered. So
+    `transactionsOf()` prices any job that may send that line - every job
+    through a pair with a grant, which is where the restore is counted - **one**
+    transaction higher than before. If your wake refuses jobs by
+    `transactionsOf()`, give it one more. A repeater that answers the line still
+    spends the one transaction EXIT-NODES §7 prices, and the second round a
+    check answered at admin leads to is beyond the estimate exactly as the
+    login's second try always has been.
+
+  **What moved behind it**: `setperm <own key> <level>` is the session's own
+  level on stock firmware (the login table *is* the access list), so once the
+  line has run this key is no longer admin and `onPeerDataRecv` drops every
+  further console line from it without a word - the retry cannot be answered. The
+  library now sends that line **once**, in the grant (`acl.set` on our own key)
+  and in the restore alike, and reads back what it did with a **blank login**:
+  answered at the level asked for is *confirmed, by the login and not by an
+  "OK"*; answered at admin means the line never arrived, so it goes once more and
+  is checked once more (two rounds at most); a level-0 line answered at guest is
+  the confirmation that the key is off; and a silence confirms nothing. A
+  confirmed grant of our own key now **keeps no session**, so the verify that
+  follows logs in by key - the restore keeps its session as before. meshmaster.dk
+  lost 20 of 52 grants and found one association *elevated* seven times in 39
+  days for want of this. [`docs/library.md` §3.7](docs/library.md) is the page.
+
 - **Only a login reply answers a login** (task p1.10-47; meshmaster.dk's
   p4.32-186 is the server's half). **Nothing of a pin moved** - not a method of
   `IMesh`, `IUplink`, `IPlatform`, `IClock`, `IJobExtension`, `JobContext`,

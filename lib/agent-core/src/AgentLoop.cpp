@@ -67,9 +67,10 @@ int transactionsOf(const ClaimedJob& job) {
   // (meshmaster.dk's p4.3-68, and p4.30-181 for the class no longer deciding).
   if (std::strcmp(job.type, "status") == 0 && !readsOwnerInfo(job)) n = 1;
   // The login every class but `none` needs, and the restore an admin session on a repeater that
-  // holds a grant for this exit node ends with (task p4.1-60). The restore is counted wherever
-  // there is a grant, which over-states a guest-class job by one: an estimate a battery spends
-  // against may be too high and must never be too low.
+  // holds a grant for this exit node ends with (task p4.1-60) - priced since task p1.10-48 at
+  // what its check can cost when the line is not answered (`kTransactionsForAclRestore`). The
+  // restore is counted wherever there is a grant, which over-states a guest-class job by the
+  // whole of it: an estimate a battery spends against may be too high and must never be too low.
   if (job.credentialClass != CredentialClass::None) n += kTransactionsForLogin;
   if (job.hasAclLevel && std::strcmp(job.type, "acl.set") != 0 && std::strcmp(job.type, "reboot") != 0) {
     n += kTransactionsForAclRestore;

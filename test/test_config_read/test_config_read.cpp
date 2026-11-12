@@ -115,8 +115,11 @@ TEST(ConfigList, ThePriceIsTheServersOwnArithmetic) {
   EXPECT_EQ(mm::transactionsFor("config.read", mm::CredentialClass::Admin, mm::kMaxConfigKeys), 35)
       << "a claim at the cap: 32 keys, the two extras, and regions priced as the ceiling";
   EXPECT_EQ(mm::transactionsFor("discover", mm::CredentialClass::Admin), 1);
-  EXPECT_EQ(mm::transactionsFor("acl.set", mm::CredentialClass::Admin), 1);
-  EXPECT_EQ(mm::kTransactionsForAclRestore, 1);
+  // `acl.set` and the restore are the same line, and since task p1.10-48 it is sent once and its
+  // silence checked with a blank login: the line and that check are the two below. §7's row is
+  // the one command it costs on a repeater that answers it.
+  EXPECT_EQ(mm::transactionsFor("acl.set", mm::CredentialClass::Admin), 2);
+  EXPECT_EQ(mm::kTransactionsForAclRestore, 2);
 }
 
 // ------------------------------------------------------------------ the access list
