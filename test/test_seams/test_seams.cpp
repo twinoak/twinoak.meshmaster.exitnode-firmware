@@ -242,7 +242,17 @@ TEST(Seams, TheMeshDrawsTheCliTimestampAndHandsItBack) {
 
   const std::string runner = readFile(root / "lib/agent-core/src/JobRunner.cpp");
   EXPECT_EQ(runner.find("mesh_->uniqueTime()"), std::string::npos) << "the runner draws no timestamp of its own any more";
-  EXPECT_NE(runner.find("mesh_->sendCli(command, sensitive, tag)"), std::string::npos);
+  EXPECT_NE(runner.find("mesh_->sendCli(line, sensitive, tag)"), std::string::npos)
+      << "the runner hands the line and its sensitivity and takes the timestamp back; `line` is the command with "
+         "the console prefix the repeater reflects on it since task p1.10-49, and `nextCliPrefix` draws that prefix "
+         "in the same lambda, before the send";
+  const size_t cli = runner.find("Outcome JobRunner::cliLine(");
+  ASSERT_NE(cli, std::string::npos);
+  const size_t prefixDrawn = runner.find("nextCliPrefix(job, ctx, command, escape);", cli);
+  const size_t lineSent = runner.find("mesh_->sendCli(line, sensitive, tag)", cli);
+  ASSERT_NE(prefixDrawn, std::string::npos);
+  ASSERT_NE(lineSent, std::string::npos);
+  EXPECT_LT(prefixDrawn, lineSent) << "the prefix on the wire is the one drawn for this attempt";
   EXPECT_NE(runner.find("uint32_t nextTimestamp() override { return 0; }"), std::string::npos)
       << "the apply engine's series is the host test's; on the board the mesh draws it";
 }

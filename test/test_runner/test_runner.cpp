@@ -1118,6 +1118,248 @@ TEST_F(RunnerTest, AnAdminJobWithNoGrantOnThePairSendsNoRestore) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// A console reply belongs to its line (task p1.10-49)
+//
+// A CLI reply carries no tag, so until this task the first text of CLI data from the peer while
+// one was awaited was the answer - whatever it answered. `handleCommand` reflects a two-character
+// prefix and a `|`, so every console line of a job now carries one and only a reply that starts
+// with it is its answer. The rule is `agent/CliReplies.h`'s and the wait is `awaitCliReply`.
+
+TEST_F(RunnerTest, AConsoleReplyThatCameTooLateIsNotStoredAsTheNextLinesValue) {
+  // The swap the task exists for, which nobody has seen because nothing would show it: a `get`
+  // answers a value and not the key it belongs to. `get name` is answered too late for its own
+  // wait **and** too late for its retry, so the reply the repeater sent to the first try turns up
+  // while `get tx` is awaited. Without the prefix that text - the node's name - is stored as the
+  // transmit power.
+  mesh.deliverTheNextLineRepliesLate("get name", 1, /*waits=*/2);
+
+  const std::string body = run(fake::Job(12390, "config.read")
+                                   .atClass("admin")
+                                   .leasedUntil(kLease)
+                                   .withAdminPassword("adm1n-pass")
+                                   .withPayload("{\"keys\":[\"name\",\"tx\",\"repeat\"]}"));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << body;
+  const std::string data = dataOf(body);
+  EXPECT_NE(data.find("\"tx\":\"22\""), std::string::npos)
+      << "the reply to `get tx` is the one `get tx` is read from: " << data;
+  EXPECT_EQ(data.find("\"tx\":\"Grenaa Chimney #1\""), std::string::npos)
+      << "the late reply to the line before was stored as this line's value: " << data;
+  EXPECT_NE(data.find("\"name\":\"Grenaa Chimney #1\""), std::string::npos)
+      << "and the retry's own reply is the name: " << data;
+  EXPECT_NE(data.find("\"repeat\":\"on\""), std::string::npos) << data;
+
+  // One send per line still, and the retry of the line that was not answered in time.
+  EXPECT_EQ(mesh.timesSent("get name"), 2) << "no reply once is retried once (EXIT-NODES §5)";
+  EXPECT_EQ(mesh.timesSent("get tx"), 1);
+  EXPECT_EQ(transactionsOf(body), 7)
+      << "the login, two tries of `get name`, `get tx`, `get repeat`, `ver` and `board`";
+
+  const std::string log = logOf(body);
+  EXPECT_NE(log.find("cli 'get name' try 1: no reply"), std::string::npos) << log;
+  EXPECT_NE(log.find("cli 'get tx' try 1: a console reply that does not carry this line's prefix arrived instead"),
+            std::string::npos)
+      << "the drop is in the job's log, with no byte of the dropped reply in it: " << log;
+  EXPECT_NE(log.find("every console line of this job carries the firmware's two-character prefix"), std::string::npos)
+      << log;
+  // The prefix changes with every line and every try, so a late reply to try 1 is not the answer
+  // to try 2 either - which is what made the drop above happen in `get tx`'s wait and not here.
+  EXPECT_NE(mesh.prefixOf("get name", 0), mesh.prefixOf("get name", 1));
+  EXPECT_NE(mesh.prefixOf("get name", 1), mesh.prefixOf("get tx"));
+  // And no line's reply is read with a prefix still on it.
+  EXPECT_EQ(data.find("|"), std::string::npos) << data;
+}
+
+TEST_F(RunnerTest, EveryConsoleLineOfAJobCarriesItsOwnPrefixAndNoTwoAreTheSame) {
+  mesh.grant(self(), mm::kPermReadOnly);
+  const std::string body = run(fake::Job(12391, "config.read")
+                                   .atClass("admin")
+                                   .leasedUntil(kLease)
+                                   .withAdminPassword("adm1n-pass")
+                                   .withAclLevel(mm::kPermReadOnly));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << body;
+  const std::vector<std::string> lines = mesh.lines();
+  const std::vector<std::string> prefixes = mesh.linePrefixes();
+  ASSERT_EQ(lines.size(), prefixes.size());
+  ASSERT_GT(lines.size(), 15u) << "the default list is sixteen keys and the extras";
+
+  std::set<std::string> seen;
+  for (size_t i = 0; i < lines.size(); i++) {
+    // `region` is the one line of this read that goes bare: its reply is
+    // RegionMap::exportTo(reply, 160), the whole of the repeater's reply window, and the three
+    // characters of a prefix are three the map has not got.
+    if (lines[i] == "region") {
+      EXPECT_EQ(prefixes[i], "") << "the region listing must not lose three characters of its window";
+      continue;
+    }
+    EXPECT_EQ(prefixes[i].size(), mm::kCliPrefixLen) << lines[i];
+    EXPECT_EQ(prefixes[i][2], '|') << lines[i];
+    EXPECT_TRUE(seen.insert(prefixes[i]).second) << "two lines of one job share a prefix: " << lines[i];
+  }
+  // The read is exactly the read it was: the values, the regions and the restore.
+  const std::string data = dataOf(body);
+  EXPECT_TRUE(fake::followsShapeOf(data, fake::contract("ConfigReadResult")));
+  EXPECT_NE(data.find("\"name\":\"Grenaa Chimney #1\""), std::string::npos) << data;
+  EXPECT_NE(data.find("\"regions\":\"* F\\n dk F\\ndefault dk\""), std::string::npos) << data;
+  EXPECT_NE(data.find("\"firmware\":\"v1.17.1 (Build: 27 Sep 2025)\""), std::string::npos) << data;
+  EXPECT_NE(data.find("\"aclRestored\":true"), std::string::npos) << data;
+  EXPECT_EQ(transactionsOf(body), 21) << "the price did not move: a prefix is bytes of a line, not a transaction";
+}
+
+TEST_F(RunnerTest, ARepeaterThatDoesNotSayItReflectsThePrefixIsReadExactlyAsBefore) {
+  // Nothing looser than the login's own FIRMWARE_VER_LEVEL tells the two apart. A repeater that
+  // names a level below 1 - or none at all, which is the same branch - gets its lines as it got
+  // them before this task, because a prefix a repeater does not strip is run as part of the
+  // command: `rep-v6` of February 2025 answers `a7|get name` with
+  // `Unknown: a7|get name (commands: ...)`.
+  mesh.setFirmwareVerLevel(0);
+  const std::string body = run(fake::Job(12392, "config.read")
+                                   .atClass("admin")
+                                   .leasedUntil(kLease)
+                                   .withAdminPassword("adm1n-pass")
+                                   .withPayload("{\"keys\":[\"name\",\"tx\"]}"));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << body;
+  for (const std::string& prefix : mesh.linePrefixes()) {
+    EXPECT_EQ(prefix, "") << "a line went out with a prefix this repeater would not have stripped";
+  }
+  const std::string data = dataOf(body);
+  EXPECT_NE(data.find("\"name\":\"Grenaa Chimney #1\""), std::string::npos) << data;
+  EXPECT_NE(data.find("\"tx\":\"22\""), std::string::npos) << data;
+  EXPECT_EQ(transactionsOf(body), 5) << "the login, two gets, ver and board";
+  EXPECT_NE(logOf(body).find("has not been told the repeater's firmware level, so its console lines carry no prefix"),
+            std::string::npos)
+      << logOf(body);
+}
+
+TEST_F(RunnerTest, AnApplysLinesCarryThePrefixAndTheRegionLoadersDoNot) {
+  // The loader is the one sequence of this firmware whose lines must go bare, and for two
+  // reasons: `handleCommand` returns from its region-load branch **before** it reads a prefix,
+  // so a prefixed region line would be loaded as a region named `a7|...`; and a line nobody
+  // awaits a reply for must not be given one, because the reflected prefix alone is a non-empty
+  // reply and would put a packet on the air for every region in the map.
+  const std::string payload =
+      "{\"commands\":["
+      "{\"key\":\"advert.interval\",\"command\":\"set advert.interval 180\"},"
+      "{\"key\":\"regions\",\"command\":\"region load\",\"lines\":["
+      "{\"line\":\"region load\",\"expect\":null,\"escape\":false},"
+      "{\"line\":\" dk F\",\"expect\":null,\"escape\":false},"
+      "{\"line\":\" \",\"expect\":\"OK - loaded\",\"escape\":true},"
+      "{\"line\":\"region default dk\",\"expect\":\"default scope is now\"},"
+      "{\"line\":\"region save\",\"expect\":\"OK\"}]}"
+      "],\"planHash\":\"deadbeef\"}";
+  const std::string body = run(fake::Job(12393, "config.apply")
+                                   .atClass("admin")
+                                   .leasedUntil(kNow + 3600)
+                                   .withAdminPassword("adm1n-pass")
+                                   .withPayload(payload));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << body;
+  const std::vector<std::string> lines = mesh.lines();
+  const std::vector<std::string> prefixes = mesh.linePrefixes();
+  ASSERT_EQ(lines.size(), prefixes.size());
+  // The lines that must go bare: the loader's own three, and the `region` of the re-read.
+  const std::set<std::string> bare = {"region load", " dk F", " ", "region"};
+  int bareSeen = 0;
+  for (size_t i = 0; i < lines.size(); i++) {
+    if (bare.count(lines[i]) > 0) {
+      EXPECT_EQ(prefixes[i], "") << lines[i];
+      bareSeen++;
+    } else {
+      EXPECT_EQ(prefixes[i].size(), mm::kCliPrefixLen) << lines[i];
+    }
+  }
+  EXPECT_EQ(bareSeen, 4) << "the loader's three lines and the region listing of the re-read";
+  // The load really loaded, which it could not have done through a prefix, and the apply is the
+  // apply it was.
+  EXPECT_EQ(mesh.regionsLoaded(), 1);
+  const std::string data = dataOf(body);
+  EXPECT_TRUE(fake::followsShapeOf(data, fake::contract("ConfigApplyResult")));
+  EXPECT_NE(data.find("OK - loaded 1 regions"), std::string::npos) << data;
+  EXPECT_NE(data.find("default scope is now dk"), std::string::npos) << data;
+  EXPECT_EQ(data.find("a7|"), std::string::npos) << data;
+}
+
+TEST_F(RunnerTest, ALateReplyDuringAnApplysReReadIsNotTheNextKeysValue) {
+  // The apply's re-read is `get`s with the same bounded retry a config read's are (§5 step 5),
+  // so it is the same swap: `get advert.interval` answered too late for both its tries, and the
+  // reply turning up while `get repeat` is awaited. Without the prefix the re-read would carry
+  // `repeat: 180`, and meshmaster.dk would fold that into the repeater's configuration.
+  mesh.deliverTheNextLineRepliesLate("get advert.interval", 1, /*waits=*/2);
+  const std::string payload =
+      "{\"commands\":["
+      "{\"key\":\"advert.interval\",\"command\":\"set advert.interval 180\"},"
+      "{\"key\":\"repeat\",\"command\":\"set repeat off\",\"expect\":\"OK - repeat is now OFF\"}"
+      "],\"planHash\":\"deadbeef\"}";
+  const std::string body = run(fake::Job(12394, "config.apply")
+                                   .atClass("admin")
+                                   .leasedUntil(kNow + 3600)
+                                   .withAdminPassword("adm1n-pass")
+                                   .withPayload(payload));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << body;
+  const std::string reRead = memberOf(dataOf(body), "reRead");
+  EXPECT_NE(reRead.find("\"advert.interval\":\"180\""), std::string::npos) << reRead;
+  EXPECT_NE(reRead.find("\"repeat\":\"off\""), std::string::npos)
+      << "the key's own reply is what it is read from: " << reRead;
+  EXPECT_EQ(reRead.find("\"repeat\":\"180\""), std::string::npos)
+      << "the late reply to the key before was stored as this key's value: " << reRead;
+  EXPECT_NE(logOf(body).find("a console reply that does not carry this line's prefix arrived instead"),
+            std::string::npos)
+      << logOf(body);
+}
+
+TEST_F(RunnerTest, TheTwoRoundsOfTheLineThatCannotBeAskedTwiceCarryDifferentPrefixes) {
+  // Task p1.10-48's second round sends the **same text** again, and that is exactly where a
+  // prefix per try earns its keep: a late "OK" from round one must not confirm round two of a
+  // line whose first attempt may already have run.
+  const std::string line = "setperm " + self() + " 1";
+  mesh.loseTheNextLines(line, 1);
+
+  const std::string body = run(fake::Job(12395, "acl.set")
+                                   .atClass("admin")
+                                   .leasedUntil(kLease)
+                                   .withAdminPassword("adm1n-pass")
+                                   .withAclLevel(mm::kPermReadOnly)
+                                   .withPayload("{\"publicKey\":\"" + self() + "\",\"level\":1}"));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << body;
+  ASSERT_EQ(mesh.timesSent(line), 2) << "two rounds (task p1.10-48)";
+  EXPECT_EQ(mesh.prefixOf(line, 0).size(), mm::kCliPrefixLen);
+  EXPECT_NE(mesh.prefixOf(line, 0), mesh.prefixOf(line, 1))
+      << "the same text twice, and the second round answerable only by its own reply";
+  EXPECT_NE(dataOf(body).find("\"reply\":\"OK\""), std::string::npos)
+      << "the reply is recorded with its prefix taken off: " << dataOf(body);
+}
+
+TEST_F(RunnerTest, ThePasswordLineCarriesItsPrefixAndNeitherTheValueNorItsEchoIsLogged) {
+  // A password never leaves differently: the line is sensitive in the frame log with a prefix on
+  // it exactly as it was without one, the echo is compared and recorded redacted, and the buffer
+  // the prefixed line was built in is wiped with the one the secret was built in.
+  const std::string secret = "n3w-adm1n-pass";
+  const std::string body = run(fake::Job(12396, "password.set")
+                                   .atClass("admin")
+                                   .leasedUntil(kLease)
+                                   .withAdminPassword("adm1n-pass")
+                                   .withNewPassword(secret)
+                                   .withPayload("{\"field\":\"adminPassword\"}"));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << body;
+  EXPECT_EQ(mesh.timesSent("password " + secret), 1) << "sent once (§7), and recorded as the repeater ran it";
+  EXPECT_EQ(mesh.prefixOf("password " + secret).size(), mm::kCliPrefixLen) << "the line carried a prefix";
+  EXPECT_EQ(mesh.adminPassword(), secret) << "the repeater stored it";
+  EXPECT_EQ(memberOf(dataOf(body), "reply"), "password now: <set>")
+      << "the echo arrived behind the prefix, was compared and was recorded redacted: " << dataOf(body);
+
+  // **The rail**, with the prefix in the way: neither the result nor one captured log line holds
+  // the value.
+  EXPECT_EQ(body.find(secret), std::string::npos) << "the result carries the new password";
+  EXPECT_FALSE(fake::LogCapture::the().holds(secret)) << "a log line carries the new password";
+  EXPECT_FALSE(fake::LogCapture::the().holds("adm1n-pass")) << "a log line carries the admin password";
+}
+
+// ---------------------------------------------------------------------------------------------
 // The six that write
 
 TEST_F(RunnerTest, AConfigApplySendsEachCommandOnceAndReadsBackWhatItTouched) {

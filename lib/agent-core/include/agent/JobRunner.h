@@ -97,6 +97,7 @@
 #include <cstring>
 
 #include <agent/Airtime.h>
+#include <agent/CliReplies.h>
 #include <agent/ConfigApply.h>
 #include <agent/ConfigRead.h>
 #include <agent/FloodScope.h>
@@ -218,7 +219,14 @@ class JobRunner {
     uint8_t roundTrip[kMeshPathCap];
     ConfigSnapshot snapshot;
     AccessListEntry acl[kAccessListMaxEntries];
-    char cliReply[kMaxCliReplyLen + 1];       // the last CLI reply, as the repeater wrote it
+    char cliReply[kMaxCliReplyLen + 1];       // the last CLI reply, its own prefix taken off
+    // **The console line in flight** (task p1.10-49): the prefix the attempt went out with - two
+    // characters and a `|`, or empty for a line that goes bare - and the bytes that went on the
+    // air, which are that prefix and the command. `line` is the one buffer besides `secretLine`
+    // that can hold a secret: `cliLine` builds it right before the send and wipes it right
+    // after, for the same two lines and under the same rule.
+    char cliPrefix[kCliPrefixLen + 1];
+    char line[kMaxCliCommandLen + kCliPrefixLen + 1];
     char regionListing[kMaxCliReplyLen + 1];  // the `region` reply, kept across `region default`
     char regionValue[kMaxConfigValueLen + 1];
     char command[kPublicKeyHexLen + 32];
@@ -412,6 +420,17 @@ class JobRunner {
     uint8_t sentTagNext = 0;
     void rememberTag(uint32_t tag);
     bool sentTag(uint32_t tag) const;
+    // **The tag a console line carries instead**, which is the prefix the firmware reflects
+    // (task p1.10-49; agent/CliReplies.h). A CLI reply is a TXT_MSG with no tag of ours in it,
+    // so the sequence below is counted out one per line and per try: a late reply to the line
+    // before, or to try 1 of a line that is not safe to run twice, carries another prefix and is
+    // not this line's answer. The series is seeded from the platform's random on the job's first
+    // console line and dies with the job, so two jobs for the same repeater do not begin at the
+    // same two characters - the reply to the last line of one of them can still be in the air
+    // when the next begins. `cliPrefixNoted` keeps the job's log to one sentence about it.
+    bool hasCliPrefixSeq = false;
+    uint8_t cliPrefixSeq = 0;
+    bool cliPrefixNoted = false;
     // The restore (task p4.1-60): sent once per job, by the handler that needs its verdict in
     // the result (config.read) or by the runner after the handler.
     bool aclRestoreDone = false;
@@ -514,6 +533,18 @@ class JobRunner {
   template <typename Send>
   Outcome exchange(const ClaimedJob& job, Context& ctx, const char* what, bool retry, bool text, Send send,
                    bool escape = false);
+  // **The wait only this line's own console reply ends** (task p1.10-49). A CLI reply carries no
+  // tag, so while the line in flight carries a prefix (`Scratch::cliPrefix`) a text that does
+  // not start with it is a **late** reply - to the line before, or to try 1 of this one - and is
+  // dropped with a line in the job's log while the wait goes on to its end. The reply that is
+  // this line's lands in `Scratch::cliReply` with its prefix taken off, so nothing downstream
+  // sees it. With no prefix on the line this is the one `awaitText` it always was.
+  bool awaitCliReply(const ClaimedJob& job, const char* what, int attempt);
+  // The prefix the next console line of this job goes out with, into `Scratch::cliPrefix`:
+  // counted out one per line and per try from the job's own seeded series (Context above). The
+  // empty string for a line that must go bare - `cliLineTakesPrefix` says which, and a repeater
+  // whose firmware level this job does not know takes none at all.
+  void nextCliPrefix(const ClaimedJob& job, Context& ctx, const char* command, bool escape);
   // The session's last command on a pair with a grant (task p4.1-60). Returns 1 when the
   // repeater confirmed the restore, 0 when it was sent and not confirmed (or could not be), -1
   // when there was nothing to restore.

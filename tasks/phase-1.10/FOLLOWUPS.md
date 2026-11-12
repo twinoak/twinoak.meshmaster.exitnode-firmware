@@ -47,3 +47,38 @@ a reading and absent is not.
   `task/p1.10-41-no-password-for-a-local-login`, `task/p1.10-43-a-local-job-is-priced-as-local`,
   `task/p1.10-44-an-empty-get-is-a-value`, `task/p1.10-45-the-owner-info-whole` and
   `task/p1.10-46-a-guest-answer-the-job-can-use`.
+
+## Left behind by 49 (12 November)
+
+- [ ] **[later] A console line on a *reused* session carries no prefix.** Task
+  p1.10-49 puts the firmware's two-character prefix on every console line where
+  the login's `FIRMWARE_VER_LEVEL` says the repeater reflects one, and nothing
+  looser - which is right, because a prefix a repeater does not strip is run as
+  part of the command. But `Context::hasFirmwareLevel` is **this job's own
+  login's** (task p4.30-181 made it that), so a job that found a live admin
+  session and made no login of its own does not know the level and sends its
+  lines bare. That is the conservative branch and not a fault - the lines go
+  exactly as they went before 49 - but it is the one case where the protection
+  is absent, and it is a case that happens: a `config.read` claimed in the same
+  slot as another admin job for the same repeater reuses its session, and that
+  read is thirty console lines in a row. What would close it: keep the level
+  with the session (`RepeaterSession` in `agent/Sessions.h`, filled by
+  `SessionStore::put`) and let the prefix rule read *the level this job's login
+  named, or the level the session being reused was opened at*. 49 left
+  `SessionStore` alone on purpose - the owner-info gate of task p1.10-45 reads
+  the same two fields, and widening them is that task's call and not 49's.
+- [ ] **[upstream] A prefixed `region` would write past the repeater's reply
+  buffer.** Read off the pinned source while 49 was deciding which lines may
+  carry a prefix, and it is **MeshCore's**, not ours.
+  `MyMesh::onPeerDataRecv` gives a console reply `uint8_t temp[166]` with the
+  reply at `&temp[5]` - 161 bytes - and `handleCommand` advances that pointer by
+  three when it reflects a prefix, leaving 158. `CommonCLI::handleRegionCmd`
+  then writes the map with `RegionMap::exportTo(reply, 160)`, which fills up to
+  159 characters and a NUL: **two bytes past the end of `temp`**, on the stack,
+  for a full region map asked for with a prefix. 49 keeps this firmware out of
+  it (`region` and `region def …` go bare, `cliLineTakesPrefix`), and nothing of
+  ours can reach it - but the **companion radio's own CLI** is what the prefix
+  exists for, so a phone asking a repeater with a full map for `region` through
+  a companion does reach it. Worth an issue upstream (`docs/upstream.md` is the
+  page for how this repository tracks that); it is not this firmware's bug and
+  not this pile's to fix.

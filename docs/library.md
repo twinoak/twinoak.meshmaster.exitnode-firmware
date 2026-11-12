@@ -464,6 +464,60 @@ Two consequences worth knowing about:
 
 **For your `IMesh`: do nothing.** As with §3.6, the rule is the library's.
 
+### 3.8 The prefix a console line carries
+
+A console reply carries **no tag**. `onPeerDataRecv` answers a CLI line with a
+`TXT_MSG` of the repeater's own clock, and the sender timestamp the line went out
+with is nowhere in it — so until unreleased (task p1.10-49) the first text of
+CLI data from the peer while one was awaited was the answer, whatever it
+answered. On a mesh where replies arrive later than the board waits (§3.6, and
+meshmaster.dk's task 187 has the numbers) the reply to `get name` can arrive
+while `get radio` is awaited and be stored as the radio; a configuration read is
+thirty such lines in a row, and nothing would show the swap either, because a
+`get` answers a value and not the key it belongs to.
+
+The firmware has a tag for it, and it is upstream's own: `MyMesh::handleCommand`
+reflects an **optional prefix** — a line longer than four characters whose third
+character is `|` has its first three characters copied to the head of the reply,
+and the rest is run. `a7|get name` is answered `a7|> Grenaa Chimney #1`. It is
+there for the companion radio's CLI and has been in the repeater since commit
+`1209d54d` of 27 February 2025, released in `repeater-v1.0.0a`.
+
+So every console line the library sends now carries one, **counted out per line
+and per try**, and only a reply that starts with it is that line's answer:
+another prefix, or none, is a late reply, dropped with a line in the job's log
+while the wait runs to its end (`JobRunner::awaitCliReply`, eight drops a wait as
+§3.6's bound is, and the drops do not extend the wait). The reply that is this
+line's reaches the rest of the library with its prefix taken off, so nothing
+downstream — `cliReplyValue`, `cliReplyIsConfirmed`, the apply engine, the
+password echo — sees it at all.
+
+**Four kinds of line go bare**, and each is a reading of the firmware rather than
+a preference (`agent/CliReplies.h`):
+
+| the line | why |
+|---|---|
+| a repeater whose **FIRMWARE_VER_LEVEL this job does not know**, or whose level is below 1 | the level is in the login reply only since `repeater-v1.9.0` (commit `c2159634`, 25 September 2025), seven months *after* the prefix, so any level at all means the prefix is reflected — but a repeater that names none is either older than the prefix or between the two releases, and the two cannot be told apart. Nothing looser is used: the `ver` text is a console reply, which is the thing being matched. A repeater that does not strip the prefix **runs it**: `rep-v6` answers `a7|get name` with `Unknown: a7|get name (commands: …)` |
+| a line of **two characters or fewer** | `strlen(command) > 4` is `handleCommand`'s own condition, with the prefix on it. The region loader's terminator is one space, and that is how it stays bare |
+| `region` and `region def …` | their reply is `RegionMap::exportTo(reply, 160)`, the whole of the repeater's reply window (`onPeerDataRecv`'s `uint8_t temp[166]`, the reply at `&temp[5]`). The prefix is reflected into the front of that same window, so three characters of it are three the map has not got — and a full map plus a prefix would write past the end of that buffer, which is the repeater's stack |
+| a line the caller **awaits no reply for**, and an **escape line** that ends a mode | the reflected prefix alone is a non-empty reply (`if (text_len > 0)`), so prefixing a silent line would put a packet on the air for every region in a map; and `handleCommand` returns from its region-load branch *before* it reads a prefix, so a line sent in that mode would be loaded as a region named `a7|…` |
+
+A **session reused from an earlier job** carries no firmware level into this one
+(`JobContext.FirmwareVerLevel` is this job's own login's), so its console lines
+go bare. That is the conservative half of the first row and not a bug, but it is
+the one case where the protection is absent and a reply can still be late: the
+level would have to be kept with the session for it to hold there.
+
+**Nothing of a password changed.** `password <new>` and
+`set guest.password <new>` are sensitive with a prefix exactly as they were
+without one — the frame's body is still printed as stars, the echo is still
+compared and recorded redacted, and the buffer the prefixed line is built in is
+wiped with the one the secret is built in.
+
+**For your `IMesh`: do nothing.** As with §3.6 and §3.7, the rule is the
+library's, and for the same reason: it has to hold for a mesh that hands every
+text through. You are not asked to know which line is in flight.
+
 ## 4. `IUplink` — meshmaster.dk
 
 `agent/IUplink.h`. Seven calls of [API §3](https://github.com/twinoak/meshmaster.dk/blob/master/spec/API.md#3-agent-api-agentv1),

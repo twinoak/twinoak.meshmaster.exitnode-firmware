@@ -275,6 +275,41 @@ kept, so the next job for this repeater logs in by key`), so the verify that
 follows is a login by this board's key and not a reuse of the password's
 session.
 
+**Every console line carries a two-character prefix** (task p1.10-49), where the
+repeater is known to reflect one. `handleCommand` copies the first three
+characters of a line whose third character is `|` to the head of its reply, so
+`a7|get name` is answered `a7|> Grenaa Chimney #1` - and a console reply, which
+carries no tag of ours, can therefore be told from a late reply to the line
+before it. The job's log says it once, at the first line:
+
+    every console line of this job carries the firmware's two-character prefix,
+      so only a reply that carries this line's own is its answer (task p1.10-49)
+    cli 'get name' try 1: no reply (direct)
+    cli 'get name' try 2: ok (direct, 1 240 ms)
+    cli 'get tx' try 1: a console reply that does not carry this line's prefix
+      arrived instead; dropped, and the wait goes on (task p1.10-49)
+    cli 'get tx' try 1: ok (direct, 980 ms)
+
+The prefix changes with every line and every try, so the reply to try 1 of a
+line cannot be read as the answer to try 2 - which matters most for the one line
+that cannot be asked twice, above. **No byte of a dropped reply is printed**, in
+the job's log or on this console: a console reply can be the echo of a
+`password` line. The serial log says it in one line of its own
+(`jobs: job NN: cli 'get tx' try 1: a console reply that was not this line's was
+dropped`), so a repeater that does this often is visible without the job's page.
+
+Some lines go bare, and the log says which when it is the repeater's doing: a
+repeater whose login reply named no firmware level, or a level below 1, has not
+told this board that it reflects a prefix at all (`this job has not been told the
+repeater's firmware level, so its console lines carry no prefix: a reply that
+arrives late cannot be told from this line's own`), and its lines go exactly as
+every line went before this task - a prefix such a repeater does not strip would
+be run as part of the command. The others are quiet, because they are the same
+on every repeater: the region loader's lines and its one-space terminator (the
+firmware reads those before it reads a prefix), and the `region` listing, whose
+reply fills the repeater's whole reply window with no room for three more
+characters. `docs/library.md` §3.8 is the table.
+
 A login is tried twice: `login (admin) try 1: no reply (flood, scope dk)`, then
 `try 2: … (flood, unscoped)` — the word beside `direct` or `flood` is the
 *shape* the packet went out in, which since task p1.8-32 names the flood scope
@@ -642,3 +677,32 @@ server comes back. What the four lines say is a pure function of a struct
     login is silence, the job is `unreachable` with `confirmed: false`, and
     meshmaster.dk's p4.32-188 says the command went out and no answer came back,
     which is usual for a key's own removal.
+25. A console reply that belongs to the line before (task p1.10-49). Nobody has
+    seen this one, and nothing would have shown it: a `get` answers a value and
+    not the key it belongs to, so the reply to `get name` arriving while
+    `get radio` is awaited used to be stored as the radio. The walk is the same
+    slow repeater as item 22 - one far enough away, or busy enough, that a reply
+    sometimes misses its 16 s wait - and the job to press is *Read the
+    configuration*, which is thirty console lines in a row. Three things to look
+    for in its log. First, the one sentence at the top: `every console line of
+    this job carries the firmware's two-character prefix`. If it says instead
+    that the job *has not been told the repeater's firmware level*, the repeater
+    is older than `repeater-v1.9.0` and this read is unprotected - note which
+    repeater it was. Second, when a line does go unanswered and the next one is
+    answered quickly, watch for `a console reply that does not carry this line's
+    prefix arrived instead; dropped, and the wait goes on` - that is the swap
+    being caught, and it is printed to the serial log too. Third, and this is
+    what must **not** change: the configuration the job reports must be the
+    repeater's. Compare the `name`, `tx` and `freq` of the read against `get
+    name`, `get tx` and `get freq` on the repeater's own console. A value that
+    belongs to the key above it is the fault this task exists for.
+
+    Two things want a deliberate look, because they are the lines that go
+    **bare**. A `config.apply` whose plan carries a **regions** entry must still
+    load: press *Apply* with a region map from meshmaster.dk and check `region`
+    on the repeater's own console afterwards - a region named `a7|dk` would mean
+    a prefix reached the loader, which is what the firmware reads before it
+    reads a prefix. And the `region` listing of a *Read the configuration* on a
+    repeater with a **full** map (close to the firmware's 160 characters) must
+    come back whole and must not reboot the repeater: those three characters
+    would have come out of the same buffer the map is written into.

@@ -22,8 +22,9 @@
 // (support/FakePlatform.h), so a wait is asserted rather than slept, and every send is recorded
 // with that clock's time - which is what *one send per command*, the minimum gap and the
 // per-minute cap are asserted against. One reply can be **late** rather than lost
-// (`deliverTheNextReplyLate`, task p1.10-47): it misses its own request's wait and turns up in
-// the next one, which is the only timing of the air this fake models beyond a latency.
+// (`deliverTheNextReplyLate`, task p1.10-47, and `deliverTheNextLineRepliesLate` for a named
+// console line, task p1.10-49): it misses its own request's wait and turns up in the next one,
+// which is the only timing of the air this fake models beyond a latency.
 //
 // ---- answers (the manifest) ------------------------------------------------------------------
 //
@@ -69,6 +70,7 @@
 // answer: cli-get               cite: fw companion-v1.18.0 81dbae59 src/helpers/CommonCLI.cpp:701-834 CommonCLI::handleGetCmd -- a key it knows is `> <value>` and one it does not is `??: <key>`
 // answer: cli-set               cite: fw companion-v1.18.0 81dbae59 src/helpers/CommonCLI.cpp:486-699 CommonCLI::handleSetCmd -- a value it took is `OK` (`OK - repeat is now ON`/`OFF` for repeat), a key it does not know is `unknown config: <rest>`
 // answer: cli-guest-password    cite: fw companion-v1.18.0 81dbae59 src/helpers/CommonCLI.cpp:513-516 CommonCLI::handleSetCmd -- `set guest.password <new>` answers OK
+// answer: cli-prefix            cite: fw repeater-v1.18.0 81dbae59 examples/simple_repeater/MyMesh.cpp:1233-1239 MyMesh::handleCommand -- a line longer than four characters whose third character is `|` has its first three characters reflected at the head of the reply and the rest is run; the region-load branch returns before this, so a line sent in load mode keeps its prefix (task p1.10-49)
 // answer: cli-region            cite: fw companion-v1.18.0 81dbae59 src/helpers/CommonCLI.cpp:889-988 CommonCLI::handleRegionCmd -- `region` exports the map into 160 characters, `region default` answers ` default scope is <name>`, `region load` answers nothing and `region save` answers OK
 // answer: trace                 cite: fixture trace-data.hex
 // answer: trace                 cite: fw companion-v1.18.0 81dbae59 src/Mesh.cpp:42-67 Mesh::onRecvPacket -- a TRACE states its hash size as an exponent in the flags byte and carries one SNR a hop, the final one measured on the packet home
@@ -89,6 +91,7 @@
 #include <utility>
 #include <vector>
 
+#include <agent/CliReplies.h>
 #include <agent/IMesh.h>
 #include <agent/Observations.h>
 #include <agent/ReplyCodec.h>
@@ -129,7 +132,12 @@ struct Send {
   bool direct = false;  // else flooded
   uint32_t tag = 0;     // the tag, or for a CLI line the sender timestamp the mesh drew
   uint8_t reqType = 0;  // Request only
-  std::string text;     // Cli only
+  // Cli only: the line **as the repeater ran it**, which is what went out with its reflected
+  // prefix taken off again - so `timesSent` and the fault knobs are about the command, as they
+  // were before there were prefixes. `prefix` is the three characters the line went out with
+  // (`a7|`) and is empty for a line that went bare; the bytes on the air are the two joined.
+  std::string text;
+  std::string prefix;
   bool sensitive = false;
   // Login only: the login carried a password, rather than the empty material of the ACL login,
   // the guest door or a job the mesh answers locally (task p1.10-41). The **value** is never
@@ -266,6 +274,8 @@ class FakeMesh : public mm::IMesh {
   // A line the test answers itself, whatever the firmware would have said; and a line the
   // repeater is silent to, whatever it is.
   void answerLine(const std::string& line, const std::string& reply) { scripted_[line] = reply; }
+  // A line this repeater never answers: it is a **silence on the air**, which with a prefix on
+  // the line is no longer the same as a handler that writes an empty reply (task p1.10-49).
   void silenceLine(const std::string& line) { silentLines_.insert(line); }
 
   // ------------------------------------------------------------------ the faults, on cue
@@ -305,6 +315,14 @@ class FakeMesh : public mm::IMesh {
   // November 2026. Not `silenceLine` (the line never ran) and not `replySlowly` (which counts
   // every reply, a login's included).
   void loseTheNextLineReplies(const std::string& line, int times) { lostLineReplies_[line] = times; }
+  // **The next `times` replies to this line arrive after their own wait has ended** (task
+  // p1.10-49): held, not lost, and delivered `waits` waits later - 1 is the wait after its own,
+  // and 2 is the one after that, which for a line the library **retries** is the next line's
+  // wait, where the reply to `get name` can be stored as the radio. The line is named as the
+  // repeater **ran** it, without the prefix the line went out with.
+  void deliverTheNextLineRepliesLate(const std::string& line, int times, int waits = 1) {
+    lateLineReplies_[line] = {times, waits};
+  }
 
   void setLatency(uint32_t directMs, uint32_t floodMs) {
     directLatencyMs_ = directMs;
@@ -359,6 +377,23 @@ class FakeMesh : public mm::IMesh {
       if (s.kind == Send::Kind::Cli) out.push_back(s.text);
     }
     return out;
+  }
+  // The prefix every console line went out with, in order (task p1.10-49): `a7|`, or the empty
+  // string for a line that went bare. One entry per CLI send, so it lines up with `lines()`.
+  std::vector<std::string> linePrefixes() const {
+    std::vector<std::string> out;
+    for (const Send& s : sends_) {
+      if (s.kind == Send::Kind::Cli) out.push_back(s.prefix);
+    }
+    return out;
+  }
+  // The prefix a named line went out with on its nth send (0-based), or "" if there was none.
+  std::string prefixOf(const std::string& line, int nth = 0) const {
+    for (const Send& s : sends_) {
+      if (s.kind != Send::Kind::Cli || s.text != line) continue;
+      if (nth-- == 0) return s.prefix;
+    }
+    return std::string();
   }
   // The sender timestamps of the CLI lines, in the order they went: the series the repeater's
   // replay check reads, which must be strictly increasing.
@@ -578,11 +613,22 @@ class FakeMesh : public mm::IMesh {
     if (!peerSet_ || text == nullptr || text[0] == '\0') return mm::SendResult::Failed;
     timestamp = unique();
     const bool direct = note(Send::Kind::Cli, timestamp);
-    sends_.back().text = text;
+    // answer: cli-prefix — the optional prefix, in handleCommand's own order: it is read
+    // **after** the region-load branch has returned, so a line sent while the repeater is
+    // loading regions keeps its prefix and is read as a region, and the condition is on the
+    // whole line's length and the third character.
+    std::string wire = text;
+    std::string prefix;
+    if (!regionLoadActive_ && wire.size() > 4 && wire[2] == '|') {
+      prefix = wire.substr(0, mm::kCliPrefixLen);
+      wire.erase(0, mm::kCliPrefixLen);
+    }
+    sends_.back().text = wire;
+    sends_.back().prefix = prefix;
     sends_.back().sensitive = sensitive;
     const mm::SendResult how = direct ? mm::SendResult::Direct : mm::SendResult::Flood;
     if (!reachable()) return how;
-    if (consume(lostLines_, text)) return how;  // the line never arrived: nothing ran
+    if (consume(lostLines_, wire)) return how;  // the line never arrived: nothing ran
     if (!knownSender()) {
       // answer: forgotten-session
       return how;
@@ -598,15 +644,41 @@ class FakeMesh : public mm::IMesh {
       return how;
     }
     client->lastTimestamp = timestamp;
-    const std::string answer = cliReply(text);
-    if (answer.empty()) {
+    // A line the test says this repeater is silent to: it ran, or did not, and **nothing comes
+    // home** - which is not the same as a handler that writes an empty reply, because the
+    // reflected prefix alone would make that one a packet.
+    if (silentLines_.count(wire) > 0) return how;
+    const bool wasRebooted = rebooted_;
+    const std::string answer = cliReply(wire);
+    // answer: cli-reboot — the board is gone before `strlen(reply)` is reached, so a rebooting
+    // line is answered with nothing whether it carried a prefix or not.
+    if (rebooted_ && !wasRebooted) return how;
+    // answer: cli-setperm-zero — the "OK" was addressed to the slot our entry used to hold, so
+    // it reaches another client and never us, prefix or not.
+    if (replyWentElsewhere_) {
+      replyWentElsewhere_ = false;
+      return how;
+    }
+    // answer: cli-prefix — the reflected prefix is written into the reply buffer before the
+    // command runs, so a command that answers nothing is still a reply of three characters and
+    // `if (text_len > 0)` sends it. That is why no caller prefixes a line it awaits nothing for.
+    if (answer.empty() && prefix.empty()) {
       // answer: cli-reply — an empty reply is not sent at all
       return how;
     }
     // The line **ran** and its reply is lost on the way home (task p1.10-48), which for a
     // `setperm` on our own key is the fault the whole task is about.
-    if (consume(lostLineReplies_, text)) return how;
-    arm(asText(answer));
+    if (consume(lostLineReplies_, wire)) return how;
+    // **This line's reply misses its own wait** (task p1.10-49): held and delivered in the next
+    // one, which for a console line is the wait of the *next* line - where only its prefix can
+    // tell it from that line's answer. The same mechanism `deliverTheNextReplyLate` uses.
+    const auto late = lateLineReplies_.find(wire);
+    if (late != lateLineReplies_.end() && late->second.first > 0) {
+      late->second.first--;
+      lateSends_++;
+      lateWaits_ = late->second.second;
+    }
+    arm(asText(prefix + answer));
     return how;
   }
 
@@ -827,7 +899,8 @@ class FakeMesh : public mm::IMesh {
       // Late, not lost (task p1.10-47): it misses its own request's wait and waits for the next
       // one, in a list of its own so that the sends between cannot evict it the way one send's
       // reply evicts the last.
-      p.waitsToSkip = 1;
+      p.waitsToSkip = lateWaits_;
+      lateWaits_ = 1;
       late_.push_back(p);
       pending_ = Pending();
       return;
@@ -902,7 +975,6 @@ class FakeMesh : public mm::IMesh {
   // The CLI, in handleCommand's own order. An empty string is "the firmware answers nothing",
   // which on the air is silence.
   std::string cliReply(const std::string& command) {
-    if (silentLines_.count(command) > 0) return "";
     const auto scripted = scripted_.find(command);
     if (scripted != scripted_.end()) return scripted->second;
 
@@ -953,7 +1025,10 @@ class FakeMesh : public mm::IMesh {
       // own entry was the last one in the table, a deletion at or below it sends the "OK" to
       // whichever client sits in that slot now, and we never hear it (task p1.10-48). From here
       // that is a silence, exactly as a lost reply is.
-      if (gone <= ours && ours != held - 1) return "";
+      if (gone <= ours && ours != held - 1) {
+        replyWentElsewhere_ = true;
+        return "";
+      }
       return "OK";
     }
 
@@ -1214,8 +1289,14 @@ class FakeMesh : public mm::IMesh {
   int somethingElseLogins_ = 0;
   int silentLogins_ = 0;
   int lateSends_ = 0;
+  int lateWaits_ = 1;  // how many waits the next late reply misses (task p1.10-49)
   std::map<std::string, int> lostLines_;
   std::map<std::string, int> lostLineReplies_;
+  std::map<std::string, std::pair<int, int>> lateLineReplies_;  // times, and the waits it misses
+  // The last line's reply was addressed to another client and never comes home (task p1.10-48's
+  // reading of `applyPermissions` and `onPeerDataRecv`), which is a silence and not an empty
+  // reply: with a prefix on the line the two are no longer the same thing.
+  bool replyWentElsewhere_ = false;
   uint32_t directLatencyMs_ = 400;
   uint32_t floodLatencyMs_ = 1500;
   bool pad_ = true;
