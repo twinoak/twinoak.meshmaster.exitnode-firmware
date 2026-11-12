@@ -812,13 +812,30 @@ JobRunner::OwnEntryWrite JobRunner::writeOwnEntry(const ClaimedJob& job, Context
   return wrote;
 }
 
-// ------------------------------------------------------------------ the restore (task p4.1-60)
+// ------------------------------------------- the restore, and the removal that stands in for it
+//                                             (tasks p4.1-60 and p1.10-50)
+//
+// The claim's `acl` level is what this exit node's own key should be at on the repeater once the
+// session is over, and since meshmaster.dk's task p4.33-191 it can be **0**: *you should hold
+// nothing here*. An admin-password login writes our key into the ACL **at admin** and saves it to
+// flash (`handleLoginReq`), so where there is no grant of ours to put back nothing has ever taken
+// that entry off - a guest association whose exit node carries the daily configuration read, a
+// flow that stopped before its grant, a one-off admin job through an exit node with no
+// association at all. The session's last command is then `setperm <own key> 0` rather than a
+// restore: the same one line, sent once and read back the same way (task p1.10-48), and the
+// session goes with the entry.
+//
+// 1 when the entry is where the claim says it should be, 0 when the line could not be confirmed,
+// -1 when there was nothing to send. A `config.read` reports that as `aclRestored` - what became
+// of this exit node's own entry after the read, which for a level of 0 is whether the key came
+// off (meshmaster.dk's `ConfigReadResult`).
 
 int JobRunner::restoreAcl(const ClaimedJob& job, Context& ctx, Outcome outcome) {
   if (ctx.aclRestoreDone) return -1;
-  // Nothing to restore unless the claim carried a grant below admin and the session in force is
-  // admin - by the admin password, which rewrote our entry to admin on stock firmware, or a
-  // blank login answered admin because an earlier session died before its restore.
+  // Nothing is sent unless the claim carried a level below admin - a grant to put back, or the 0
+  // of a key that should hold nothing - and the session in force is admin: by the admin password,
+  // which rewrote our entry to admin on stock firmware, or by a blank login answered admin
+  // because an earlier session died before its restore.
   //
   // **The claim's level is the whole gate, and that is what a local job turns on** (task
   // p1.10-41, checking task p4.1-60's rule once more): the local door answers every login at
@@ -826,38 +843,89 @@ int JobRunner::restoreAcl(const ClaimedJob& job, Context& ctx, Outcome outcome) 
   // no grant (meshmaster.dk's task p4.27-173), `hasAclLevel` is false, and the first clause ends
   // it. Nothing is restored on a repeater the unit *is*, and no `setperm` goes over its console.
   // A local job that somehow does carry a level is restored exactly as an over-the-air one is:
-  // the level the server granted is the level the server expects to find.
-  if (!job.hasAclLevel || job.aclLevel >= kPermAdmin || job.aclLevel < kPermReadOnly || !ctx.hasSession ||
+  // the level the server granted is the level the server expects to find. A level of 0 is the one
+  // exception, and it is the next clause but one.
+  if (!job.hasAclLevel || job.aclLevel >= kPermAdmin || job.aclLevel < kPermGuest || !ctx.hasSession ||
       ctx.sessionRole != kPermAdmin) {
+    return -1;
+  }
+  // **A removal is the admin password's own doing, so only an admin-class job sends one** (task
+  // p1.10-50). The server says the same - `acl: 0` rides beside an admin password, and an
+  // `acl`-class claim carries the level its own login expects and never 0 - and the difference
+  // matters for the one job that could reach here otherwise: a blank login answered **above** the
+  // grant, which is put back by the job that made it (EXIT-NODES §7, the third rule). Such a
+  // login is no evidence that this key should hold nothing, and a job carrying no admin password
+  // is not the job to decide that it should.
+  const bool removal = job.aclLevel == kPermGuest;
+  if (removal && job.credentialClass != CredentialClass::Admin) {
+    g_log.add("the claim says this exit node's key should hold nothing on this repeater, but this job's class is %s "
+              "and not admin: nothing is sent, and taking the key off is an admin job's last command (task "
+              "p1.10-50)",
+              credentialClassName(job.credentialClass));
+    return -1;
+  }
+  // **And never over a local door.** A unit logs in to its own repeater as the repeater it *is*
+  // (meshmaster.dk's p4.25-170), so `setperm <own key> 0` there is the repeater asked to forget
+  // itself - and nothing on the other side of that line could put it back. The server sends no
+  // level at all over the box link, so nothing it claims reaches this; it is here because
+  // following such a claim would be worse than refusing it.
+  if (removal && mesh_->answersLocally()) {
+    g_log.add("no removal over the local door: a unit logs in to its own repeater as the repeater it is, so taking "
+              "that key off would be the repeater forgetting itself (task p1.10-50)");
     return -1;
   }
   ctx.aclRestoreDone = true;
   const char* granted = permissionName(static_cast<uint8_t>(job.aclLevel));
   if (outcome == Outcome::Unreachable || outcome == Outcome::Timeout) {
-    // The repeater stopped answering, or the lease is spent: a restore sent now would go into
-    // the same silence. The session is dropped, and the next login from this key - a blank
-    // login answered admin - puts the entry back on that job's account (the third rule of §7).
-    g_log.add("the ACL entry of this exit node's key may still be at admin: the job ended %s, so the restore is not "
-              "sent; the session is dropped, and the next login from this key will put it right (task 60)",
-              outcomeName(outcome));
+    // The repeater stopped answering, or the lease is spent: a line sent now would go into the
+    // same silence. The session is dropped, and the next login from this key - a blank login
+    // answered admin - puts the entry back on that job's account (the third rule of §7). A
+    // **removal** has no such remedy, because no login takes an entry off: the key stays at admin
+    // until an admin job through this exit node carries the level again, which is the daily
+    // config probe of a guest primary, or meshmaster.dk's own revoke.
+    if (removal) {
+      g_log.add("this exit node's key may still be in the repeater's access list at admin, where this session's "
+                "login put it: the job ended %s, so the removal is not sent; no login takes an entry off, so the "
+                "next admin job here is what takes it (task p1.10-50)",
+                outcomeName(outcome));
+    } else {
+      g_log.add("the ACL entry of this exit node's key may still be at admin: the job ended %s, so the restore is not "
+                "sent; the session is dropped, and the next login from this key will put it right (task 60)",
+                outcomeName(outcome));
+    }
     sessions_.invalidate(job.repeaterKey);
     ctx.hasSession = false;
     return 0;
   }
   if (publicKey_ == nullptr || std::strlen(publicKey_) != kPublicKeyHexLen) {
-    g_log.add("the ACL entry cannot be put back: this board's own public key is unknown");
+    if (removal) {
+      g_log.add("the ACL entry cannot be taken off: this board's own public key is unknown");
+    } else {
+      g_log.add("the ACL entry cannot be put back: this board's own public key is unknown");
+    }
     sessions_.invalidate(job.repeaterKey);
     ctx.hasSession = false;
     return 0;
   }
   std::snprintf(g_command, sizeof g_command, "setperm %s %d", publicKey_, job.aclLevel);
   char what[48];
-  std::snprintf(what, sizeof what, "restore: cli 'setperm <own key> %d'", job.aclLevel);
+  std::snprintf(what, sizeof what, "%s: cli 'setperm <own key> %d'", removal ? "removal" : "restore", job.aclLevel);
   // One line, and its silence checked with a blank login (task p1.10-48): this is the same line
   // as the grant and it cannot be asked twice, which is where meshmaster.dk's *elevated* came
   // from - association 3 seven times in 39 days, each of them a restore that very likely ran and
   // an "OK" nobody heard.
   const OwnEntryWrite wrote = writeOwnEntry(job, ctx, g_command, job.aclLevel, what);
+  if (wrote.confirmed && removal) {
+    // The entry is off the device and this session went with it: `applyPermissions` deleted the
+    // very `ClientInfo` the login filled, so there is nothing left to keep and the next job for
+    // this repeater logs in for itself. Nothing of ours is left behind, which is the whole of it.
+    sessions_.invalidate(job.repeaterKey);
+    ctx.hasSession = false;
+    g_log.add("this exit node's key is off the repeater's access list%s: nothing of ours is left behind, and the "
+              "session is gone with the entry (task p1.10-50)",
+              wrote.byLogin ? ", which the blank login answered at guest confirmed and no \"OK\" did" : "");
+    return 1;
+  }
   if (wrote.confirmed) {
     // On stock firmware the entry *is* the session (ClientACL::applyPermissions finds the same
     // ClientInfo the login filled): the repeater now holds us at the granted level and the cache
@@ -872,6 +940,22 @@ int JobRunner::restoreAcl(const ClaimedJob& job, Context& ctx, Outcome outcome) 
   }
   sessions_.invalidate(job.repeaterKey);
   ctx.hasSession = false;
+  if (removal) {
+    if (!wrote.wentOut) {
+      g_log.add("this exit node's key is still in the repeater's access list at admin: the removal got %s before the "
+                "line went out, so no part of it was sent; the next admin job here takes it off (task p1.10-50)",
+                outcomeName(wrote.sent));
+    } else if (wrote.sent == Outcome::Ok) {
+      g_log.add("this exit node's key may still be in the repeater's access list at admin: the repeater answered "
+                "'%s' to the removal; the next admin job here takes it off (task p1.10-50)",
+                g_cliReply);
+    } else {
+      g_log.add("it is not known whether this exit node's key came off the repeater's access list: the line went out, "
+                "its answer was not heard and the check could not confirm it either; the next admin job here takes "
+                "it off (tasks p1.10-48 and p1.10-50)");
+    }
+    return 0;
+  }
   if (!wrote.wentOut) {
     g_log.add("the ACL entry of this exit node's key may still be at admin: the restore got %s before the line went "
               "out; the session is dropped, and the next login from this key will put it right (task 60)",
@@ -1469,7 +1553,9 @@ Outcome JobRunner::runConfigRead(const ClaimedJob& job, Context& ctx, size_t& da
 
   // The session's last command, and this result says what became of it (task p4.1-60): the ACL
   // just read lists our own key at admin, because this read's login put it there, and the server
-  // must not read that as a session that died before its restore.
+  // must not read that as a session that died before its restore. Where the claim says this key
+  // should hold **nothing** that command is its removal (task p1.10-50), and `aclRestored` is then
+  // whether the key came off - the same question asked of the same entry.
   const int restored = restoreAcl(job, ctx, Outcome::Ok);
   snapshot.hasAclRestored = restored >= 0;
   snapshot.aclRestored = restored == 1;
@@ -1747,10 +1833,18 @@ Outcome JobRunner::runReboot(const ClaimedJob& job, Context& ctx, size_t& dataLe
   // session after a reboot to send it on, and it cannot go before the reboot either - on stock
   // firmware the entry *is* the session, so `setperm <own key> 1` first would leave a read-only
   // session, and onPeerDataRecv drops a CLI line from anybody below admin without a word. The
-  // entry stays at admin until the next login from this key puts it back.
+  // entry stays at admin until the next login from this key puts it back - and a **removal** is
+  // held off for the same reason (task p1.10-50), with nothing to put it right afterwards: no
+  // login takes an entry off, so the key waits at admin for the next admin job here.
   ctx.aclRestoreDone = true;
-  g_log.add("no restore on this session: the repeater is asked to reboot on it, and a restore before the command would "
-            "make the command unanswerable; the next login from this key puts the entry back (task 60)");
+  if (job.hasAclLevel && job.aclLevel == kPermGuest) {
+    g_log.add("no restore and no removal on this session: the repeater is asked to reboot on it, and either line "
+              "before the command would make the command unanswerable; this exit node's key stays in the access list "
+              "at admin until the next admin job here takes it off (tasks 60 and p1.10-50)");
+  } else {
+    g_log.add("no restore on this session: the repeater is asked to reboot on it, and a restore before the command "
+              "would make the command unanswerable; the next login from this key puts the entry back (task 60)");
+  }
 
   // `reboot` is `_board->reboot()`, which does not return (CommonCLI.cpp:196-197): silence is
   // the expected answer, and the next status read confirms it by the uptime, on the server.
@@ -2079,6 +2173,8 @@ void JobRunner::runClaimed(int i) {
   // whatever the job came to. A config.read has sent it already, for its result's sake; a
   // password.set has sent it after its password line and dropped the session; a reboot has
   // said why it sends none; an acl.set on our own key *is* the level and needs no second one.
+  // **And a claim that says level 0 ends the session by taking this exit node's key off the
+  // repeater instead** (task p1.10-50): the same line, in the same place, after the job's own.
   if (std::strcmp(job.type, "acl.set") != 0) restoreAcl(job, ctx, outcome);
 
   // The password's job is over. Whatever the outcome, and before anything is posted.

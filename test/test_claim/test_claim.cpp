@@ -129,8 +129,13 @@ TEST(Claim, TheFixtureJobReadsFieldForField) {
   EXPECT_STREQ(job.repeaterKey, "a1b2");
   EXPECT_EQ(job.credentialClass, mm::CredentialClass::Guest);
   EXPECT_EQ(job.leaseUntil, at("2026-09-18T10:02:03Z"));
-  EXPECT_EQ(job.perHopMs, 4000);
-  EXPECT_EQ(job.loginMs, 8000);
+  // meshmaster.dk's own numbers since its task p4.32-187, measured on 12 November 2026: about
+  // one try with no reply for every try that was answered, and on four of six repeaters the
+  // longest answered round trip within half a second of the wait. They are the claim's and not
+  // this library's - `ClaimedJob`'s own defaults are still 4 000 and 8 000, for a claim that
+  // carries no `timeouts` member at all, which this parser allows and the server never does.
+  EXPECT_EQ(job.perHopMs, 8000);
+  EXPECT_EQ(job.loginMs, 16000);
   EXPECT_TRUE(job.hasPath);
   ASSERT_EQ(job.pathCount, 2);
   EXPECT_STREQ(job.pathHops[0], "a1");

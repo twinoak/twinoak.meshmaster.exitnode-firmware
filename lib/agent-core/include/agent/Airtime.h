@@ -50,6 +50,13 @@ constexpr int kTransactionsForOwnEntryWrite = 2;
 // type through an `acl` pair, and on a blank login the repeater answered above the grant. Since
 // task p1.10-48 that line is checked when it is not answered, so it is the two above; what it
 // costs on a repeater that answers the line is still the one §7 prices.
+//
+// **Or the removal that stands in for it** (task p1.10-50, meshmaster.dk's p4.33-191): a claim
+// that says level **0** ends the session with `setperm <own key> 0` - take this exit node's key
+// off - and that is the same one line at the same price. So this is now also what an admin job
+// through a pair that holds **no** grant of ours costs: a guest association's daily configuration
+// read above all. `transactionsOf` asks whether the claim carried a level and not what the level
+// was, so it has always priced both.
 constexpr int kTransactionsForAclRestore = kTransactionsForOwnEntryWrite;
 
 // What one run of `type` at `credentialClass` costs, without the login. `items` is what the job
