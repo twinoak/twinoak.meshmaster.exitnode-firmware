@@ -16,6 +16,11 @@ sixth wake, because a wait after a failed call was spent only while awake. 44 is
 meshmaster.dk's p4.23-165. Still no release task: 38, 39 and 44 are for the Heltec, and a release is
 Thomas's call.
 
+**11 November: 45 and 46 added** for meshmaster.dk's pile 4.30. Each stops at its *First* until the
+meshmaster.dk task whose contract it follows has merged: 45 after 181 (the owner-info reply kept
+whole, at any class), 46 after 180 (an `acl` login answered at guest still runs `status` and
+`neighbours`). Run them after that pile. The Walter takes them at its next agent-core sync.
+
 ## Order and dependencies
 
 | # | Task | Depends on | What it leaves behind |
@@ -27,6 +32,8 @@ Thomas's call.
 | 42 | [a-wait-counts-the-sleep](42-a-wait-counts-the-sleep.md) | — | `restore()` is told how long the board was away, and a hold or a Retry-After loses that time: a 30 s backoff no longer silences a sleeping unit for hours |
 | 43 | [a-local-job-is-priced-as-local](43-a-local-job-is-priced-as-local.md) | 40 | the wake knows before `beginJob` that a job is local and prices it at its reply waits, not at the gaps of the air |
 | 44 | [an-empty-get-is-a-value](44-an-empty-get-is-a-value.md) | — | `"> "` is the empty value, so an empty `guest.password` reaches meshmaster.dk as *none* |
+| 45 | [the-owner-info-whole](45-the-owner-info-whole.md) | meshmaster.dk 181 merged | the owner-info reply kept whole (`nodeName`, `ownerInfo`) and asked for at any class when the claim wants it, never below firmware level 2 |
+| 46 | [a-guest-answer-the-job-can-use](46-a-guest-answer-the-job-can-use.md) | meshmaster.dk 180 merged | an `acl` login answered at guest still runs `status` and `neighbours`, `ok` with `loggedInAs` beside the data; `telemetry` and the rest refused as before |
 
 ```powershell
 .\tasks\run-all.ps1 -Phase '1.10'
@@ -34,7 +41,7 @@ Thomas's call.
 
 ## Models
 
-- **Opus** — 38–44.
+- **Opus** — 38–46.
 
 ## Follow-ups
 
