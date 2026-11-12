@@ -133,6 +133,16 @@ bool readsOwnerInfo(const ClaimedJob& job) {
   return job.statusVersion;
 }
 
+bool servedWholeAtGuest(const char* type) {
+  if (type == nullptr) return false;
+  return std::strcmp(type, "status") == 0 || std::strcmp(type, "neighbours") == 0;
+}
+
+bool guestIsEnough(const char* type, CredentialClass credentialClass, uint8_t grantedRole) {
+  return credentialClass == CredentialClass::Acl && servedWholeAtGuest(type) &&
+         (grantedRole & kPermRoleMask) == kPermGuest;
+}
+
 bool sharesLogin(const ClaimedJob& a, const ClaimedJob& b) {
   if (a.id == b.id) return false;
   for (int i = 0; i < a.groupCount; i++) {
@@ -425,6 +435,11 @@ size_t writeJobResult(const JobReport& r, char* out, size_t cap) {
   if (r.failedAt != nullptr) {
     w.key("failedAt");
     w.string(r.failedAt);
+  }
+  // Last, as `JobResultReport`'s own parameter order has it (meshmaster.dk's task p4.30-180).
+  if (r.loggedInAs != nullptr) {
+    w.key("loggedInAs");
+    w.string(r.loggedInAs);
   }
   w.endObject();
   return w.overflowed() ? 0 : w.length();

@@ -335,6 +335,7 @@ wake's `Budget` is how you refuse such a job rather than be surprised by it (§6
 | `awaitReply` false after a login | silence. Stock firmware answers a login it will not take with **silence**, and that cannot be told from a repeater that is off the air: the sequence (`agent/LoginSequence.h`) tries **twice** and reports `unreachable` — or `unauthorized`, when a blank probe login between the two tries *was* answered and only the password's try was silent. A `discover` job escalates further on its own: `forgetPath()`, a flooded login, and the path-discovery request last. Since `0.4.0` the result also says **where** it failed: `failedAt: "login"` (§6.2) |
 | `awaitReply` false after a request on a reused session | one retry with a **fresh login**, then `unreachable`. `failedAt` is `"request"` when the fresh login was answered and the second try was not, and `"login"` when the fresh login was not answered either — the step the job *ended* at (§6.2) |
 | `awaitText` false after a CLI line | **nothing is sent again.** One send per command is the rail: a `set` sent twice is a change made twice. The line is recorded as unanswered and the sequence stops |
+| a login the repeater answered **below** the job's class | the refusal it is: `unauthorized` at the login, the tier and the need in the result's data, nothing sent after it, and the session cached at the class it can carry. **Except for a `status` or a `neighbours` at class `acl` answered at guest**, which the firmware serves whole and which therefore *runs*, `ok`, with the tier on the envelope's `loggedInAs` (§6.3) |
 | a reply the codec cannot read | a login reply that is not one is *refused*, which the sequence reports `unauthorized` and which drops the cached session; a request's reply that will not parse is `failed`. Either way the bytes never reach a log line |
 
 ### 3.5 What a login carries, and why a local one carries nothing
@@ -858,6 +859,60 @@ yourself** rather than letting `JobRunner` do it — the `IJobExtension` path
 writes its own `data` but not its own envelope, so this is only for a consumer
 that bypasses the runner — set it by the same rule, and leave it `nullptr`
 sooner than guess.
+
+### 6.3 `loggedInAs` — a read a guest login served
+
+Also for nothing, and for one case only. A login is judged against the class it
+was for the moment the reply comes back (§3.4): a reply that grants less than the
+class needs is the refusal it is, the job is `unauthorized` at the login, and
+the session is cached at the class it can carry. **For two job types that threw
+away a reading the firmware would have given**, and since
+meshmaster.dk's task p4.30-180 it no longer does:
+
+> when a login at class **`acl`** is answered **below `read-only`** — which on
+> stock firmware is *guest* and nothing else — and the type is one a guest login
+> serves **whole**, the job runs on the session it was given, and the result is
+> `ok` with the data and the tier on `JobReport::loggedInAs`.
+
+The two types are `status` and `neighbours`, which is what `handleRequest` says:
+the status request's line is commented *guests can also access this now* and
+checks no permission at all, and the neighbour request checks none either.
+`mm::servedWholeAtGuest(type)` and `mm::guestIsEnough(type, class, role)`
+(`agent/JobEnvelopes.h`) are the predicates, and they are
+`JobTypes.ServedWholeAtGuest` and `GuestIsEnough.Covers` of
+`MeshMaster.Contracts` — the server and both agents read one rule, so what one
+runs and another reads cannot drift.
+
+**Everything else is judged exactly as it was.** `telemetry` is *not* served
+whole at guest — `perm_mask` is forced to `0x00` for a guest sender, so the reply
+is the base channels and none of the sensors — and a `get` is admin's; both end
+at the login with `writeLoginBelowClassResult` as their data, as before. So does
+every class but `acl`: an admin login answered at guest is a wrong admin
+password, not a missing entry.
+
+**The login is still the evidence it was**, which is the point of the field: an
+`acl` login answered at guest says the ACL entry this exit node's key was granted
+is gone or demoted, and the server moves the association **exactly** as it moves
+it for the `unauthorized` carrying the same tier — the data is stored as any
+`ok`'s is, and the job's page says what the login was. So the field is written
+for a job that ran *below* its class and for nothing else: `nullptr` — absent on
+the wire — means the login did what the job asked for, which is every other
+result and every result from an exit node built before this.
+
+Two things follow for a consumer, and neither needs a line of your code:
+
+- **The session is kept at what it can carry.** `SessionStore::put` stores such a
+  login at `guest`, and `get` hands it out only to a job of a class it satisfies
+  — so the `telemetry` grouped with the read logs in afresh and is refused on its
+  own merits, and a later `acl`-class job is never handed the guest session.
+  `test_airtime`'s `Sessions` suite is the rule; a grouped pair costs **two**
+  logins where a pair at the class it asked for costs one, and that is the price
+  of keeping the reading.
+- **The envelope grew a member.** `JobResultReportAtGuest.json` is the fixture
+  (`loggedInAs` last, after `failedAt`), the way `JobResultReportFailed.json` is
+  for `failedAt`. If you write a `JobReport` yourself, the rule above is the
+  whole of it: one of `guest`, `read-only`, `read-write`, `admin`, and `nullptr`
+  sooner than a guess — a word outside the four is a 400 on the result.
 
 ## 7. `IJobExtension` — your own job types
 

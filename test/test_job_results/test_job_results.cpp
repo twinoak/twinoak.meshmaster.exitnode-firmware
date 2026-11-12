@@ -198,6 +198,79 @@ TEST(JobResultReport, TheSameInputMakesTheDotNetFixtureByteForByte) {
   EXPECT_EQ(std::string(out, len), fixture("JobResultReport"));
 }
 
+// **A read a guest login served**, byte for byte (meshmaster.dk's task p4.30-180): the
+// `neighbours` of an `acl`-class job whose login was answered at guest, which ran all the same
+// and reports `ok` with the data and the tier. `loggedInAs` is the envelope's **last** member, as
+// `JobResultReport`'s own parameter order has it, and it is the one member
+// `JobResultReport.json` never carries - which is why `JobResultReportAtGuest.json` is a file of
+// its own, the way `JobResultReportFailed.json` is for `failedAt`.
+TEST(JobResultReport, AReadAGuestLoginServedCarriesTheTierAndMakesTheFixtureByteForByte) {
+  mm::Neighbour n[1];
+  std::snprintf(n[0].prefix, sizeof n[0].prefix, "a1b2c3d4e5f60718");
+  n[0].lastHeardS = 342;
+  n[0].snr = 7.25;
+  char data[256];
+  const std::size_t dataLen = mm::writeNeighboursResult(n, 1, data, sizeof data);
+  ASSERT_GT(dataLen, 0u);
+
+  const char* path[] = {"a1", "7f"};
+  mm::JobReport r;
+  r.clientId = "e7c3";
+  r.outcome = mm::Outcome::Ok;
+  r.startedAt = at("2026-11-10T13:02:00Z");
+  r.finishedAt = at("2026-11-10T13:02:06Z");
+  r.hasPathUsed = true;
+  r.pathUsed = path;
+  r.pathCount = 2;
+  r.hasHops = true;
+  r.hops = 2;
+  r.hasRttMs = true;
+  r.rttMs = 5600;
+  r.transactions = 2;
+  r.data = data;
+  r.log =
+      "login (acl) try 1: ok; logged in as guest, below the read-only this job asked for; neighbours page at 0";
+  r.loggedInAs = "guest";
+
+  char out[1024];
+  const std::size_t len = mm::writeJobResult(r, out, sizeof out);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ(std::string(out, len), fixture("JobResultReportAtGuest"));
+}
+
+// Which jobs that is, and only those: `GuestIsEnough.Covers` on the server and in the .NET
+// agent, `mm::guestIsEnough` here, so that what one runs and the other reads cannot drift.
+TEST(JobResultReport, TheRuleIsTheClassTheTypeAndTheTier) {
+  // The two types a guest login is answered whole (`handleRequest` checks no permission for
+  // either), at class acl, answered guest.
+  EXPECT_TRUE(mm::guestIsEnough("status", mm::CredentialClass::Acl, mm::kPermGuest));
+  EXPECT_TRUE(mm::guestIsEnough("neighbours", mm::CredentialClass::Acl, mm::kPermGuest));
+  // `telemetry` is answered to a guest login too, but masked to the base channels, so it is not
+  // served *whole* and stays refused. So does everything else.
+  EXPECT_FALSE(mm::guestIsEnough("telemetry", mm::CredentialClass::Acl, mm::kPermGuest));
+  EXPECT_FALSE(mm::guestIsEnough("config.read", mm::CredentialClass::Acl, mm::kPermGuest));
+  EXPECT_FALSE(mm::guestIsEnough("discover", mm::CredentialClass::Acl, mm::kPermGuest));
+  // Every class but acl is judged as before: at guest and none a guest answer is not below the
+  // class at all, and at admin nothing less than admin will do.
+  EXPECT_FALSE(mm::guestIsEnough("status", mm::CredentialClass::Guest, mm::kPermGuest));
+  EXPECT_FALSE(mm::guestIsEnough("status", mm::CredentialClass::Admin, mm::kPermGuest));
+  EXPECT_FALSE(mm::guestIsEnough("status", mm::CredentialClass::None, mm::kPermGuest));
+  // And only a tier *below* read-only, which on stock firmware is guest and nothing else. A
+  // read-only answer satisfies class acl and never reaches this rule.
+  EXPECT_FALSE(mm::guestIsEnough("status", mm::CredentialClass::Acl, mm::kPermReadOnly));
+  EXPECT_FALSE(mm::guestIsEnough("status", mm::CredentialClass::Acl, mm::kPermReadWrite));
+  EXPECT_FALSE(mm::guestIsEnough("status", mm::CredentialClass::Acl, mm::kPermAdmin));
+  EXPECT_FALSE(mm::guestIsEnough(nullptr, mm::CredentialClass::Acl, mm::kPermGuest));
+  // The role is read out of the permission byte, whose other bits are not the role.
+  EXPECT_TRUE(mm::guestIsEnough("status", mm::CredentialClass::Acl,
+                                static_cast<uint8_t>(mm::kPermGuest | ~mm::kPermRoleMask)));
+  // What a guest login serves whole, as a predicate of its own.
+  EXPECT_TRUE(mm::servedWholeAtGuest("status"));
+  EXPECT_TRUE(mm::servedWholeAtGuest("neighbours"));
+  EXPECT_FALSE(mm::servedWholeAtGuest("telemetry"));
+  EXPECT_FALSE(mm::servedWholeAtGuest(nullptr));
+}
+
 // DiscoverResult(PathInfo? Path, string? LoggedInAs), byte for byte (task 04).
 TEST(DiscoverResult, TheSameInputMakesTheDotNetFixtureByteForByte) {
   const char* hops[] = {"a1", "7f"};

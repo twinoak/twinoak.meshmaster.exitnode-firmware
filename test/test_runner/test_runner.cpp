@@ -230,6 +230,24 @@ class RunnerTest : public ::testing::Test {
   // which is what `memberOf` gives for an absent one, and an absent one is the point of half the
   // tests below.
   std::string failedAtOf(const std::string& body) const { return memberOf(body, "failedAt"); }
+  // The tier a job that ran **below** the class it asked for ran at (meshmaster.dk's task
+  // p4.30-180), or "" when the envelope carries no such member - which is every job that ran at
+  // the class it asked for, and is half of what the tests below assert.
+  //
+  // **The envelope's own member, not the one in `data`.** `LoginBelowClassResult` is the one
+  // result record that repeats a member name of the envelope (`{"loggedInAs","needed"}`), which
+  // is exactly the case these tests have to tell apart: a refusal says the tier in its data and
+  // nothing on the envelope. So the top-level keys decide whether it is there at all, and the
+  // value is read with `data` cut out.
+  std::string loggedInAsOf(const std::string& body) const {
+    const std::vector<std::string> keys = fake::keysOf(body);
+    if (std::find(keys.begin(), keys.end(), "loggedInAs") == keys.end()) return "";
+    std::string envelope = body;
+    const std::string data = dataOf(body);
+    const size_t at = data.empty() ? std::string::npos : envelope.find(data);
+    if (at != std::string::npos) envelope.erase(at, data.size());
+    return memberOf(envelope, "loggedInAs");
+  }
   std::string dataOf(const std::string& body) const { return memberOf(body, "data"); }
   std::string logOf(const std::string& body) const { return memberOf(body, "log"); }
   int transactionsOf(const std::string& body) const { return std::atoi(memberOf(body, "transactions").c_str()); }
@@ -1196,6 +1214,159 @@ TEST_F(RunnerTest, ALoginAnsweredBelowTheClassIsUnauthorizedWithTheTierItGranted
   const std::string data = dataOf(body);
   EXPECT_NE(data.find("\"loggedInAs\":\"guest\""), std::string::npos) << data;
   EXPECT_NE(data.find("\"needed\":\"admin\""), std::string::npos) << data;
+  EXPECT_EQ(loggedInAsOf(body), "") << "the tier is the refusal's data; the envelope says nothing";
+}
+
+// ---------------------------------------------------------------------------------------------
+// **And guest is enough to read with** (meshmaster.dk's task p4.30-180, EXIT-NODES §7)
+//
+// AAR_LH, 10 November 2026: a guest-door pair with somebody else's repeater was still being
+// proved, the read fell through to class `acl` - a login by our own key, which that repeater held
+// no entry for - the repeater answered the blank login *guest*, and jobs 25169 and 25177, both
+// *Read the neighbours*, ended `unauthorized` with `{"needed": "read-only", "loggedInAs":
+// "guest"}` without the request the firmware would have answered ever going out.
+//
+// So for the two types a guest login serves **whole** - `status` and `neighbours`, which
+// `handleRequest` checks no permission at all for - an `acl` login answered below `read-only`
+// keeps its session at the tier granted, runs, and reports `ok` with the data and the tier on the
+// envelope's `loggedInAs`. The login is still the evidence it was: the server reads that field
+// exactly as it reads the `unauthorized` carrying the same tier, and moves the pair to
+// `needs-regrant` either way.
+
+// The scenario of the two lost jobs, run: the repeater holds no entry for our key and has no
+// guest password, so the blank login of class `acl` is answered *guest*.
+TEST_F(RunnerTest, TheNeighbourReadAnAclLoginAnsweredAtGuestRunsAndSaysWhatItRanAs) {
+  mesh.setGuestPassword("");
+  mesh.setNeighbours({fake::NeighbourEntry{repeater(), 342u, 29}});
+  const std::string body = run(fake::Job(25169, "neighbours").atClass("acl").leasedUntil(kLease));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << "the reading is not lost with the login";
+  EXPECT_EQ(loggedInAsOf(body), "guest") << "and the login is still the evidence it was";
+  EXPECT_EQ(failedAtOf(body), "") << "nothing failed";
+  EXPECT_EQ(transactionsOf(body), 2) << "the login and one page of nine";
+  EXPECT_EQ(mesh.requestsOf(mm::kReqTypeGetNeighbours), 1) << "the request the firmware answers was sent";
+  // The envelope is `JobResultReportAtGuest.json`'s shape - `loggedInAs` last - and the data is
+  // the reading a `neighbours` job always answers.
+  EXPECT_TRUE(fake::followsShapeOf(body, fake::contract("JobResultReportAtGuest"))) << body;
+  const std::string data = dataOf(body);
+  EXPECT_TRUE(fake::followsShapeOf(data, fake::contract("NeighboursResult"))) << data;
+  EXPECT_NE(data.find("\"prefix\":\"" + repeater().substr(0, 16) + "\""), std::string::npos) << data;
+  EXPECT_NE(logOf(body).find("logged in as guest, below the read-only this job asked for"), std::string::npos) << body;
+  EXPECT_NE(logOf(body).find("the ACL entry of this exit node's key is gone or demoted"), std::string::npos) << body;
+}
+
+// The other of the two types, with the owner-info request beside it: a `status` read at `acl`
+// answered at guest reads everything such a read reads, because `handleRequest` checks no
+// permission for either request.
+TEST_F(RunnerTest, TheStatusReadAnAclLoginAnsweredAtGuestRunsWholeAndSaysWhatItRanAs) {
+  mesh.setGuestPassword("");
+  const std::string body = run(fake::Job(25177, "status").atClass("acl").leasedUntil(kLease));
+
+  EXPECT_EQ(outcomeOf(body), "ok");
+  EXPECT_EQ(loggedInAsOf(body), "guest");
+  EXPECT_EQ(transactionsOf(body), 3) << "the login, the status request and the owner-info request";
+  EXPECT_TRUE(fake::followsShapeOf(body, fake::contract("JobResultReportAtGuest"))) << body;
+  const std::string data = dataOf(body);
+  EXPECT_TRUE(fake::followsShapeOf(data, fake::contract("StatusResult"))) << data;
+  EXPECT_NE(data.find("\"batteryMv\":4012"), std::string::npos) << data;
+  EXPECT_NE(data.find("\"nodeName\":\"Grenaa Chimney #1\""), std::string::npos) << data;
+  EXPECT_EQ(mesh.levelOf(self()), mm::kPermGuest) << "the blank login wrote a guest entry for our key";
+}
+
+// `telemetry` is **not** one of the two, although a guest login is answered it: `perm_mask` is
+// forced to `0x00` for a guest sender, so the reply is the base channels and none of the sensors,
+// and a read that quietly dropped them would look like the sensors had gone. It ends exactly
+// where it ended before - the refusal at the login, with the tier and the need in the data and
+// nothing on the envelope - and nothing goes on the air after the login.
+TEST_F(RunnerTest, ATelemetryReadAfterTheSameLoginIsStillUnauthorized) {
+  mesh.setGuestPassword("");
+  const std::string body = run(fake::Job(25178, "telemetry").atClass("acl").leasedUntil(kLease));
+
+  EXPECT_EQ(outcomeOf(body), "unauthorized");
+  EXPECT_EQ(failedAtOf(body), "login");
+  EXPECT_EQ(loggedInAsOf(body), "") << "the envelope's field is for a job that *ran*";
+  EXPECT_EQ(dataOf(body), "{\"loggedInAs\":\"guest\",\"needed\":\"read-only\"}");
+  EXPECT_EQ(mesh.requestsOf(mm::kReqTypeGetTelemetry), 0) << "nothing is sent on a session below the class";
+  EXPECT_EQ(transactionsOf(body), 1) << "the login, and no request after it";
+}
+
+// A `get` list is admin's - `onPeerDataRecv` drops a text message from anybody below admin - and
+// this board refuses an `acl`-class `config.read` at the claim, before any login, which is what
+// `canRun` has done since task p1.2-10 and what the server's `JobTypes.CredentialClasses` agrees
+// with (`ConfigRead => [Admin]`). At **admin**, where this type is asked for, a login answered at
+// guest is the below-class refusal it always was: a wrong admin password, not a missing entry.
+TEST_F(RunnerTest, AConfigReadAfterTheSameLoginIsStillRefusedAtEitherClass) {
+  mesh.setGuestPassword("");
+  const std::string atAcl = run(fake::Job(25179, "config.read")
+                                    .atClass("acl")
+                                    .leasedUntil(kLease)
+                                    .withPayload("{\"keys\":[\"name\"]}"));
+  EXPECT_EQ(outcomeOf(atAcl), "unsupported") << "refused at the claim, before any login";
+  EXPECT_EQ(transactionsOf(atAcl), 0);
+  EXPECT_EQ(loggedInAsOf(atAcl), "");
+
+  mesh.setGuestPassword("the-guest-one");
+  const std::string atAdmin = run(fake::Job(25180, "config.read")
+                                      .atClass("admin")
+                                      .leasedUntil(kLease)
+                                      .withAdminPassword("the-guest-one")
+                                      .withPayload("{\"keys\":[\"name\"]}"));
+  EXPECT_EQ(outcomeOf(atAdmin), "unauthorized");
+  EXPECT_EQ(loggedInAsOf(atAdmin), "");
+  EXPECT_EQ(dataOf(atAdmin), "{\"loggedInAs\":\"guest\",\"needed\":\"admin\"}");
+  EXPECT_EQ(mesh.cliLines(), 0);
+}
+
+// A grouped claim - two jobs, one login - where the second is one that must still be refused.
+// The guest session the first job ran on is **invisible** to the second (`SessionStore::get` hands
+// out a session only when its role satisfies the class asked for), so the `telemetry` logs in
+// afresh and is refused on its own merits. Two logins where a pair at the class it asked for
+// costs one: the price of the reading being kept.
+TEST_F(RunnerTest, AGroupedPairWhoseLoginWasAnsweredAtGuestRunsTheReadAndRefusesTheRest) {
+  mesh.setGuestPassword("");
+  mesh.setNeighbours({fake::NeighbourEntry{repeater(), 60u, 24}});
+  server.queue({fake::Job(25181, "neighbours").atClass("acl").leasedUntil(kLease).groupedWith(25182).json(),
+                fake::Job(25182, "telemetry").atClass("acl").leasedUntil(kLease).groupedWith(25181).json()});
+
+  EXPECT_EQ(runner.claimAndRun(), 2);
+  ASSERT_EQ(server.results().size(), 2u);
+  const std::string read = server.results()[0].body;
+  const std::string refused = server.results()[1].body;
+
+  EXPECT_EQ(outcomeOf(read), "ok");
+  EXPECT_EQ(loggedInAsOf(read), "guest");
+  EXPECT_EQ(outcomeOf(refused), "unauthorized");
+  EXPECT_EQ(loggedInAsOf(refused), "");
+  EXPECT_EQ(dataOf(refused), "{\"loggedInAs\":\"guest\",\"needed\":\"read-only\"}");
+  EXPECT_EQ(mesh.logins(), 2) << "the session kept at guest is invisible to the class that asked for more";
+  EXPECT_EQ(mesh.requestsOf(mm::kReqTypeGetNeighbours), 1);
+  EXPECT_EQ(mesh.requestsOf(mm::kReqTypeGetTelemetry), 0);
+  EXPECT_EQ(logOf(refused).find("session reused"), std::string::npos) << refused;
+}
+
+// And the session is not held above its level for a *later* read either: a second `neighbours`
+// job for the same repeater finds no session it may use, logs in again, and is answered guest
+// again - which is the rule of task p3.5-41 unchanged, and the one thing this task must not
+// loosen. What the guest session *is* good for is a guest-class job.
+TEST_F(RunnerTest, TheSessionKeptAtGuestIsNeverHandedToAJobOfTheClassThatAskedForMore) {
+  mesh.setGuestPassword("");
+  mesh.setNeighbours({fake::NeighbourEntry{repeater(), 60u, 24}});
+  const std::string first = run(fake::Job(25183, "neighbours").atClass("acl").leasedUntil(kLease));
+  ASSERT_EQ(outcomeOf(first), "ok");
+  ASSERT_EQ(mesh.logins(), 1);
+
+  const std::string second = run(fake::Job(25184, "neighbours").atClass("acl").leasedUntil(kLease));
+  EXPECT_EQ(outcomeOf(second), "ok");
+  EXPECT_EQ(loggedInAsOf(second), "guest");
+  EXPECT_EQ(mesh.logins(), 2) << "a fresh login, judged on its own merits";
+  EXPECT_EQ(logOf(second).find("session reused"), std::string::npos) << second;
+
+  // The same session serves a guest-class read, which is the class it can carry.
+  const std::string atGuest = run(fake::Job(25185, "neighbours").atClass("guest").leasedUntil(kLease));
+  EXPECT_EQ(outcomeOf(atGuest), "ok");
+  EXPECT_EQ(loggedInAsOf(atGuest), "") << "a guest answer is not below the class a guest job asked for";
+  EXPECT_EQ(mesh.logins(), 2) << "the guest session was reused";
+  EXPECT_NE(logOf(atGuest).find("session reused"), std::string::npos) << atGuest;
 }
 
 TEST_F(RunnerTest, ASilenceRightAfterAnAnsweredBlankLoginIsReportedAsTheRefusalItIs) {

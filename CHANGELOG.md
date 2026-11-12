@@ -22,6 +22,42 @@ pull request, as `docs/` moves with code.
 
 ## Unreleased
 
+- **A guest answer the job can use** (task p1.10-46). **Nothing of a pin moved**
+  - not a method of `IMesh`, `IUplink`, `IPlatform`, `IClock`, `IJobExtension`,
+  `JobContext`, `ResultWriter` or `TextOut`, not `kMeshReplyDataCap` or
+  `kMeshPathCap`, not the fixture manifest (still meshmaster.dk `cd872a7`) - and
+  nothing of yours stops compiling. **What a result can now carry is one member
+  more**, and two free functions are new:
+
+  - `mm::JobReport::loggedInAs` (`agent/JobEnvelopes.h`), written **last** in the
+    envelope after `failedAt`, as `JobResultReport`'s own parameter order has it.
+    `JobRunner` fills it; the fixture is `JobResultReportAtGuest.json`. nullptr -
+    absent on the wire - is every result that ran at the class it asked for,
+    which is what an exit node built before this sends and what the server reads
+    exactly as it did.
+  - `mm::servedWholeAtGuest(type)` and
+    `mm::guestIsEnough(type, credentialClass, grantedRole)`
+    (`agent/JobEnvelopes.h`): `JobTypes.ServedWholeAtGuest` and
+    `GuestIsEnough.Covers` of `MeshMaster.Contracts`, so the firmware, the .NET
+    agent and the server read one rule.
+
+  **What moved behind them**: a login at class **`acl`** answered **below
+  `read-only`** - on stock firmware *guest*, which is what the repeater answers
+  when the ACL entry this exit node's key was granted is gone or demoted - no
+  longer loses the reading along with the login for the two types a guest login
+  serves **whole**. `MyMesh::handleRequest` checks no permission at all for the
+  status request ("guests can also access this now") or for the neighbour
+  request, so a `status` or a `neighbours` job runs on the session it was given
+  and reports `ok` with the data and the tier. The login is still the evidence it
+  was: the server moves the association exactly as it moves it for the
+  `unauthorized` carrying the same tier. **Everything else is judged as before** -
+  `telemetry` is masked to the base channels for a guest sender and stays
+  `unauthorized` with `writeLoginBelowClassResult`, a `get` is admin's, and every
+  class but `acl` is what it was. The session is still never held above its
+  level, so the `telemetry` grouped with such a read logs in afresh and a
+  grouped pair costs two logins where one at the class it asked for costs one.
+  [`docs/library.md` §6.3](docs/library.md) is the page.
+
 - **The owner-info reply is kept whole, and asked for at every class** (task
   p1.10-45). **The fixture manifest moved** - `tests/fixtures/contracts` is now
   copied from meshmaster.dk `cd872a7` - and **three free functions of the library

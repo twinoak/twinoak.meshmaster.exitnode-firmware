@@ -169,6 +169,33 @@ bool sharesLogin(const ClaimedJob& a, const ClaimedJob& b);
 // and a repeater below kOwnerInfoVerLevel is not asked (JobRunner's runStatus).
 bool readsOwnerInfo(const ClaimedJob& job);
 
+// **What a guest login is answered whole** (meshmaster.dk's task p4.30-180,
+// `JobTypes.ServedWholeAtGuest`), read off `MyMesh::handleRequest` at the pin rather than off a
+// table: `REQ_TYPE_GET_STATUS` checks no permission at all - its line is commented *guests can
+// also access this now* - and neither does `REQ_TYPE_GET_NEIGHBOURS`. So `status` and
+// `neighbours` are the two types a guest login serves **whole**.
+//
+// `telemetry` is **not** one of them although a guest login is answered it: `perm_mask` is forced
+// to `0x00` for a guest sender, so the reply is the base channels and none of the sensors, and a
+// read that quietly dropped the sensors would look like the sensors had gone. The access list is
+// `sender->isAdmin()`, and every CLI line is admin's (`onPeerDataRecv` drops a text message from
+// anybody below admin).
+bool servedWholeAtGuest(const char* type);
+
+// **Whether a login answered at `grantedRole` is enough to run this job anyway** -
+// `GuestIsEnough.Covers` on the server and in the .NET agent, so that what one runs and the other
+// reads cannot drift (meshmaster.dk's task p4.30-180, EXIT-NODES §7 *And guest is enough to read
+// with*). Three things at once: class **`acl`**, a type served whole at guest, and a role
+// **below read-only**, which on stock firmware is `guest` and nothing else.
+//
+// Such a login is still the evidence it was - an `acl` login answered at guest says the ACL entry
+// our grant wrote is gone or demoted - and the result says so on `JobReport::loggedInAs`. What
+// changes is that the reading is not thrown away with the login: AAR_LH, 10 November 2026, lost
+// two *Read the neighbours* to a request this firmware would have answered.
+//
+// Every other class and every other type is judged as before, with `writeLoginBelowClassResult`.
+bool guestIsEnough(const char* type, CredentialClass credentialClass, uint8_t grantedRole);
+
 // Whether the lease this job was claimed under has run out (task 06). A claim's jobs are run one
 // at a time and a job is minutes of airtime, so a server that went away under a claim - or a
 // board that spent an hour on the one before - can reach a job the server has long since given
@@ -228,6 +255,17 @@ struct JobReport {
   // the stored password is probably wrong. The server reads a result without the field exactly
   // as it did before, so an older exit node is unaffected.
   const char* failedAt = nullptr;
+
+  // **The tier the repeater answered the login at, when the job ran below the class it asked
+  // for** (meshmaster.dk's task p4.30-180; API §3): one of `guest`, `read-only`, `read-write`,
+  // `admin`, or nullptr to leave the field out. It is written for one case and no other - an
+  // `acl`-class `status` or `neighbours` whose login was answered at `guest` and which ran all
+  // the same (`guestIsEnough` above) - so the outcome is `ok`, `data` is the reading, and this is
+  // what tells the server the login was not the one the job asked for: it moves the association
+  // exactly as an `unauthorized` carrying the same tier does. **Absent means the login did what
+  // the job asked for**, which is every other result and every result from an exit node built
+  // before this.
+  const char* loggedInAs = nullptr;
 };
 
 // The two words `JobReport::failedAt` may carry (the server's `JobFailedAt`). Static strings, so
