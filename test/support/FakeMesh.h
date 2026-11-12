@@ -21,7 +21,9 @@
 // loader. A reply arrives after `directLatencyMs` or `floodLatencyMs` **on the fake clock**
 // (support/FakePlatform.h), so a wait is asserted rather than slept, and every send is recorded
 // with that clock's time - which is what *one send per command*, the minimum gap and the
-// per-minute cap are asserted against.
+// per-minute cap are asserted against. One reply can be **late** rather than lost
+// (`deliverTheNextReplyLate`, task p1.10-47): it misses its own request's wait and turns up in
+// the next one, which is the only timing of the air this fake models beyond a latency.
 //
 // ---- answers (the manifest) ------------------------------------------------------------------
 //
@@ -32,7 +34,7 @@
 // answer: login-password        cite: fw repeater-v1.18.0 81dbae59 examples/simple_repeater/MyMesh.cpp:100-128 MyMesh::handleLoginReq -- the admin password is admin, the guest password is guest, and the password rewrites the entry's role
 // answer: login-silent-password cite: fw repeater-v1.18.0 81dbae59 examples/simple_repeater/MyMesh.cpp:106-111 MyMesh::handleLoginReq -- a password that is neither is `return 0`, which is silence and not a refusal
 // answer: login-silent-replay   cite: fw repeater-v1.18.0 81dbae59 examples/simple_repeater/MyMesh.cpp:113-117 MyMesh::handleLoginReq -- a sender timestamp at or below the last one is silence
-// answer: login-refused         cite: fixture login-failed.hex
+// answer: login-another-reply   cite: fw companion-v1.18.0 81dbae59 examples/companion_radio/MyMesh.cpp:716-721 MyMesh::onContactResponse -- a response that is neither "OK" nor RESP_SERVER_LOGIN_OK is what the companion turns into PUSH_CODE_LOGIN_FAIL: no firmware at the pin sends a refusal to a login, so this is a reply to something else and the agent must not read it as one (task p1.10-47)
 // answer: status                cite: fixture status-response.hex
 // answer: status                cite: fw repeater-v1.18.0 81dbae59 examples/simple_repeater/MyMesh.cpp:216-240 MyMesh::handleRequest -- REQ_TYPE_GET_STATUS answers every login, guests included
 // answer: telemetry             cite: fixture telemetry-response.hex
@@ -275,7 +277,22 @@ class FakeMesh : public mm::IMesh {
   void replyWithTheWrongTag(int sends) { wrongTagSends_ = sends; }
   void replySlowly(int sends) { slowSends_ = sends; }  // the reply arrives past the wait
   void forgetTheSession() { forgotten_ = true; }       // the login table lost us
-  void refuseTheNextLogin(int logins) { refuseLogins_ = logins; }
+  // **The next n logins are answered with a response that is not a login reply.** Stock firmware
+  // sends no such thing to a login - `handleLoginReq` answers RESP_SERVER_LOGIN_OK or nothing -
+  // so what this stands for is the reply to something *else* arriving while a login is awaited,
+  // which is the whole of task p1.10-47. Consumed before `beSilentToTheNextLogins` below, so a
+  // test can script "login one answers this, and the rest are silent".
+  void answerTheNextLoginWithSomethingElse(int logins) { somethingElseLogins_ = logins; }
+  // The next n logins get no reply at all, whatever this repeater's ACL and passwords say: the
+  // mesh ate the reply. `beSilent` above cannot say it, because it counts every send.
+  void beSilentToTheNextLogins(int logins) { silentLogins_ = logins; }
+  // **The next n replies arrive after the wait for their own request has ended** (task
+  // p1.10-47): the reply is not lost, as `replySlowly` loses it, but held and delivered during
+  // the *next* wait of the job - which is what a repeater slower than this board's patience
+  // really does, and what parked ten ACL associations on meshmaster.dk on 12 November 2026. A
+  // late reply survives the sends that follow it, so the login after a timed-out request finds
+  // it waiting.
+  void deliverTheNextReplyLate(int sends) { lateSends_ = sends; }
 
   void setLatency(uint32_t directMs, uint32_t floodMs) {
     directLatencyMs_ = directMs;
@@ -424,6 +441,9 @@ class FakeMesh : public mm::IMesh {
     outPathLen_ = 0;
     outPath_.clear();
     pending_ = Pending();
+    // No job in flight: a reply still on its way home belongs to a job that is over, and this
+    // mesh releases a response from anybody between jobs (IMesh::endJob).
+    late_.clear();
     reply_ = mm::MeshReply();
   }
 
@@ -462,13 +482,18 @@ class FakeMesh : public mm::IMesh {
     const mm::SendResult how = direct ? mm::SendResult::Direct : mm::SendResult::Flood;
     if (!reachable()) return how;
 
-    if (refuseLogins_ > 0) {
-      refuseLogins_--;
-      // answer: login-refused — a reply that is not a login-ok at all. Stock firmware never
-      // sends one (a wrong password is silence); the legacy frame and any firmware that does
-      // send one land here, and the runner reads it as `Refused`.
+    if (somethingElseLogins_ > 0) {
+      somethingElseLogins_--;
+      // answer: login-another-reply — a response that is not a login-ok at all. Stock firmware
+      // never sends one to a login (a wrong password is silence), so what arrives on the air in
+      // this shape is the reply to something else; the runner drops it and waits on (task
+      // p1.10-47), where it used to read it as `Refused`.
       arm(response({0x7F, 0x01}, senderTimestamp, /*repeaterStamps=*/true));
       return how;
+    }
+    if (silentLogins_ > 0) {
+      silentLogins_--;
+      return how;  // the mesh ate the login's reply: silence, which is all a login can be refused with
     }
 
     AclEntry* client = nullptr;
@@ -623,6 +648,10 @@ class FakeMesh : public mm::IMesh {
     uint32_t deliverAtMs = 0;
     bool neverArrives = false;
     bool teachesPath = false;  // it comes home as a returned path, which teaches the way out
+    size_t sendIndex = 0;      // which send this answers, for `Send::answered`
+    // How many more waits this reply is not delivered in (`deliverTheNextReplyLate`): 1 is its
+    // own request's wait, so the one after it is where it turns up.
+    int waitsToSkip = 0;
   };
 
   // ---------------------------------------------------------------- the clocks and the record
@@ -755,12 +784,23 @@ class FakeMesh : public mm::IMesh {
     }
     const bool flood = !sends_.empty() && !sends_.back().direct;
     p.deliverAtMs = platform_.millis() + (flood ? floodLatencyMs_ : directLatencyMs_);
+    p.sendIndex = sends_.empty() ? 0 : sends_.size() - 1;
     if (slowSends_ > 0) {
       slowSends_--;
       p.neverArrives = true;  // past every wait, which from here is a silence
     }
     // A flooded request is answered with a path return, which teaches the way home.
     p.teachesPath = flood && !returnPath_.empty();
+    if (lateSends_ > 0) {
+      lateSends_--;
+      // Late, not lost (task p1.10-47): it misses its own request's wait and waits for the next
+      // one, in a list of its own so that the sends between cannot evict it the way one send's
+      // reply evicts the last.
+      p.waitsToSkip = 1;
+      late_.push_back(p);
+      pending_ = Pending();
+      return;
+    }
     pending_ = p;
   }
 
@@ -973,44 +1013,65 @@ class FakeMesh : public mm::IMesh {
   bool await(Awaiting what, uint32_t tag, uint32_t timeoutMs, void (*pump)()) {
     reply_ = mm::MeshReply();
     const uint32_t deadline = platform_.millis() + timeoutMs;
-    while (static_cast<int32_t>(platform_.millis() - deadline) < 0) {
+    bool got = false;
+    while (!got && static_cast<int32_t>(platform_.millis() - deadline) < 0) {
       loop();
       if (pump != nullptr) pump();
+      // A reply held over from an earlier request comes first: it has been due the longer.
+      for (size_t i = 0; i < late_.size(); i++) {
+        Pending& p = late_[i];
+        if (p.waitsToSkip > 0 || p.neverArrives || static_cast<int32_t>(platform_.millis() - p.deliverAtMs) < 0) {
+          continue;
+        }
+        const bool taken = deliver(p, what, tag);
+        const size_t which = p.sendIndex;
+        late_.erase(late_.begin() + static_cast<long>(i));
+        if (taken) {
+          if (which < sends_.size()) sends_[which].answered = true;
+          counters_.rx++;
+          got = true;
+        }
+        break;
+      }
+      if (got) break;
       if (pending_.has && !pending_.neverArrives &&
           static_cast<int32_t>(platform_.millis() - pending_.deliverAtMs) >= 0) {
-        if (deliver(what, tag)) {
-          if (!sends_.empty()) sends_.back().answered = true;
+        const bool taken = deliver(pending_, what, tag);
+        const size_t which = pending_.sendIndex;
+        pending_ = Pending();
+        if (taken) {
+          if (which < sends_.size()) sends_[which].answered = true;
           counters_.rx++;
-          return true;
+          got = true;
+          break;
         }
       }
       platform_.delayMs(1);
     }
-    return false;
+    // One wait of this mesh is over, delivered or not: a late reply is a wait nearer its turn.
+    for (Pending& p : late_) {
+      if (p.waitsToSkip > 0) p.waitsToSkip--;
+    }
+    return got;
   }
 
   // AgentMesh's own reading: a reply of the wrong kind, or with a tag that is not the one being
-  // waited for, is dropped and not read, and the wait goes on into silence.
-  bool deliver(Awaiting what, uint32_t tag) {
-    const mm::MeshReply& p = pending_.reply;
+  // waited for, is dropped and not read, and the wait goes on into silence. A login waits with
+  // tag 0, so **every** response reaches the library there - which is where task p1.10-47's rule
+  // lives, and the reason this fake hands one through rather than filtering it here.
+  bool deliver(const Pending& held, Awaiting what, uint32_t tag) {
+    const mm::MeshReply& p = held.reply;
     const bool isText = p.kind == mm::MeshReply::Kind::Text;
-    if ((what == Awaiting::Text) != isText) {
-      pending_ = Pending();
-      return false;
-    }
-    if (what == Awaiting::Response && tag != 0 && p.tag != tag) {
-      pending_ = Pending();
-      return false;
-    }
+    if ((what == Awaiting::Text) != isText) return false;
+    if (what == Awaiting::Response && tag != 0 && p.tag != tag) return false;
     reply_ = p;
-    if (pending_.teachesPath && returnPathSize_ > 0) {
+    if (held.teachesPath && returnPathSize_ > 0) {
       // answer: path-return
       outPath_ = returnPath_;
       outPathLen_ =
           static_cast<uint8_t>(((returnPathSize_ - 1) << 6) | (returnPath_.size() / returnPathSize_));
       havePath_ = true;
     }
-    pending_ = Pending();
     return true;
   }
 
@@ -1108,7 +1169,9 @@ class FakeMesh : public mm::IMesh {
   int wrongTagSends_ = 0;
   int slowSends_ = 0;
   bool forgotten_ = false;
-  int refuseLogins_ = 0;
+  int somethingElseLogins_ = 0;
+  int silentLogins_ = 0;
+  int lateSends_ = 0;
   uint32_t directLatencyMs_ = 400;
   uint32_t floodLatencyMs_ = 1500;
   bool pad_ = true;
@@ -1127,6 +1190,8 @@ class FakeMesh : public mm::IMesh {
   uint8_t returnPathSize_ = 2;
   mm::MeshReply reply_;
   Pending pending_;
+  // The replies that missed their own request's wait and are still on their way home.
+  std::vector<Pending> late_;
   uint32_t lastUnique_ = 0;
   std::vector<Send> sends_;
 };

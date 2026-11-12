@@ -333,10 +333,11 @@ wake's `Budget` is how you refuse such a job rather than be surprised by it (§6
 | `beginJob` false | the job is `failed`, one log line, nothing sent |
 | `sendLogin`/`sendRequest`/`sendCli` → `Failed` | *the packet could not be built*: the job ends `failed` |
 | `awaitReply` false after a login | silence. Stock firmware answers a login it will not take with **silence**, and that cannot be told from a repeater that is off the air: the sequence (`agent/LoginSequence.h`) tries **twice** and reports `unreachable` — or `unauthorized`, when a blank probe login between the two tries *was* answered and only the password's try was silent. A `discover` job escalates further on its own: `forgetPath()`, a flooded login, and the path-discovery request last. Since `0.4.0` the result also says **where** it failed: `failedAt: "login"` (§6.2) |
+| `awaitReply` **true** after a login, with something that is not a login reply | **dropped, and the wait goes on** (unreleased, task p1.10-47): one log line, the same wait's remainder, and then the silence above. A login is awaited with tag 0 — *the next response from this peer* — because a login reply carries the repeater's clock and no tag of ours, so your mesh will hand the runner the late reply to a request that has just timed out. The library drops it; you need do nothing (§3.6) |
 | `awaitReply` false after a request on a reused session | one retry with a **fresh login**, then `unreachable`. `failedAt` is `"request"` when the fresh login was answered and the second try was not, and `"login"` when the fresh login was not answered either — the step the job *ended* at (§6.2) |
 | `awaitText` false after a CLI line | **nothing is sent again.** One send per command is the rail: a `set` sent twice is a change made twice. The line is recorded as unanswered and the sequence stops |
 | a login the repeater answered **below** the job's class | the refusal it is: `unauthorized` at the login, the tier and the need in the result's data, nothing sent after it, and the session cached at the class it can carry. **Except for a `status` or a `neighbours` at class `acl` answered at guest**, which the firmware serves whole and which therefore *runs*, `ok`, with the tier on the envelope's `loggedInAs` (§6.3) |
-| a reply the codec cannot read | a login reply that is not one is *refused*, which the sequence reports `unauthorized` and which drops the cached session; a request's reply that will not parse is `failed`. Either way the bytes never reach a log line |
+| a reply the codec cannot read | a **request's** reply that will not parse is `failed`; a response that reaches a *login's* wait and is not a login reply is dropped and the wait goes on (the row above, §3.6). Either way the bytes never reach a log line |
 
 ### 3.5 What a login carries, and why a local one carries nothing
 
@@ -368,6 +369,49 @@ One thing that is **not** keyed to the door: the ACL restore (`restoreAcl`,
 task p4.1-60, the `setperm` that puts this unit's own entry back after an admin
 session rewrote it). It is gated on the **level the claim carried**, and a unit's
 own repeater is handed none — so nothing is restored on a repeater the unit is.
+
+### 3.6 What ends a login's wait, and why your mesh need not filter
+
+A login is awaited with **tag 0** — `awaitReply(0, …)`, *the next response from
+this peer* — and that is not a shortcut. `handleLoginReq` stamps its reply with
+the **repeater's** `getCurrentTimeUnique()` where `handleRequest` reflects the
+sender's timestamp back, so a login reply carries no tag of ours to match on; the
+companion's own `onContactResponse` matches a login reply by the contact's key
+and no tag either.
+
+The consequence is that on a tag-0 wait your mesh hands the runner **every**
+response from the peer, including the reply to the request before it — the one
+that had just timed out, which is why there is a login at all. Since
+unreleased (task p1.10-47) the library decides what that was, and a response
+that is not a login reply **does not end the wait**:
+
+- **a tag this job sent** is that request's reply, however late and whatever it
+  parses as. This is the half a parse cannot do: a neighbour page of a repeater
+  with no neighbours is `total(i16)`, `returned(i16)` — four zero bytes,
+  zero-padded to the cipher block — and `parseLoginReply` reads a first byte of
+  zero as *login ok*, the fourth as the permissions and the ninth as the
+  firmware level, so that page arrives as *logged in as guest, firmware level
+  0*. A status reply can do it too: its first field is the battery in
+  millivolts, little-endian, so one reading in 256 has a low byte of zero;
+- **anything else that is not a login reply**: another kind, or bytes
+  `parseLoginReply` does not know.
+
+Either is dropped with one line in the job's log, the wait runs to its end, and
+the login is then *no reply* — the second try follows as for any silence. So
+**nothing says `unauthorized` of a login the repeater did not answer**:
+`LoginTry::Refused` is a login answered **below the class it was for** and
+nothing else, and the reachability probe of §7's rotation path is answered or
+silent and never refused. Nothing of MeshCore at the pin sends a refusal to a
+login — `handleLoginReq` answers `RESP_SERVER_LOGIN_OK` or `return 0`, and so do
+`simple_room_server` and `simple_sensor` — so no verdict is lost by dropping
+these. meshmaster.dk parked ten working ACL associations as *the ACL entry is
+gone* on 12 November 2026 for want of this rule, and its own task p4.32-186 is
+the half that protects an exit node nobody has flashed.
+
+**For your `IMesh`: do nothing.** The rule is in the library because it has to
+hold for a mesh that filters nothing, and an in-process mesh that *can* drop a
+tag it did not wait for is free to — `AgentMesh` does so on every wait but a
+login's, where it cannot. You are not asked to know the job's tags.
 
 ## 4. `IUplink` — meshmaster.dk
 

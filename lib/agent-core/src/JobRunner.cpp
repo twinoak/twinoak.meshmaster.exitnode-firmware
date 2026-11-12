@@ -157,7 +157,93 @@ bool JobRunner::spend(const ClaimedJob& job, Context& ctx, bool escape) {
   return true;
 }
 
+// ------------------------------------------------------------------ the tags this job sent
+
+void JobRunner::Context::rememberTag(uint32_t tag) {
+  if (tag == 0 || sentTag(tag)) return;
+  sentTags[sentTagNext] = tag;
+  sentTagNext = static_cast<uint8_t>((sentTagNext + 1) % kSentTagCap);
+  if (sentTagCount < kSentTagCap) sentTagCount++;
+}
+
+bool JobRunner::Context::sentTag(uint32_t tag) const {
+  if (tag == 0) return false;
+  for (uint8_t i = 0; i < sentTagCount; i++) {
+    if (sentTags[i] == tag) return true;
+  }
+  return false;
+}
+
 // ------------------------------------------------------------------ the login
+
+// **Only a login reply answers a login** (task p1.10-47; meshmaster.dk's task p4.32-186 is the
+// server's half, which protects an exit node nobody has flashed).
+//
+// A login reply starts with the **repeater's** clock and carries no tag of ours: `handleLoginReq`
+// writes `getCurrentTimeUnique()` into the four bytes `handleRequest` reflects the sender's
+// timestamp into (examples/simple_repeater/MyMesh.cpp at 81dbae59, lines 133-135 against 214). So
+// a login is awaited with tag 0 - *the next response from this peer* - and until this task
+// whatever came next was taken as the login's answer. On a job whose request had just timed out,
+// what comes next is that **request's late reply**. meshmaster.dk, 12 November 2026: every one of
+// the ten times an active ACL association was parked as *the ACL entry is gone* has this log
+// (jobs 24142, 21783, 8293, 19065), and in 24142 the same key had been answered *logged in as
+// read-write* three minutes before:
+//
+//     session reused (acl, read-write, 147 s old);
+//     neighbours page at 0 try 1: no reply (direct);
+//     no reply on a reused session: logging in again once;
+//     login (acl) try 1: refused
+//
+// So a response that is not a login reply no longer ends the wait: it is dropped, the job's log
+// says a reply to something else arrived, and the wait goes on to its end. Then it is *no reply* -
+// which is what stock firmware answers a login it will not take anyway - and the second try
+// follows as for any silence. Two tests of what a login reply is, and the first is the one a
+// parse cannot make:
+//
+//   - **a tag this job sent** (`Context::sentTag`): a response carrying one is that request's
+//     reply, whatever it parses as. A neighbour page of a repeater with no neighbours is
+//     `total(i16)` and `returned(i16)`, four zero bytes, zero-padded to the cipher block by
+//     `Utils::encrypt` - and `parseLoginReply` reads a first byte of zero as *login ok*, the
+//     fourth as the permissions and the ninth as the firmware level, so that page arrives as
+//     *logged in as guest, firmware level 0*. A status reply can do the same: its first field is
+//     the battery in millivolts, little-endian, so one reading in 256 (4096 mV, 3840 mV) has a
+//     low byte of zero, and the two bytes after it are the transmit queue length, whose high
+//     byte is the role - guest on any queue below 256;
+//   - **bytes that are not a login reply at all**: another kind (a trace, a CLI text) or a
+//     response `parseLoginReply` does not know.
+//
+// Here, in the library, and not only in `AgentMesh`: the Walter has its own `IMesh`, and the rule
+// has to hold with one that hands every response through. Nothing is lost by dropping these,
+// because **nothing of MeshCore at the pin refuses a login**: `handleLoginReq` answers
+// RESP_SERVER_LOGIN_OK or `return 0`, and so do `simple_room_server` and `simple_sensor`. The
+// companion's `PUSH_CODE_LOGIN_FAIL` (examples/companion_radio/MyMesh.cpp:716-721) is emitted for
+// exactly the response this drops - which is the .NET agent's half of the same bug.
+bool JobRunner::awaitLoginReply(const ClaimedJob& job, Context& ctx, const char* what, LoginReply& out) {
+  // A bound on the drops of one wait, not on the wait itself: eight late replies while one login
+  // is awaited is a repeater talking about something else, and the login was not answered.
+  constexpr int kDropsPerWait = 8;
+  const uint32_t deadline = millis() + loginWaitMs(job);
+  for (int dropped = 0; dropped < kDropsPerWait; dropped++) {
+    const int32_t left = static_cast<int32_t>(deadline - millis());
+    if (left <= 0) return false;
+    if (!mesh_->awaitReply(0, static_cast<uint32_t>(left), pump_)) return false;
+    const MeshReply& reply = mesh_->reply();
+    const bool ours = reply.kind == MeshReply::Kind::Response && ctx.sentTag(reply.tag);
+    if (!ours && reply.kind == MeshReply::Kind::Response && parseLoginReply(reply.data, reply.len, out)) return true;
+    if (ours) {
+      g_log.add("%s: the late reply to a request this job sent arrived instead; dropped, and the login's wait goes "
+                "on (task p1.10-47)",
+                what);
+      LOG_I("jobs: job %lld: %s: a late reply to one of this job's own requests was dropped", job.id, what);
+    } else {
+      g_log.add("%s: a reply that is not a login reply arrived instead; dropped, and the login's wait goes on "
+                "(task p1.10-47)",
+                what);
+      LOG_I("jobs: job %lld: %s: a reply that is not a login reply was dropped", job.id, what);
+    }
+  }
+  return false;
+}
 
 const char* JobRunner::loginMaterial(const ClaimedJob& job) {
   // Which material a class logs in with - the password, the blank login of `acl`, `none` and the
@@ -191,7 +277,11 @@ JobRunner::LoginResult JobRunner::loginOnce(const ClaimedJob& job, Context& ctx,
   }
   char shape[48];
   describeSend(sent, mode, shape, sizeof shape);
-  if (!mesh_->awaitReply(tag, loginWaitMs(job), pump_)) {
+  // Only a login reply ends this wait (task p1.10-47, awaitLoginReply above): a late reply to
+  // something else is dropped and the wait goes on, so what comes back here is a login reply or
+  // the silence that is all a login can be refused with.
+  LoginReply login;
+  if (!awaitLoginReply(job, ctx, what, login)) {
     // Stock firmware answers a login it will not take with **silence** (`handleLoginReq`
     // returns 0): a key its ACL does not hold on a blank login, a password that is neither of
     // its two on a password login. It cannot be told from a repeater that is off the air.
@@ -202,13 +292,6 @@ JobRunner::LoginResult JobRunner::loginOnce(const ClaimedJob& job, Context& ctx,
   if (!ctx.hasRtt) {
     ctx.hasRtt = true;
     ctx.rttMs = static_cast<int>(millis() - started);
-  }
-  const MeshReply& reply = mesh_->reply();
-  LoginReply login;
-  if (reply.kind != MeshReply::Kind::Response || !parseLoginReply(reply.data, reply.len, login)) {
-    g_log.add("%s: refused", what);
-    sessions_.invalidate(job.repeaterKey);
-    return LoginResult::Refused;
   }
   const uint8_t permissions = login.hasAclPermissions ? login.aclPermissions : login.role();
   const RepeaterSession* stored = sessions_.put(job.repeaterKey, job.credentialClass, permissions, millis());
@@ -308,7 +391,6 @@ class JobRunner::LoginOnTheAir : public LoginExchange {
 
   ProbeAnswer probe(uint8_t& role) override {
     if (!runner_.probeReachable(job_, ctx_)) return ProbeAnswer::NoReply;
-    if (ctx_.probeRefused) return ProbeAnswer::Refused;
     role = ctx_.probeAnsweredRole;
     return ProbeAnswer::Answered;
   }
@@ -362,7 +444,6 @@ Outcome JobRunner::ensureSession(const ClaimedJob& job, Context& ctx) {
 }
 
 bool JobRunner::probeReachable(const ClaimedJob& job, Context& ctx) {
-  ctx.probeRefused = false;
   ctx.probeAnsweredRole = 0;
   if (!spend(job, ctx)) {
     g_log.add("reachability probe (blank login): not sent, the lease ran out");
@@ -378,7 +459,12 @@ bool JobRunner::probeReachable(const ClaimedJob& job, Context& ctx) {
   }
   char how[48];
   describeSend(sent, mode, how, sizeof how);
-  if (!mesh_->awaitReply(tag, loginWaitMs(job), pump_)) {
+  // The same rule as every other login of this file (task p1.10-47): a response that is not a
+  // login reply is dropped and the wait goes on, so this probe is answered or silent and never
+  // *refused* - the word would have made a late reply to something else into evidence about a
+  // password, which is the reading task p4.7-95's silence-after-a-reachable-probe stands on.
+  LoginReply login;
+  if (!awaitLoginReply(job, ctx, "reachability probe (blank login)", login)) {
     g_log.add("reachability probe (blank login): no reply (%s)", how);
     g_log.add("the blank login was not answered either: nothing is known about the password - the repeater is off "
               "the air, or it has a guest password set and no entry for this exit node's key (task p4.7-95)");
@@ -388,16 +474,6 @@ bool JobRunner::probeReachable(const ClaimedJob& job, Context& ctx) {
   flood_.answered();
   // No session is stored from this reply, whatever it says: the next job is a candidate job and
   // logs in afresh, and a session another login opened would make its verdict a lie.
-  const MeshReply& reply = mesh_->reply();
-  LoginReply login;
-  if (reply.kind != MeshReply::Kind::Response || !parseLoginReply(reply.data, reply.len, login)) {
-    ctx.probeRefused = true;
-    g_log.add("reachability probe (blank login): refused (%s)", how);
-    g_log.add("the repeater is on the air: it refused the blank login, so a silence to the new candidate right after "
-              "it is a refusal (task p4.7-95)");
-    LOG_I("jobs: job %lld: reachability probe (blank login): refused; the repeater is on the air", job.id);
-    return true;
-  }
   const uint8_t permissions = login.hasAclPermissions ? login.aclPermissions : login.role();
   ctx.probeAnsweredRole = static_cast<uint8_t>(permissions & kPermRoleMask);
   const char* tier = permissionName(ctx.probeAnsweredRole);
@@ -432,6 +508,12 @@ Outcome JobRunner::exchange(const ClaimedJob& job, Context& ctx, const char* wha
       g_log.add("%s try %d: the packet could not be built", what, attempt);
       return Outcome::Failed;
     }
+    // The tag this attempt went out with, kept for the rest of the job (task p1.10-47): a
+    // response carrying it later is this request's reply, however late, and must not be taken
+    // for the answer to the re-login below. A CLI line is not one of them - its reply is a
+    // TXT_MSG that carries no tag at all, and the timestamp it drew is the repeater's replay
+    // mark and never a response's four bytes.
+    if (!text) ctx.rememberTag(tag);
     char shape[48];
     describeSend(sent, mode, shape, sizeof shape);
     const bool answered = text ? mesh_->awaitText(requestWaitMs(job), pump_) : mesh_->awaitReply(tag, requestWaitMs(job), pump_);
@@ -873,6 +955,7 @@ Outcome JobRunner::runDiscover(const ClaimedJob& job, Context& ctx, size_t& data
   const FloodMode mode = scopeTheNextSend();
   const SendResult sent = mesh_->sendDiscovery(tag);
   noteSend(sent, mode);
+  ctx.rememberTag(tag);  // a request of this job's, like any other (task p1.10-47)
   if (sent == SendResult::Failed) {
     g_log.add("path discovery request: the packet could not be built");
     dataLen = writeDiscoverResult(false, nullptr, 0, nullptr, 0, nullptr, g_data, kDataCap);
@@ -1729,8 +1812,7 @@ void JobRunner::runClaimed(int i) {
     // The candidate's silence right after a blank login the repeater answered (task p1.3-13):
     // the server reads `reason` and treats it exactly as a refusal, notes the candidate
     // refused, and hands the next attempt the old one (CONFIGURATION §7 step 4).
-    dataLen = writeLoginSilentResult(
-        ctx.probeRefused ? kProbeAnsweredRefused : permissionName(ctx.probeAnsweredRole), g_data, kDataCap);
+    dataLen = writeLoginSilentResult(permissionName(ctx.probeAnsweredRole), g_data, kDataCap);
   }
 
   // The path the mesh holds *after* the exchange, which is the claim's own unless a flooded

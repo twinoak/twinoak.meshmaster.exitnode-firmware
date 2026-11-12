@@ -1,10 +1,12 @@
 // The rotation probe, on a host (task p1.3-13; meshmaster.dk's task p4.7-95 and its
 // RotationProbeTests): the two tries of a login with the blank login between them, walked against
-// a scripted exchange. The four paths - silent; silent, probe answered, silent (`unauthorized`,
-// LoginSilentResult byte for byte); silent, probe silent, silent (`unreachable`); silent, probe
-// refused, silent (`unauthorized`, `probeAnsweredAs: refused`) - and that an `old` candidate, no
-// candidate, and a blank material never probe, that the probe costs one transaction, and that it
-// stores no session.
+// a scripted exchange. The three paths - silent; silent, probe answered, silent (`unauthorized`,
+// LoginSilentResult byte for byte); silent, probe silent, silent (`unreachable`) - and that an
+// `old` candidate, no candidate, and a blank material never probe, that the probe costs one
+// transaction, and that it stores no session. There were four until task p1.10-47: a probe
+// *refused* was the fourth, and no firmware at the pin sends a refusal to a login, so the
+// answer a response-that-is-not-a-login-reply used to make is now a drop and a wait that goes
+// on - which is the test below that used to assert it.
 //
 // Beside it, and in the same file because it is the same module: **the guest door** (task
 // p1.4-14; meshmaster.dk's tasks p4.7-94 and p4.11-111). `loginMaterialFor` is the material of a
@@ -132,7 +134,6 @@ TEST(RotationProbe, SilentThenAnsweredProbeThenSilentIsUnauthorizedWithTheProbes
   const mm::LoginVerdict v = mm::loginSequence(r, true);
   EXPECT_EQ(v.outcome, mm::Outcome::Unauthorized);
   EXPECT_TRUE(v.silentAfterReachable);
-  EXPECT_FALSE(v.probeRefused);
   EXPECT_EQ(v.probeAnsweredRole, mm::kPermReadOnly);
   EXPECT_STREQ(mm::probeAnsweredAs(v), "read-only");
   EXPECT_EQ(data(v), "{\"reason\":\"silentAfterReachable\",\"probeAnsweredAs\":\"read-only\"}");
@@ -180,7 +181,6 @@ TEST(RotationProbe, SilentThenSilentProbeThenSilentIsUnreachableAtThreeWithNoVer
   const mm::LoginVerdict v = mm::loginSequence(r, true);
   EXPECT_EQ(v.outcome, mm::Outcome::Unreachable);
   EXPECT_FALSE(v.silentAfterReachable) << "a probe that was silent too proves nothing";
-  EXPECT_FALSE(v.probeRefused);
   EXPECT_EQ(r.loginCalls, 2);
   EXPECT_EQ(r.probeCalls, 1);
   EXPECT_EQ(r.transactions, 3);
@@ -188,20 +188,27 @@ TEST(RotationProbe, SilentThenSilentProbeThenSilentIsUnreachableAtThreeWithNoVer
   EXPECT_TRUE(r.logged.empty()) << "nothing is noted: the server sees `unreachable` with no data, as before";
 }
 
-TEST(RotationProbe, SilentThenRefusedProbeThenSilentIsUnauthorizedAnsweredAsRefused) {
-  ScriptedRepeater r;
-  r.logins = {mm::LoginTry::NoReply, mm::LoginTry::NoReply};
-  r.probeAnswer = mm::ProbeAnswer::Refused;
-  const mm::LoginVerdict v = mm::loginSequence(r, true);
-  EXPECT_EQ(v.outcome, mm::Outcome::Unauthorized);
-  EXPECT_TRUE(v.silentAfterReachable);
-  EXPECT_TRUE(v.probeRefused) << "the legacy LOGIN_FAIL frame is an answer: the repeater is on the air";
-  EXPECT_STREQ(mm::probeAnsweredAs(v), "refused");
-  EXPECT_EQ(data(v), "{\"reason\":\"silentAfterReachable\",\"probeAnsweredAs\":\"refused\"}");
-  EXPECT_EQ(r.probeCalls, 1);
-  EXPECT_EQ(r.transactions, 3);
-  ASSERT_EQ(r.logged.size(), 1u);
-  EXPECT_NE(r.logged[0].find("answered a blank login at refused"), std::string::npos);
+// The fourth path this file used to walk, and what became of it (task p1.10-47). The blank login
+// is answered or it is silent: `ProbeAnswer` has no third value, so a response that is not a
+// login reply - which is what used to be read as a refusal - can only reach the sequence as the
+// silence `JobRunner::awaitLoginReply` turns it into. Nothing of MeshCore at the pin refuses a
+// login: `handleLoginReq` answers RESP_SERVER_LOGIN_OK or `return 0`, and so do
+// `simple_room_server` and `simple_sensor`.
+TEST(RotationProbe, TheProbeIsAnsweredOrSilentAndTheTierIsAlwaysALevel) {
+  for (const mm::ProbeAnswer answer : {mm::ProbeAnswer::NoReply, mm::ProbeAnswer::Answered}) {
+    ScriptedRepeater r;
+    r.logins = {mm::LoginTry::NoReply, mm::LoginTry::NoReply};
+    r.probeAnswer = answer;
+    r.probeRole = mm::kPermReadOnly;
+    const mm::LoginVerdict v = mm::loginSequence(r, true);
+    const bool answered = answer == mm::ProbeAnswer::Answered;
+    EXPECT_EQ(v.outcome, answered ? mm::Outcome::Unauthorized : mm::Outcome::Unreachable);
+    EXPECT_EQ(v.silentAfterReachable, answered);
+    // Whatever the probe came to, the word for it is one of the four levels and never `refused`.
+    EXPECT_STREQ(mm::probeAnsweredAs(v), answered ? "read-only" : "guest");
+    EXPECT_EQ(r.probeCalls, 1);
+    EXPECT_EQ(r.transactions, 3);
+  }
 }
 
 // ------------------------------------------------------------------ the second try is the one judged
@@ -474,8 +481,8 @@ TEST(LocalLogin, ALocalJobGetsNoCutLineBecauseNothingOfThePasswordIsSent) {
 // ------------------------------------------------------------------ the board's half, on its text
 
 // A host cannot run JobRunner, so what the probe must and must not do on the air is held on the
-// file's text: one transaction through the gate, the blank login, a reply read as a login or as
-// the refusal, and no session stored or dropped by it.
+// file's text: one transaction through the gate, the blank login, a wait only a login reply ends
+// (task p1.10-47), and no session stored or dropped by it.
 TEST(RotationProbeOnTheBoard, TheProbeSpendsOneTransactionSendsABlankLoginAndStoresNoSession) {
   const std::string runner = readFile(fs::path(PROJECT_DIR) / "lib/agent-core/src/JobRunner.cpp");
   const size_t from = runner.find("bool JobRunner::probeReachable(");
@@ -493,19 +500,51 @@ TEST(RotationProbeOnTheBoard, TheProbeSpendsOneTransactionSendsABlankLoginAndSto
   EXPECT_EQ(spends, 1) << "one transaction, through the gate like every send";
   const size_t spend = body.find("if (!spend(job, ctx)) {");
   const size_t send = body.find("mesh_->sendLogin(\"\", tag)");
-  const size_t wait = body.find("mesh_->awaitReply(tag, loginWaitMs(job), pump_)");
-  const size_t parse = body.find("parseLoginReply(reply.data, reply.len, login)");
+  const size_t wait = body.find("awaitLoginReply(job, ctx, \"reachability probe (blank login)\", login)");
   ASSERT_NE(spend, std::string::npos) << "the gate's refusal is no probe";
   ASSERT_NE(send, std::string::npos) << "the blank login: our own key and no password";
-  ASSERT_NE(wait, std::string::npos) << "waited for as a login is";
-  ASSERT_NE(parse, std::string::npos) << "a reply that parses is a login; one that does not is the refusal";
+  ASSERT_NE(wait, std::string::npos) << "waited for as every other login of that file is, and only a login reply "
+                                        "ends it (task p1.10-47)";
   EXPECT_LT(spend, send);
   EXPECT_LT(send, wait);
-  EXPECT_LT(wait, parse);
   EXPECT_EQ(body.find("sessions_."), std::string::npos) << "no session is stored, and none dropped, by the probe";
-  EXPECT_NE(body.find("ctx.probeRefused = true;"), std::string::npos);
   EXPECT_NE(body.find("ctx.probeAnsweredRole ="), std::string::npos);
+  EXPECT_EQ(body.find("probeRefused"), std::string::npos)
+      << "the probe cannot be refused: a response that is not a login reply is dropped and the wait goes on";
   EXPECT_EQ(body.find("sendLogin(material"), std::string::npos) << "never the candidate";
+}
+
+// And the wait itself, which both logins of that file share: the tag the job sent is tested
+// before the parse, because the reply a parse cannot catch - an empty neighbour page, which
+// reads as *login ok, permissions 0* - is caught by nothing else (task p1.10-47).
+TEST(RotationProbeOnTheBoard, OnlyALoginReplyEndsALoginsWaitAndTheTagIsTestedFirst) {
+  const std::string runner = readFile(fs::path(PROJECT_DIR) / "lib/agent-core/src/JobRunner.cpp");
+  const size_t from = runner.find("bool JobRunner::awaitLoginReply(");
+  const size_t to = runner.find("const char* JobRunner::loginMaterial(", from);
+  ASSERT_NE(from, std::string::npos) << "the wait is one function, used by every login";
+  ASSERT_NE(to, std::string::npos);
+  const std::string body = runner.substr(from, to - from);
+
+  // The whole wait is this function's: a tag of 0, which is "the next response from this peer",
+  // and a deadline the drops do not extend.
+  EXPECT_NE(body.find("mesh_->awaitReply(0, static_cast<uint32_t>(left), pump_)"), std::string::npos);
+  EXPECT_NE(body.find("const uint32_t deadline = millis() + loginWaitMs(job);"), std::string::npos);
+  const size_t ours = body.find("ctx.sentTag(reply.tag)");
+  const size_t parse = body.find("parseLoginReply(reply.data, reply.len, out)");
+  ASSERT_NE(ours, std::string::npos) << "a response carrying a tag this job sent is that request's reply";
+  ASSERT_NE(parse, std::string::npos);
+  EXPECT_LT(ours, parse) << "the tag decides before the parse does, or an empty neighbour page reads as a login";
+  EXPECT_EQ(body.find("Refused"), std::string::npos) << "nothing here says refused of a reply that is not a login";
+
+  // Both logins use it, and neither reads a reply itself.
+  const size_t loginOnce = runner.find("JobRunner::LoginResult JobRunner::loginOnce(");
+  const size_t probe = runner.find("bool JobRunner::probeReachable(");
+  ASSERT_NE(loginOnce, std::string::npos);
+  ASSERT_NE(probe, std::string::npos);
+  const std::string one = runner.substr(loginOnce, runner.find("const char* JobRunner::failedAtOf(", loginOnce) - loginOnce);
+  EXPECT_NE(one.find("awaitLoginReply(job, ctx, what, login)"), std::string::npos);
+  EXPECT_EQ(one.find("parseLoginReply"), std::string::npos)
+      << "loginOnce no longer reads the bytes: what reaches it is a login reply or a silence";
 }
 
 TEST(RotationProbeOnTheBoard, TheSequenceIsTheRunnersAndItsVerdictIsTheResultsData) {
@@ -536,9 +575,9 @@ TEST(RotationProbeOnTheBoard, TheSequenceIsTheRunnersAndItsVerdictIsTheResultsDa
   EXPECT_LT(below, silent);
   const std::string branch = runner.substr(silent, 600);
   EXPECT_NE(branch.find("writeLoginSilentResult("), std::string::npos);
-  EXPECT_NE(branch.find("ctx.probeRefused ? kProbeAnsweredRefused : permissionName(ctx.probeAnsweredRole)"),
-            std::string::npos)
-      << "the tier is the probe's role in the server's words, or `refused`";
+  EXPECT_NE(branch.find("permissionName(ctx.probeAnsweredRole)"), std::string::npos)
+      << "the tier is the probe's role in the server's words, and since task p1.10-47 nothing beside it: the probe "
+         "cannot be refused";
 }
 
 // The runner's half of the door, on the file's text: the material is the policy's decision and

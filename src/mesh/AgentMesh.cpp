@@ -388,6 +388,12 @@ SendResult AgentMesh::sendLogin(const char* password, uint32_t& tag) {
   // agent does, since PUSH_CODE_LOGIN_SUCCESS carries no tag either. Before this, every login
   // reply was dropped for having "another tag" and every job that needed a session was
   // `unreachable` (the first bench: acl.set to a repeater at 11 dB, twice, no reply).
+  //
+  // **Which is why the library, and not this file, decides what the answer was** (task
+  // p1.10-47): awaiting with tag 0 means a late reply to the request before reaches the runner
+  // too, and `JobRunner::awaitLoginReply` is where one is dropped and the wait goes on. This
+  // mesh hands every response through on a tag-0 wait on purpose - the Walter's `IMesh` does the
+  // same, and a rule that lived here would not hold for it.
   uint8_t temp[4 + kMaxPasswordLen];
   tag = 0;
   const uint32_t senderTimestamp = getRTCClock()->getCurrentTimeUnique();
@@ -544,7 +550,10 @@ void AgentMesh::takeResponse(const uint8_t* data, size_t len) {
   std::memcpy(&tag, data, 4);
   if (waitingFor_ != 0 && tag != waitingFor_) {
     // Not the reply this job is waiting for - an old one that took another route home. It is
-    // dropped rather than read: a tag is how a reply is matched, on both ends.
+    // dropped rather than read: a tag is how a reply is matched, on both ends. A login waits
+    // with `waitingFor_` 0, because its reply carries the repeater's own clock, so this cannot
+    // filter one: there the library drops what is not a login reply (task p1.10-47,
+    // `JobRunner::awaitLoginReply`).
     LOG_D("mesh: a response with another tag arrived and was dropped");
     return;
   }

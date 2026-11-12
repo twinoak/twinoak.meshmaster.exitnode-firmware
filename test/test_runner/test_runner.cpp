@@ -1186,17 +1186,40 @@ TEST_F(RunnerTest, SilenceTwiceIsUnreachable) {
   EXPECT_EQ(dataOf(body), "") << "an unreachable carries no data";
 }
 
-TEST_F(RunnerTest, ARefusedLoginIsUnauthorized) {
-  mesh.refuseTheNextLogin(1);
+// A response that is not a login reply is not an answer to the login (task p1.10-47). It used to
+// be `unauthorized` at one login, with the job's own command never sent; it is now dropped, the
+// wait goes on, and the second try - which the repeater answers - runs the job.
+TEST_F(RunnerTest, AResponseThatIsNotALoginReplyIsDroppedAndTheSecondTryRunsTheJob) {
+  mesh.answerTheNextLoginWithSomethingElse(1);
   const std::string body = run(fake::Job(12395, "cli")
                                    .atClass("admin")
                                    .leasedUntil(kLease)
                                    .withAdminPassword("adm1n-pass")
                                    .withPayload("{\"command\":\"set tx 20\"}"));
 
-  EXPECT_EQ(outcomeOf(body), "unauthorized");
-  EXPECT_EQ(mesh.logins(), 1) << "a refusal is an answer: the sequence stops at it";
+  EXPECT_EQ(outcomeOf(body), "ok") << "never `unauthorized`: nothing refused anything";
+  EXPECT_EQ(mesh.logins(), 2) << "the dropped reply did not end the wait, so the second try follows as for silence";
+  EXPECT_EQ(mesh.cliLines(), 1) << "the line the `unauthorized` used to lose";
+  EXPECT_NE(logOf(body).find("a reply that is not a login reply arrived instead"), std::string::npos) << body;
+  EXPECT_EQ(logOf(body).find("refused"), std::string::npos) << body;
+}
+
+// And the same response with nothing behind it: two tries, `unreachable`, and no verdict about
+// any password - which is what stock firmware's silence has always come to.
+TEST_F(RunnerTest, ANonLoginResponseAndThenSilenceIsUnreachableAndNeverUnauthorized) {
+  mesh.answerTheNextLoginWithSomethingElse(1);
+  mesh.beSilentToTheNextLogins(1);
+  const std::string body = run(fake::Job(12398, "cli")
+                                   .atClass("admin")
+                                   .leasedUntil(kLease)
+                                   .withAdminPassword("adm1n-pass")
+                                   .withPayload("{\"command\":\"set tx 20\"}"));
+
+  EXPECT_EQ(outcomeOf(body), "unreachable");
+  EXPECT_EQ(mesh.logins(), 2);
   EXPECT_EQ(mesh.cliLines(), 0);
+  EXPECT_EQ(dataOf(body), "") << "an unreachable carries no data, and no verdict about the password";
+  EXPECT_EQ(failedAtOf(body), "login") << body;
 }
 
 TEST_F(RunnerTest, ALoginAnsweredBelowTheClassIsUnauthorizedWithTheTierItGranted) {
@@ -1388,6 +1411,141 @@ TEST_F(RunnerTest, ASilenceRightAfterAnAnsweredBlankLoginIsReportedAsTheRefusalI
 }
 
 // ---------------------------------------------------------------------------------------------
+// Only a login reply answers a login (task p1.10-47; meshmaster.dk's task p4.32-186)
+//
+// A login reply carries the repeater's own clock and no tag of ours, so a login is awaited with
+// tag 0 and - until this task - whatever the peer sent next was its answer. On a job whose
+// request had just timed out that is the request's **late** reply, and it is how ten working ACL
+// associations were parked on meshmaster.dk on 12 November 2026 as *the ACL entry is gone*. These
+// walk the sequence of those job logs with the reply arriving where it arrived: during the
+// re-login's wait.
+
+TEST_F(RunnerTest, ALateRequestReplyDuringTheReLoginIsDroppedAndTheJobRunsOn) {
+  mesh.grant(self(), mm::kPermReadOnly);
+  // The first job opens the session, as the field's job 24142 had one 147 s old.
+  run(fake::Job(24141, "status").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
+  ASSERT_EQ(mesh.logins(), 1);
+  mesh.forgetSends();
+
+  // The second finds it live, and its request is answered **late**: past its own wait, during the
+  // wait of the login that follows it.
+  mesh.deliverTheNextReplyLate(1);
+  const std::string body =
+      run(fake::Job(24142, "status").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << body;
+  EXPECT_EQ(loggedInAsOf(body), "") << "the login was answered at the class the job asked for";
+  EXPECT_EQ(mesh.logins(), 1) << "one re-login, answered";
+  const std::vector<fake::Send>& sends = mesh.sends();
+  ASSERT_EQ(sends.size(), 4u) << "the status request twice, the login between them, and the owner info after";
+  EXPECT_EQ(sends[0].kindName(), std::string("request")) << "the first try, on the reused session";
+  EXPECT_EQ(sends[1].kindName(), std::string("login"));
+  EXPECT_EQ(sends[2].kindName(), std::string("request"));
+  EXPECT_TRUE(sends[2].answered);
+  EXPECT_EQ(sends[3].reqType, mm::kReqTypeGetOwnerInfo);
+  const std::string log = logOf(body);
+  EXPECT_NE(log.find("no reply on a reused session: logging in again once"), std::string::npos) << log;
+  EXPECT_NE(log.find("the late reply to a request this job sent arrived instead"), std::string::npos) << log;
+  EXPECT_NE(log.find("logged in as read-only"), std::string::npos) << log;
+  EXPECT_EQ(log.find("refused"), std::string::npos) << "nothing refused anything: " << log;
+}
+
+TEST_F(RunnerTest, ALateRequestReplyAndNoLoginReplyAtAllIsWhatASilenceGives) {
+  mesh.grant(self(), mm::kPermReadOnly);
+  run(fake::Job(21782, "status").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
+  mesh.forgetSends();
+
+  // The late reply arrives during the re-login's wait and is dropped; nothing answers either try.
+  mesh.deliverTheNextReplyLate(1);
+  mesh.beSilentToTheNextLogins(2);
+  const std::string body =
+      run(fake::Job(21783, "status").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
+
+  EXPECT_EQ(outcomeOf(body), "unreachable") << "what a silence gives, and never `unauthorized`: " << body;
+  EXPECT_EQ(dataOf(body), "") << "no verdict about this exit node's ACL entry";
+  EXPECT_EQ(failedAtOf(body), "login") << body;
+  EXPECT_EQ(mesh.logins(), 2) << "the two tries of the login sequence, as for any silence";
+  const std::string log = logOf(body);
+  EXPECT_NE(log.find("the late reply to a request this job sent arrived instead"), std::string::npos) << log;
+  EXPECT_EQ(log.find("refused"), std::string::npos) << log;
+}
+
+// The reply a parse cannot catch: a neighbour page of a repeater with **no neighbours** is
+// `total(i16)` and `returned(i16)`, four zero bytes, which `parseLoginReply` reads as *login ok,
+// permissions 0* - and an `acl`-class `neighbours` whose login was answered at guest now runs at
+// guest and says so (task p4.30-180). So without the tag this page would arrive as a true-looking
+// *logged in as guest*, and the result would tell meshmaster.dk the ACL entry was gone.
+TEST_F(RunnerTest, AnEmptyNeighbourPageArrivingLateIsDroppedByItsTagAndNotReadAsGuest) {
+  mesh.grant(self(), mm::kPermReadOnly);
+  mesh.setNeighbours({});
+  run(fake::Job(19064, "status").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
+  mesh.forgetSends();
+
+  mesh.deliverTheNextReplyLate(1);
+  const std::string body =
+      run(fake::Job(19065, "neighbours").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << body;
+  EXPECT_EQ(loggedInAsOf(body), "") << "the page is not a login reply, so no tier was ever granted by one";
+  EXPECT_NE(logOf(body).find("the late reply to a request this job sent arrived instead"), std::string::npos) << body;
+  EXPECT_NE(logOf(body).find("logged in as read-only"), std::string::npos) << body;
+  EXPECT_EQ(logOf(body).find("logged in as guest"), std::string::npos) << body;
+  EXPECT_EQ(dataOf(body), "{\"neighbours\":[]}") << "and the page itself is the reading: " << body;
+}
+
+// The rotation probe's blank login (task p1.3-13): a late reply reaching it must not make it
+// *answered*, and least of all *refused* - the word is gone, and `probeAnsweredAs` could never be
+// one again. Were it taken for an answer, the silence that follows would be reported to
+// meshmaster.dk as the new candidate refused, and the row's fallback spent.
+TEST_F(RunnerTest, TheReachabilityProbeIsNotAnsweredByALateReplyToSomethingElse) {
+  mesh.grant(self(), mm::kPermReadOnly);
+  mesh.answerTheNextLoginWithSomethingElse(1);
+  mesh.deliverTheNextReplyLate(1);   // and that response arrives during the probe's wait
+  mesh.beSilentToTheNextLogins(2);   // the probe and the second try hear nothing
+  const std::string body = run(fake::Job(12399, "cli")
+                                   .atClass("admin")
+                                   .leasedUntil(kLease)
+                                   .withAdminPassword("not-the-admin-one")
+                                   .withCandidate("new")
+                                   .withPayload("{\"command\":\"set tx 20\"}"));
+
+  EXPECT_EQ(outcomeOf(body), "unreachable") << "nothing was learned about the candidate: " << body;
+  EXPECT_EQ(dataOf(body), "") << "no LoginSilentResult, because the probe was not answered";
+  EXPECT_EQ(mesh.logins(), 3) << "the two tries and the blank login between them";
+  EXPECT_EQ(transactionsOf(body), 3);
+  const std::string log = logOf(body);
+  EXPECT_NE(log.find("reachability probe (blank login): a reply that is not a login reply arrived instead"),
+            std::string::npos)
+      << log;
+  EXPECT_EQ(log.find("answered a blank login"), std::string::npos) << log;
+  EXPECT_EQ(log.find("refused"), std::string::npos) << log;
+}
+
+// The discover's logins (tasks p3.5-39 to 41): a response that is not a login reply used to be
+// `Refused`, which the discover reports as a path learned and an admin job that would fail at the
+// same login. Now it is dropped, the direct login is a silence, and the flooded one follows.
+TEST_F(RunnerTest, TheDiscoversLoginIsNotRefusedByAResponseThatIsNotALoginReply) {
+  mesh.setReturnPath({0x11, 0x22}, 2);
+  mesh.answerTheNextLoginWithSomethingElse(1);
+  const std::string body = run(fake::Job(12353, "discover")
+                                   .atClass("admin")
+                                   .leasedUntil(kLease)
+                                   .withAdminPassword("adm1n-pass")
+                                   .alongPath({"aabb"}));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << body;
+  EXPECT_EQ(mesh.logins(), 2) << "the direct login was not answered, so the flooded one went out";
+  const std::string data = dataOf(body);
+  EXPECT_TRUE(fake::followsShapeOf(data, fake::contract("DiscoverResult"))) << data;
+  EXPECT_NE(data.find("\"loggedInAs\":\"admin\""), std::string::npos)
+      << "the session the second login opened, not a refusal: " << data;
+  EXPECT_NE(data.find("\"hops\":[\"1122\"]"), std::string::npos) << "the path the flooded reply taught: " << data;
+  const std::string log = logOf(body);
+  EXPECT_NE(log.find("a reply that is not a login reply arrived instead"), std::string::npos) << log;
+  EXPECT_EQ(log.find("refused"), std::string::npos) << log;
+}
+
+// ---------------------------------------------------------------------------------------------
 // `failedAt`: where a failed job failed (task p1.7-28; meshmaster.dk's task p4.17-136)
 //
 // `unreachable` is two different things - a login nobody answered, which on stock firmware is
@@ -1428,16 +1586,18 @@ TEST_F(RunnerTest, AGuestLoginNobodyAnsweredIsFailedAtTheLogin) {
   EXPECT_TRUE(fake::followsShapeOf(body, fake::contract("JobResultReportFailed"))) << body;
 }
 
-// `acl`, the class of this exit node's own key: a login the repeater *refused* is an answer, and
-// it is still a failure at the login - the field says where, not why.
-TEST_F(RunnerTest, AnAclLoginTheRepeaterRefusedIsFailedAtTheLogin) {
+// `acl`, the class of this exit node's own key: a response to the login that is not a login reply
+// is dropped (task p1.10-47), so the job fails at the login as a silence does - the field says
+// where, not why, and the outcome is no longer the `unauthorized` this test asserted before.
+TEST_F(RunnerTest, AnAclLoginAnsweredWithSomethingElseIsFailedAtTheLoginAsASilenceIs) {
   mesh.grant(self(), mm::kPermReadOnly);
-  mesh.refuseTheNextLogin(1);
+  mesh.answerTheNextLoginWithSomethingElse(1);
+  mesh.beSilentToTheNextLogins(1);  // and nothing behind it, so the job ends at its login
   const std::string body =
       run(fake::Job(12423, "status").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
 
-  EXPECT_EQ(outcomeOf(body), "unauthorized");
-  EXPECT_EQ(mesh.logins(), 1) << "a refusal is an answer: the sequence stops at it";
+  EXPECT_EQ(outcomeOf(body), "unreachable");
+  EXPECT_EQ(mesh.logins(), 2) << "the drop did not end the wait, so there is a second try";
   EXPECT_EQ(failedAtOf(body), "login") << body;
 }
 
