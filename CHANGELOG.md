@@ -22,6 +22,42 @@ pull request, as `docs/` moves with code.
 
 ## Unreleased
 
+- **Only a login reply answers a login** (task p1.10-47; meshmaster.dk's
+  p4.32-186 is the server's half). **Nothing of a pin moved** - not a method of
+  `IMesh`, `IUplink`, `IPlatform`, `IClock`, `IJobExtension`, `JobContext`,
+  `ResultWriter` or `TextOut`, not `kMeshReplyDataCap` or `kMeshPathCap`, not the
+  fixture manifest (still meshmaster.dk `cd872a7`). **Two things of
+  `agent/LoginSequence.h` are gone**, and both are a compile error in your tree
+  only if you drive `loginSequence()` yourself:
+
+  - `mm::ProbeAnswer::Refused` and `mm::LoginVerdict::probeRefused`. The blank
+    login of the rotation path is **answered or silent**, because nothing of
+    MeshCore at the pin refuses a login (`handleLoginReq` answers
+    `RESP_SERVER_LOGIN_OK` or `return 0`, and so do `simple_room_server` and
+    `simple_sensor`); what used to produce the third value was a response that is
+    not a login reply, which is now dropped.
+  - `mm::kProbeAnsweredRefused`. `mm::probeAnsweredAs(verdict)` is the role's
+    `permissionName` and nothing else. The **wire** is unchanged:
+    `LoginSilentResult.probeAnsweredAs` still admits `refused` for an agent whose
+    companion emits `PUSH_CODE_LOGIN_FAIL`, and `writeLoginSilentResult` still
+    writes whatever string it is given.
+
+  **What moved behind them**: a login is awaited with tag 0 - *the next response
+  from this peer* - because `handleLoginReq` stamps its reply with the repeater's
+  own clock where `handleRequest` reflects ours, so on that wait your mesh hands
+  the runner the late reply to the request that had just timed out. The runner
+  now **drops a response that is not a login reply and waits on** - by a tag this
+  job sent, which is how an empty neighbour page (four zero bytes, which
+  `parseLoginReply` reads as *login ok, permissions 0*) is caught, and by the
+  parse otherwise - and the login is then *no reply*, with the second try as for
+  any silence. So no login the repeater did not answer is reported
+  `unauthorized` any more: `LoginTry::Refused` is a login answered **below the
+  class it was for** and nothing else. Nothing is asked of your `IMesh`: the rule
+  is in the library precisely so that a mesh which filters nothing is as safe as
+  one that does. meshmaster.dk parked ten working ACL associations as *the ACL
+  entry is gone* for want of it on 12 November 2026.
+  [`docs/library.md` §3.6](docs/library.md) is the page.
+
 - **A guest answer the job can use** (task p1.10-46). **Nothing of a pin moved**
   - not a method of `IMesh`, `IUplink`, `IPlatform`, `IClock`, `IJobExtension`,
   `JobContext`, `ResultWriter` or `TextOut`, not `kMeshReplyDataCap` or

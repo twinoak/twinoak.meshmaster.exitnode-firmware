@@ -246,7 +246,13 @@ A login is tried twice: `login (admin) try 1: no reply (flood, scope dk)`, then
 `try 2: … (flood, unscoped)` — the word beside `direct` or `flood` is the
 *shape* the packet went out in, which since task p1.8-32 names the flood scope
 (below),
-and two silences are `unreachable`. Stock firmware answers a password it does
+and two silences are `unreachable`. **Only a login reply ends a login's wait**
+(task p1.10-47): a login reply carries the repeater's own clock and no tag of
+ours, so the next response from that repeater reaches the runner whatever it is,
+and one that is not a login reply - most often the late reply to the request that
+had just timed out - is dropped with a line of its own (`login (acl) try 1: the
+late reply to a request this job sent arrived instead; dropped, and the login's
+wait goes on`) while the wait runs to its end. Stock firmware answers a password it does
 not know with the same silence a repeater off the air gives, and in one place
 that matters: a job handed the **new** candidate of an unverified credential
 rotation (meshmaster.dk's CONFIGURATION §7 step 4), where the server's fallback
@@ -261,8 +267,12 @@ new candidate: on stock firmware that silence is a refusal of the password (task
 p4.7-95); the server will try the old candidate next`, and its `data` is
 `{"reason":"silentAfterReachable","probeAnsweredAs":"read-only"}`. A probe that
 is silent too (`the blank login was not answered either`) proves nothing and the
-job is `unreachable` as before; a probe the repeater refuses is an answer and
-says `probeAnsweredAs: refused`. One transaction more, only there - `jobs`
+job is `unreachable` as before. There is no third answer: since task p1.10-47 a
+response that is not a login reply does not end the probe's wait, it is dropped
+(`reachability probe (blank login): a reply that is not a login reply arrived
+instead`) and the wait goes on, so `probeAnsweredAs` is one of the four levels
+and never `refused` - nothing of the firmware this board reads refuses a login
+at all. One transaction more, only there - `jobs`
 counts **3** for that job - and no session is stored by the probe. An `old`
 candidate, or a job with none, never probes. The serial console says the same
 in one line per probe (`jobs: job N: reachability probe (blank login): …`).
@@ -535,3 +545,30 @@ server comes back. What the four lines say is a pure function of a struct
     of the class that asked for more - and no telemetry request on the air. Put
     the entry back (`setperm <key> 1`, or *Re-grant* from the page) and the next
     read says nothing about a tier at all.
+22. A slow repeater, and the reply that came too late (task p1.10-47;
+    meshmaster.dk's p4.32-186). The walk a session cannot do: a repeater far
+    enough away, or busy enough, that a reply misses its wait. On a repeater with
+    an `active` `acl` pair through this exit node, press *Read the neighbours*
+    twice within a session's lifetime - the second job finds the session live
+    (`session reused (acl, read-only, N s old)` in its log) - and watch for the
+    sequence this task exists for:
+
+        neighbours page at 0 try 1: no reply (direct)
+        no reply on a reused session: logging in again once
+        login (acl) try 1: the late reply to a request this job sent arrived
+          instead; dropped, and the login's wait goes on (task p1.10-47)
+        login (acl) try 1: logged in as read-only, firmware level 2 (direct)
+
+    The job must end **ok** with the neighbour list, and the association must
+    stay `active`. What must **never** appear again is `login (acl) try 1:
+    refused` - and with it an `unauthorized` carrying no data, which is what
+    parked ten working pairs as *the ACL entry is gone* on 12 November 2026. The
+    first line is the one to look for: it is printed to the serial log as well
+    (`jobs: job NN: login (acl) try 1: a late reply to one of this job's own
+    requests was dropped`), so a repeater that does this often is visible on the
+    console without the job's page. A repeater that answers inside its wait every
+    time prints none of these lines, and that is the common case: the walk is
+    *watch for it*, not *make it happen*. The far end of it, if you can arrange
+    a repeater with **no neighbours** at all: its empty page is the one reply
+    that would have read as *logged in as guest*, so such a read must still say
+    `logged in as read-only` and carry no tier on the result.

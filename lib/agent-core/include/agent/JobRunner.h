@@ -384,11 +384,26 @@ class JobRunner {
     // The rotation probe (task p1.3-13; agent/LoginSequence.h): a blank login between the two
     // tries of the `new` candidate was answered, and the second try was then silent - the
     // password's silence, reported `unauthorized` with LoginSilentResult as the data. The tier
-    // the probe was answered at is `probeAnsweredRole`, or `refused` when `probeRefused` (the
-    // legacy frame); both are set by probeReachable() and mean nothing until it ran.
+    // the probe was answered at is `probeAnsweredRole`, set by probeReachable() and meaning
+    // nothing until it ran. There is no *refused* beside it since task p1.10-47: a response that
+    // is not a login reply does not end the probe's wait, so the probe is answered or silent.
     bool silentAfterReachable = false;
-    bool probeRefused = false;
     uint8_t probeAnsweredRole = 0;
+    // **The tags of the requests this job has sent** (task p1.10-47), most recent first to fall
+    // off the end. A login reply carries the repeater's own clock and no tag of ours, so a login
+    // is awaited with tag 0 and whatever the peer sends next reaches `awaitLoginReply` - and a
+    // response carrying one of these is the reply to a request of *ours*, however late, and
+    // therefore not a login reply whatever it parses as. That is the half a parse cannot catch:
+    // a neighbour page of a repeater with no neighbours is zero bytes after its tag, which
+    // `parseLoginReply` reads as *login ok, permissions 0*. Eight is more requests than a job
+    // has in flight at once by a wide margin - one, by the budget of EXIT-NODES §8 - and the
+    // ones that matter are the most recent.
+    static constexpr int kSentTagCap = 8;
+    uint32_t sentTags[kSentTagCap] = {};
+    uint8_t sentTagCount = 0;
+    uint8_t sentTagNext = 0;
+    void rememberTag(uint32_t tag);
+    bool sentTag(uint32_t tag) const;
     // The restore (task p4.1-60): sent once per job, by the handler that needs its verdict in
     // the result (config.read) or by the runner after the handler.
     bool aclRestoreDone = false;
@@ -408,8 +423,9 @@ class JobRunner {
   static const char* failedAtOf(const ClaimedJob& job, const Context& ctx, Outcome outcome);
 
   // What one login came to: agent/LoginSequence.h's reading, which is this runner's. `Refused`
-  // is a reply that was not a login-ok, and a login answered below the class it was for (task
-  // p3.5-41); `NoReply` is what stock firmware answers a key and password it does not accept.
+  // is a login answered **below the class it was for** (task p3.5-41) and nothing else since
+  // task p1.10-47; `NoReply` is what stock firmware answers a key and password it does not
+  // accept, and what a wait that only dropped late replies comes to.
   using LoginResult = LoginTry;
 
   Outcome runJob(const ClaimedJob& job, Context& ctx, size_t& dataLen);
@@ -453,12 +469,20 @@ class JobRunner {
   // One login: counted, logged, the session bookkeeping a reply implies, and no policy beyond
   // that. ensureSession() is this twice; a discover is this once, for the path.
   LoginResult loginOnce(const ClaimedJob& job, Context& ctx, const char* material, const char* what);
+  // **The wait a login reply ends, and nothing else does** (task p1.10-47). The login's whole
+  // wait, in which a response that is not a login reply - another kind, a tag this job sent, or
+  // bytes `parseLoginReply` does not know - is dropped with a line in the job's log and the wait
+  // goes on to its end. True with `out` filled from a login reply; false is *no reply*, which is
+  // what stock firmware answers a login it will not take anyway. Both logins of this file use
+  // it, so neither can call a late reply a refusal.
+  bool awaitLoginReply(const ClaimedJob& job, Context& ctx, const char* what, LoginReply& out);
   // One blank login between the two tries of the `new` candidate of an unverified rotation (task
   // p1.3-13; meshmaster.dk's task p4.7-95): one transaction through the gate as every send is
   // (refused by the gate: no probe, false), the ACL login the status probes already make, and
   // **no session stored** whatever came back - `sessions_` is untouched, and the next job logs
-  // in afresh. True when the repeater answered, at any level or with the legacy refusal, which
-  // lands on ctx.probeAnsweredRole / ctx.probeRefused; false when it was silent.
+  // in afresh. True when the repeater answered with a login reply, at whatever level, which
+  // lands on ctx.probeAnsweredRole; false when it was silent - which since task p1.10-47 is also
+  // a wait in which nothing but a late reply to something else arrived.
   bool probeReachable(const ClaimedJob& job, Context& ctx);
   // A login at the job's class if none is live: agent/LoginSequence.h's two tries, with the
   // probe between them on the one path that needs it. Returns Ok when there is a session to use.
