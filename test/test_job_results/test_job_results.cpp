@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include <agent/Airtime.h>
 #include <agent/Iso8601.h>
 #include <agent/JobEnvelopes.h>
 #include <agent/JobResults.h>
@@ -102,15 +103,25 @@ const char* kSampleStatusJson =
     "{\"batteryMv\":4012,\"noiseFloorDbm\":-112,\"lastRssi\":-97,\"lastSnr\":6.25,\"uptimeS\":864000,"
     "\"txQueueLen\":0,\"packets\":{\"recv\":12345,\"sent\":6789,\"recvFlood\":900,\"recvDirect\":11445,"
     "\"sentFlood\":12,\"sentDirect\":6777},\"airtimeS\":1234,\"dups\":{\"flood\":3,\"direct\":0},"
-    "\"errors\":{\"eventsFull\":0,\"txFail\":2},\"firmware\":\"v1.17.1\"}";
+    "\"errors\":{\"eventsFull\":0,\"txFail\":2},\"firmware\":\"v1.17.1\",\"nodeName\":\"Grenaa Chimney #1\","
+    "\"ownerInfo\":\"TwinOak\"}";
+
+// The owner-info reply as the firmware's `sprintf` leaves it, parsed by the one parser the board
+// uses (agent/ReplyCodec.h): what the result writer is handed is never built by hand here.
+mm::OwnerInfoReply ownerInfo(const std::string& text) {
+  mm::OwnerInfoReply owner;
+  EXPECT_TRUE(mm::parseOwnerInfo(reinterpret_cast<const uint8_t*>(text.data()), text.size(), owner)) << text;
+  return owner;
+}
 
 // ------------------------------------------------------------------ the shapes
 
 TEST(StatusResult, TheSameInputMakesTheDotNetFixtureByteForByte) {
   const mm::StatusReading s = contractSample();
   const mm::ErrorCounter errors[] = {{"eventsFull", 0}, {"txFail", 2}};
+  const mm::OwnerInfoReply owner = ownerInfo("v1.17.1\nGrenaa Chimney #1\nTwinOak");
   char out[768];
-  const std::size_t len = mm::writeStatusResult(s, errors, 2, "v1.17.1", out, sizeof out);
+  const std::size_t len = mm::writeStatusResult(s, errors, 2, &owner, out, sizeof out);
   ASSERT_GT(len, 0u);
   EXPECT_EQ(std::string(out, len), fixture("StatusResult"));
   EXPECT_EQ(std::string(out, len), std::string(kSampleStatusJson));
@@ -301,44 +312,78 @@ TEST(StatusResult, TheTranscribedReplyMakesTheResultTheDotNetAgentMakes) {
             "\"txQueueLen\":0,\"packets\":{\"recv\":12345,\"sent\":6789,\"recvFlood\":9000,\"recvDirect\":3345,"
             "\"sentFlood\":4000,\"sentDirect\":2789},\"airtimeS\":1234,\"dups\":{\"flood\":3,\"direct\":0},"
             "\"errors\":{\"eventsFull\":0,\"recvErrors\":2,\"rxAirtimeS\":5678}}")
-      << "no `firmware`: it is a second request and only an acl-class read makes it";
+      << "none of the three: they are a second request, and this read did not make it";
 }
 
-TEST(StatusResult, AnAclReadCarriesTheFirmwareTheOwnerInfoRequestFetched) {
+TEST(StatusResult, AReadCarriesAllThreeLinesTheOwnerInfoRequestFetched) {
   const auto stats = companion("status-response", 8);
   mm::StatusReading s;
   ASSERT_TRUE(mm::parseRepeaterStats(stats.data(), stats.size(), s));
-  const auto owner = companion("binary-response-owner-info", 6);
-  char firmware[mm::kMaxFirmwareVersionLen + 1] = {0};
-  ASSERT_TRUE(mm::parseOwnerInfoFirmware(owner.data(), owner.size(), firmware, sizeof firmware));
+  const auto reply = companion("binary-response-owner-info", 6);
+  mm::OwnerInfoReply owner;
+  ASSERT_TRUE(mm::parseOwnerInfo(reply.data(), reply.size(), owner));
 
   mm::ErrorCounter errors[mm::kMaxStatusErrors];
   const int n = mm::statusErrors(s, errors, mm::kMaxStatusErrors);
   char out[768];
-  const std::size_t len = mm::writeStatusResult(s, errors, n, firmware, out, sizeof out);
+  const std::size_t len = mm::writeStatusResult(s, errors, n, &owner, out, sizeof out);
   ASSERT_GT(len, 0u);
-  EXPECT_NE(std::string(out, len).find("\"firmware\":\"v1.17.1\"}"), std::string::npos);
+  EXPECT_NE(std::string(out, len).find("\"firmware\":\"v1.17.1\",\"nodeName\":\"Grenaa Chimney #1\",\"ownerInfo\":\"TwinOak\"}"),
+            std::string::npos)
+      << std::string(out, len);
 }
 
-// The second transaction of an acl-class status read, and when it is spent (EXIT-NODES §7,
-// meshmaster.dk's task p4.3-68). readsFirmwareVersion() is the one rule - class `acl` unless the
-// claim's payload says the version is not wanted this time - and `firmware` is in the result
+// 181's contract, field by field, on the three replies that are not the model's three lines: an
+// owner info of two lines keeps its newline (JSON-escaped, as every string here is), a line the
+// reply carried empty is `""` and not left out, and a line the reply did not carry at all is
+// absent. The difference matters at the other end: an empty reading is stored - *the owner has
+// written nothing* - and an absent one stores nothing.
+TEST(StatusResult, AnEmptyLineIsWrittenAndAnAbsentOneIsLeftOut) {
+  const mm::StatusReading s = contractSample();
+  mm::ErrorCounter errors[mm::kMaxStatusErrors];
+  const int n = mm::statusErrors(s, errors, mm::kMaxStatusErrors);
+  char out[768];
+
+  struct Case {
+    const char* what;
+    const char* reply;
+    const char* tail;
+  } cases[] = {
+      {"two lines of owner info", "v1.18.0\nGrenaa\nTwinOak\nthomas@twinoak.dk",
+       "\"firmware\":\"v1.18.0\",\"nodeName\":\"Grenaa\",\"ownerInfo\":\"TwinOak\\nthomas@twinoak.dk\"}"},
+      {"an empty owner info", "v1.18.0\nGrenaa\n", "\"firmware\":\"v1.18.0\",\"nodeName\":\"Grenaa\",\"ownerInfo\":\"\"}"},
+      {"an empty name and an empty owner info", "v1.18.0\n\n", "\"firmware\":\"v1.18.0\",\"nodeName\":\"\",\"ownerInfo\":\"\"}"},
+      {"the version alone", "v1.18.0", "\"firmware\":\"v1.18.0\"}"},
+  };
+  for (const Case& c : cases) {
+    const mm::OwnerInfoReply owner = ownerInfo(c.reply);
+    const std::size_t len = mm::writeStatusResult(s, errors, n, &owner, out, sizeof out);
+    ASSERT_GT(len, 0u) << c.what;
+    const std::string json(out, len);
+    EXPECT_NE(json.find(c.tail), std::string::npos) << c.what << ": " << json;
+  }
+}
+
+// The second transaction of a status read, and when it is spent (EXIT-NODES §7,
+// meshmaster.dk's tasks p4.3-68 and p4.30-181). readsOwnerInfo() is the one rule - the claim's
+// payload, and **nothing about the class** since 181 - and the three fields are in the result
 // when that rule said yes and absent when it said no, which is what a reader of the result has
-// to be able to tell apart from a version read that was attempted and failed.
-TEST(StatusResult, TheFirmwareIsReadOnlyWhenTheClaimAsksForIt) {
+// to be able to tell apart from a read that was attempted and failed.
+TEST(StatusResult, TheOwnerInfoIsReadOnlyWhenTheClaimAsksForIt) {
   const auto stats = companion("status-response", 8);
   mm::StatusReading s;
   ASSERT_TRUE(mm::parseRepeaterStats(stats.data(), stats.size(), s));
-  const auto owner = companion("binary-response-owner-info", 6);
-  char firmware[mm::kMaxFirmwareVersionLen + 1] = {0};
-  ASSERT_TRUE(mm::parseOwnerInfoFirmware(owner.data(), owner.size(), firmware, sizeof firmware));
+  const auto reply = companion("binary-response-owner-info", 6);
+  mm::OwnerInfoReply owner;
+  ASSERT_TRUE(mm::parseOwnerInfo(reply.data(), reply.size(), owner));
   mm::ErrorCounter errors[mm::kMaxStatusErrors];
   const int n = mm::statusErrors(s, errors, mm::kMaxStatusErrors);
 
-  // Three claims, parsed as they arrive: an acl read whose payload says nothing (an older
-  // server, and that means read it), the same read with `version: false` - forty-seven of a
-  // repeater's forty-eight daily reads - and a guest read, which never fetches the version at
-  // all, because only the association's verify step needs it.
+  // Five claims, parsed as they arrive: a read whose payload says nothing (an older server, and
+  // that means read it) at each of the three classes a status read goes at, and `version: false`
+  // at two of them - twenty-three of a repeater's twenty-four daily reads. The **guest** rows
+  // are 181's change: `handleRequest` checks no permission for this request, and the node name
+  // and the owner info are wanted for every repeater a person can see.
   struct Case {
     const char* what;
     const char* claimClass;
@@ -348,7 +393,9 @@ TEST(StatusResult, TheFirmwareIsReadOnlyWhenTheClaimAsksForIt) {
   } cases[] = {
       {"acl, payload {}", "acl", "{}", true, 2},
       {"acl, version false", "acl", "{\"version\":false}", false, 1},
-      {"guest, payload {}", "guest", "{}", false, 1},
+      {"guest, payload {}", "guest", "{}", true, 2},
+      {"guest, version false", "guest", "{\"version\":false}", false, 1},
+      {"admin, payload {}", "admin", "{}", true, 2},
   };
 
   for (const Case& c : cases) {
@@ -366,26 +413,30 @@ TEST(StatusResult, TheFirmwareIsReadOnlyWhenTheClaimAsksForIt) {
         mm::parseClaimResponse(&reply[0], reply.size(), jobs, mm::kClaimMax, count, serverTime, err, sizeof err))
         << c.what << ": " << err;
     ASSERT_EQ(count, 1) << c.what;
-    EXPECT_EQ(mm::readsFirmwareVersion(jobs[0]), c.reads) << c.what;
+    EXPECT_EQ(mm::readsOwnerInfo(jobs[0]), c.reads) << c.what;
 
     // One status request, and the owner-info request only when the rule said so: the job's
     // transaction count is what the result reports and what the server prices.
-    const int transactions = 1 + (mm::readsFirmwareVersion(jobs[0]) ? 1 : 0);
+    const int transactions = 1 + (mm::readsOwnerInfo(jobs[0]) ? 1 : 0);
     EXPECT_EQ(transactions, c.transactions) << c.what;
+    EXPECT_EQ(mm::transactionsFor("status", jobs[0].credentialClass), 2)
+        << c.what << ": §7's row is two at every class, and the payload is what takes it back down";
 
     char out[768];
     const std::size_t len =
-        mm::writeStatusResult(s, errors, n, mm::readsFirmwareVersion(jobs[0]) ? firmware : nullptr, out, sizeof out);
+        mm::writeStatusResult(s, errors, n, mm::readsOwnerInfo(jobs[0]) ? &owner : nullptr, out, sizeof out);
     ASSERT_GT(len, 0u) << c.what;
-    const bool present = std::string(out, len).find("\"firmware\":\"v1.17.1\"") != std::string::npos;
-    EXPECT_EQ(present, c.reads) << c.what;
+    const std::string json(out, len);
+    EXPECT_EQ(json.find("\"firmware\":\"v1.17.1\"") != std::string::npos, c.reads) << c.what;
+    EXPECT_EQ(json.find("\"nodeName\":\"Grenaa Chimney #1\"") != std::string::npos, c.reads) << c.what;
+    EXPECT_EQ(json.find("\"ownerInfo\":\"TwinOak\"") != std::string::npos, c.reads) << c.what;
   }
 
   // And no other type fetches it, whatever its class says.
   mm::ClaimedJob telemetry;
   std::snprintf(telemetry.type, sizeof telemetry.type, "telemetry");
   telemetry.credentialClass = mm::CredentialClass::Acl;
-  EXPECT_FALSE(mm::readsFirmwareVersion(telemetry));
+  EXPECT_FALSE(mm::readsOwnerInfo(telemetry));
 }
 
 TEST(TelemetryResult, TheTranscribedReplyMakesTheFourChannelsTheDotNetAgentMakes) {

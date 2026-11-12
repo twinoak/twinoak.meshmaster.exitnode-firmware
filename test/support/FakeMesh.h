@@ -238,6 +238,15 @@ class FakeMesh : public mm::IMesh {
   uint32_t repeaterClock() const { return repeaterNow_; }
   void setStatusBytes(std::vector<uint8_t> bytes) { stats_ = std::move(bytes); }
   void setTelemetryBytes(std::vector<uint8_t> bytes) { telemetry_ = std::move(bytes); }
+  // FIRMWARE_VER_LEVEL, which the login reply carries and which the owner-info request needs 2
+  // of (meshmaster.dk's task p4.30-181 gave the fake companion the same knob). A repeater below
+  // that level does not know the request **at all**, so this fake answers it with the silence
+  // `handleRequest`'s `return 0` is - which is what makes a test of the skip worth writing: the
+  // library must not spend a timeout finding out.
+  void setFirmwareVerLevel(uint8_t level) { firmwareVerLevel_ = level; }
+  // The owner-info reply, for a repeater whose three lines are not this fixture's three: an
+  // owner info of two lines, an empty one, a reply with the version alone.
+  void setOwnerInfoReply(const std::string& text) { ownerInfo_.assign(text.begin(), text.end()); }
   bool repeaterRebooted() const { return rebooted_; }
   int adverts() const { return adverts_; }
   int floodAdverts() const { return floodAdverts_; }
@@ -496,7 +505,7 @@ class FakeMesh : public mm::IMesh {
     body.push_back((client->permissions & mm::kPermRoleMask) == mm::kPermAdmin ? 1 : 0);
     body.push_back(client->permissions);
     for (int i = 0; i < 4; i++) body.push_back(0xAB);  // the random blob that makes the hash unique
-    body.push_back(kFirmwareVerLevel);
+    body.push_back(firmwareVerLevel_);
     arm(response(body, senderTimestamp, /*repeaterStamps=*/true));
     return how;
   }
@@ -809,6 +818,9 @@ class FakeMesh : public mm::IMesh {
       return body;
     }
     if (reqType == mm::kReqTypeGetOwnerInfo) {
+      // answer: request-silent - REQ_TYPE_GET_OWNER_INFO is FIRMWARE_VER_LEVEL >= 2, and a
+      // repeater that does not know a request type answers it with nothing at all.
+      if (firmwareVerLevel_ < mm::kOwnerInfoVerLevel) return {};
       // answer: owner-info
       return ownerInfo_;
     }
@@ -1065,6 +1077,7 @@ class FakeMesh : public mm::IMesh {
   std::vector<uint8_t> stats_;
   std::vector<uint8_t> telemetry_;
   std::vector<uint8_t> ownerInfo_;
+  uint8_t firmwareVerLevel_ = kFirmwareVerLevel;
   std::string firmware_ = "v1.17.1 (Build: 27 Sep 2025)";
   std::string board_ = "Heltec";
   std::string regionListing_ = "* F\n dk F\n";

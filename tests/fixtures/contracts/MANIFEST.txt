@@ -1,5 +1,5 @@
 # The contract fixtures of the .NET agent, copied - never edited here.
-# source: twinoak/meshmaster.dk/tests/fixtures/contracts at commit 42e4d45145eb9c64bda89f7b4c98288fd71a12c4
+# source: twinoak/meshmaster.dk/tests/fixtures/contracts at commit cd872a7c6c38653114e7686407f4394ce414e0cf
 # written by tools/sync-fixtures.ps1; see README.md in this directory
 #
 # sha256                                                           bytes  name
@@ -54,7 +54,8 @@ be45b910f4b0557c96dc4f532e00b23606bc938d7f82c4ee455de357e270c46e     107  Firmwa
 dc7ff0a2038bb700cea361ce1766f3dda059896ecf25e77518ce6efae5fc81f0     135  HeartbeatReply.json
 6ee498fbe9c18e1db7baec435f5d0e72fc13b0ce8681327666dd45de1c286a0d     126  JobCredential.json
 f39804cbd8b263563ddf42a595076e1102ed76a4dcbcc0baeeb70b009ea35865      65  JobResultReply.json
-34cd010a95cad09aedd255f885380001052975cf9ddb7ae90befd956e865f80e     545  JobResultReport.json
+1988b7bd8aeb5a4bcce7311fb33d82ca5e0207dd418364702bd4e948f5ec1683     598  JobResultReport.json
+b3d315b1ab6cf52d922d0b9df34ccbca7e63e7a9b286961b8d6862062c332eac     383  JobResultReportAtGuest.json
 0aef12f18aa353b60a291a93aaae9514e3a8b0ac06daf2e8b86699d7d965970b     247  JobResultReportFailed.json
 35e98e9b2f5470ade07dfca24441c5f7a3fc420bda6df6c56fdcb7dea2c00933      33  JobTimeouts.json
 196a5c5249aad26ce839d5a5a525b18989a89f6273da54edad373d0a473643df     147  JsonEscaping.json
@@ -75,7 +76,7 @@ ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356       3  Reboot
 7b731d186f9ad59a58b90c94d1288177716b09356971bf482dccc0fe6ff084df      34  RebootResult.json
 22507394421e31d00a74fc1e79a4a5fc7118b583c429698a85f2c33a9308e99d      57  RepeaterRef.json
 ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356       3  StatusPayload.json
-b3aaafec07681e4e0c6f1db24675cacd796c59b6e2af16b2941beb7aca3d8c11     311  StatusResult.json
+ee8063bcdf61e18d35da8e1a2a804ced3dd571c097c9c85f2b840da851362703     364  StatusResult.json
 ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356       3  TelemetryPayload.json
 ea61c2030bd102149d75c65f746b1887f99378be386d138fd1ba61f1c191bc81     130  TelemetryResult.json
 ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356       3  TracePayload.json

@@ -6,7 +6,8 @@
 //
 //   StatusResult(int? BatteryMv, int? NoiseFloorDbm, int? LastRssi, double? LastSnr, long? UptimeS,
 //                int? TxQueueLen, PacketCounters? Packets, long? AirtimeS, DuplicateCounters? Dups,
-//                IReadOnlyDictionary<string,long>? Errors, string? Firmware)
+//                IReadOnlyDictionary<string,long>? Errors, string? Firmware, string? NodeName,
+//                string? OwnerInfo)
 //   PacketCounters(long? Recv, long? Sent, long? RecvFlood, long? RecvDirect, long? SentFlood, long? SentDirect)
 //   DuplicateCounters(long? Flood, long? Direct)
 //   TelemetryResult(IReadOnlyList<LppChannel> Channels); LppChannel(int Channel, string Type, double Value, string? Unit)
@@ -39,9 +40,17 @@ namespace mm {
 constexpr int kMaxStatusErrors = 3;
 int statusErrors(const StatusReading& s, ErrorCounter* out, int max);
 
-// `firmware` is nullptr for every class but `acl`, where the owner-info request fetched it.
-size_t writeStatusResult(const StatusReading& s, const ErrorCounter* errors, int errorCount, const char* firmware,
-                         char* out, size_t cap);
+// `owner` is what the owner-info request answered (agent/ReplyCodec.h), or **nullptr** for a
+// read that did not make it - a claim that said the reply is not wanted, or a repeater whose
+// login said a firmware level below kOwnerInfoVerLevel. All three of `firmware`, `nodeName` and
+// `ownerInfo` are then absent from the result, and absent is what the server stores nothing for.
+//
+// A line the reply **carried empty** is written as `""` and not left out: that is the difference
+// between *the owner has written nothing* and *nobody has asked*, and the server keeps the two
+// apart (meshmaster.dk's task p4.30-181). Both values are JSON-escaped like every other string
+// here, so the newline of a two-line owner info travels as `\n`.
+size_t writeStatusResult(const StatusReading& s, const ErrorCounter* errors, int errorCount,
+                         const OwnerInfoReply* owner, char* out, size_t cap);
 
 size_t writeTelemetryResult(const LppReading* readings, int count, char* out, size_t cap);
 

@@ -37,10 +37,13 @@ constexpr int kTransactionsForAclRestore = 1;
 // is as long as - the number of neighbours for `neighbours` - and -1 is what the system assumes
 // when nobody says otherwise: one page.
 //
-// Two of these are not one: an `acl`-class `status` costs **two**, because the firmware version
-// comes from a second, owner-info request and the association's verify step records the version
-// it was proved on; and `neighbours` costs one transaction **per page** of nine, because the
+// Two of these are not one: a `status` read costs **two**, because the owner-info reply comes
+// from a second request; and `neighbours` costs one transaction **per page** of nine, because the
 // firmware answers a page at a time.
+// `credentialClass` no longer decides what a `status` read costs (meshmaster.dk's task
+// p4.30-181 took the class parameter off `TransactionCosts.StatusRequests` for the same reason):
+// the owner-info request is made at every class. It is still in the signature because the table
+// of EXIT-NODES §7 is a table of (type, class) and every other row reads it.
 int transactionsFor(const char* type, CredentialClass credentialClass, int items = -1);
 
 // Requests for a neighbour list of `neighbours` entries; unknown or none is one.

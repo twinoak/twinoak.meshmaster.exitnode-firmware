@@ -9,8 +9,10 @@
 //
 // Thirteen types. Four of them log in as this board and nothing else (task 03):
 //
-//   status      REQ_TYPE_GET_STATUS, and at class `acl` the owner-info request too, for the
-//               firmware version the association's verify step records
+//   status      REQ_TYPE_GET_STATUS, and the owner-info request beside it when the claim asks
+//               for the reply - at any class since meshmaster.dk's task p4.30-181, for the
+//               firmware version the association's verify step records and for the node name and
+//               the owner info the repeater answers to anybody who logs in
 //   telemetry   REQ_TYPE_GET_TELEMETRY_DATA, Cayenne LPP decoded with the channel-0 rule
 //   neighbours  REQ_TYPE_GET_NEIGHBOURS, nine a page, eight-byte prefixes, paged to the count
 //   trace       a trace packet along the round trip; `unsupported` at no transaction when the
@@ -359,6 +361,16 @@ class JobRunner {
     uint8_t sessionRole = 0;
     bool grantedBelowClass = false;
     uint8_t grantedRole = 0;
+    // FIRMWARE_VER_LEVEL as **this job's own login** was answered with (meshmaster.dk's task
+    // p4.30-181, `JobContext.FirmwareVerLevel` there). `hasFirmwareLevel` is false while no login
+    // of this job has come back - a session reused from an earlier job, or a legacy reply that
+    // carries no level - and **not knowing is never a reason to refuse**: the owner-info request
+    // is skipped only on a level this login actually named and that is below
+    // kOwnerInfoVerLevel. In practice a status read is the first job of its group and makes the
+    // login itself, so a repeater too old for the request costs at most one timeout a day in the
+    // arrangement where it does not.
+    bool hasFirmwareLevel = false;
+    uint8_t firmwareLevel = 0;
     // The rotation probe (task p1.3-13; agent/LoginSequence.h): a blank login between the two
     // tries of the `new` candidate was answered, and the second try was then silent - the
     // password's silence, reported `unauthorized` with LoginSilentResult as the data. The tier

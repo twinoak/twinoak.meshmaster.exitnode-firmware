@@ -63,8 +63,9 @@ int transactionsOf(const ClaimedJob& job) {
     items = job.apply.commandCount;
   }
   int n = transactionsFor(job.type, job.credentialClass, items);
-  // A status read the claim said needs no version spends nothing on it (meshmaster.dk's p4.3-68).
-  if (std::strcmp(job.type, "status") == 0 && !readsFirmwareVersion(job)) n = 1;
+  // A status read whose claim said the owner-info reply is not wanted spends nothing on it
+  // (meshmaster.dk's p4.3-68, and p4.30-181 for the class no longer deciding).
+  if (std::strcmp(job.type, "status") == 0 && !readsOwnerInfo(job)) n = 1;
   // The login every class but `none` needs, and the restore an admin session on a repeater that
   // holds a grant for this exit node ends with (task p4.1-60). The restore is counted wherever
   // there is a grant, which over-states a guest-class job by one: an estimate a battery spends
