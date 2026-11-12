@@ -37,6 +37,8 @@ namespace {
 #define g_command (scratch_.command)
 #define g_applyOutcome (scratch_.applyOutcome)
 #define g_secretLine (scratch_.secretLine)
+#define g_cliPrefix (scratch_.cliPrefix)
+#define g_line (scratch_.line)
 constexpr size_t kDataCap = JobRunner::kDataCap;
 constexpr size_t kBodyCap = JobRunner::kBodyCap;
 // How long a line that expects no reply is given to leave the radio before the next is queued:
@@ -516,13 +518,17 @@ Outcome JobRunner::exchange(const ClaimedJob& job, Context& ctx, const char* wha
     if (!text) ctx.rememberTag(tag);
     char shape[48];
     describeSend(sent, mode, shape, sizeof shape);
-    const bool answered = text ? mesh_->awaitText(requestWaitMs(job), pump_) : mesh_->awaitReply(tag, requestWaitMs(job), pump_);
+    // A console reply belongs to its line (task p1.10-49, awaitCliReply below): a text that does
+    // not carry the prefix this attempt went out with is a late reply to another line, dropped
+    // while the wait goes on. The reply that is this line's is in `g_cliReply` by then, with its
+    // prefix taken off.
+    const bool answered =
+        text ? awaitCliReply(job, what, attempt) : mesh_->awaitReply(tag, requestWaitMs(job), pump_);
     if (answered) {
       flood_.answered();
       ctx.hasRtt = true;
       ctx.rttMs = static_cast<int>(millis() - started);
       g_log.add("%s try %d: ok (%s, %lu ms)", what, attempt, shape, static_cast<unsigned long>(ctx.rttMs));
-      if (text) std::memcpy(g_cliReply, mesh_->reply().text, sizeof g_cliReply);
       return Outcome::Ok;
     }
     g_log.add("%s try %d: no reply (%s)", what, attempt, shape);
@@ -544,21 +550,112 @@ Outcome JobRunner::request(const ClaimedJob& job, Context& ctx, const char* what
                   [&](uint32_t& tag) { return mesh_->sendRequest(reqType, data, len, tag); });
 }
 
+// ------------------------------------------------------------------ a console reply belongs to its line
+//
+// **A console reply carries no tag, so the line carries one of its own** (task p1.10-49;
+// agent/CliReplies.h holds the reading of the firmware). Until this task the first text of CLI
+// data from the peer while one was awaited was the answer, whatever it answered - so on this
+// mesh, where replies arrive later than this board waits (task p1.10-47, and meshmaster.dk's
+// task 187 has the numbers), the reply to `get name` could arrive while `get radio` was awaited
+// and be stored as the radio. A configuration read is thirty such lines in a row, and nothing
+// would show a swapped value either: a `get` answers a value and not the key it belongs to.
+//
+// `handleCommand` reflects a two-character prefix and a `|`, so `a7|get name` is answered
+// `a7|> …`. Every console line of a job now carries one, counted out per line and per try, and
+// only a reply that starts with it is the answer; another prefix or none is a late reply,
+// dropped with a line in the job's log while the wait goes on. Where the prefix cannot be used -
+// a repeater whose firmware level this job does not know, a line the firmware reads before it
+// reads a prefix, a line whose reply fills the repeater's reply window - the line goes exactly
+// as it did before, which is what `cliLineTakesPrefix` and `kCliPrefixVerLevel` decide.
+//
+// Nobody has seen a swapped value. 47 and 48 are the two that were seen; this is the third.
+
+void JobRunner::nextCliPrefix(const ClaimedJob& job, Context& ctx, const char* command, bool escape) {
+  g_cliPrefix[0] = '\0';
+  // An escape line ends a mode the repeater is in, and `handleCommand` answers it **before** it
+  // reads a prefix (the region loader's branch returns at MyMesh.cpp:1231): the region
+  // terminator is one space, which `cliLineTakesPrefix` would refuse anyway, and any other line
+  // the server marks as one is refused here for the same reason.
+  if (escape || !cliLineTakesPrefix(command)) return;
+  // Nothing looser than the level the login named (agent/CliReplies.h): not knowing is a line
+  // sent as it was sent before this task, never a guess.
+  if (!ctx.hasFirmwareLevel || ctx.firmwareLevel < kCliPrefixVerLevel) {
+    if (!ctx.cliPrefixNoted) {
+      ctx.cliPrefixNoted = true;
+      g_log.add("this job has not been told the repeater's firmware level, so its console lines carry no prefix: a "
+                "reply that arrives late cannot be told from this line's own (task p1.10-49)");
+    }
+    return;
+  }
+  if (!ctx.hasCliPrefixSeq) {
+    ctx.hasCliPrefixSeq = true;
+    uint8_t seed = 0;
+    randomBytes(&seed, 1);
+    ctx.cliPrefixSeq = seed;
+  }
+  cliPrefixFor(ctx.cliPrefixSeq++, g_cliPrefix, sizeof g_cliPrefix);
+  if (!ctx.cliPrefixNoted) {
+    ctx.cliPrefixNoted = true;
+    g_log.add("every console line of this job carries the firmware's two-character prefix, so only a reply that "
+              "carries this line's own is its answer (task p1.10-49)");
+    LOG_I("jobs: job %lld: console lines carry a prefix: firmware level %u", job.id,
+          static_cast<unsigned>(ctx.firmwareLevel));
+  }
+}
+
+bool JobRunner::awaitCliReply(const ClaimedJob& job, const char* what, int attempt) {
+  // A bound on the drops of one wait, as a login's has (task p1.10-47): eight late console
+  // replies while one line is awaited is a repeater answering something else, and this line was
+  // not answered. The drops do not extend the wait.
+  constexpr int kDropsPerWait = 8;
+  const uint32_t deadline = millis() + requestWaitMs(job);
+  for (int dropped = 0; dropped < kDropsPerWait; dropped++) {
+    const int32_t left = static_cast<int32_t>(deadline - millis());
+    if (left <= 0) return false;
+    if (!mesh_->awaitText(static_cast<uint32_t>(left), pump_)) return false;
+    const char* mine = cliReplyBehindPrefix(mesh_->reply().text, g_cliPrefix);
+    if (mine != nullptr) {
+      std::snprintf(g_cliReply, sizeof g_cliReply, "%s", mine);
+      return true;
+    }
+    // No byte of the dropped reply is printed: a console reply can be the echo of a `password`
+    // line, and no reply's bytes are ever a log line's argument.
+    g_log.add("%s try %d: a console reply that does not carry this line's prefix arrived instead; dropped, and the "
+              "wait goes on (task p1.10-49)",
+              what, attempt);
+    LOG_I("jobs: job %lld: %s try %d: a console reply that was not this line's was dropped", job.id, what, attempt);
+  }
+  return false;
+}
+
 Outcome JobRunner::cliLine(const ClaimedJob& job, Context& ctx, const char* what, const char* command, bool retry,
                            uint32_t* timestampUsed, bool sensitive, bool escape) {
   g_cliReply[0] = '\0';
   // Each attempt is its own sender timestamp, strictly above the last: the mesh draws it from the
   // one series every tag and every line of this board come from and hands it back (IMesh::sendCli,
   // task p1.5-15), because the repeater answers an equal one with nothing and runs nothing, and
-  // drops a lower one. A CLI reply carries no tag, so the timestamp stands in for one here.
-  return exchange(
+  // drops a lower one. A CLI reply carries no tag, so the timestamp stands in for one here - and
+  // the prefix, which the repeater reflects, stands in for one on the way back (task p1.10-49).
+  const Outcome got = exchange(
       job, ctx, what, retry, true,
       [&](uint32_t& tag) {
-        const SendResult sent = mesh_->sendCli(command, sensitive, tag);
+        // A fresh prefix per attempt, so a late reply to try 1 is not the answer to try 2 of a
+        // line that is not safe to run twice.
+        nextCliPrefix(job, ctx, command, escape);
+        const char* line = command;
+        if (g_cliPrefix[0] != '\0') {
+          std::snprintf(g_line, sizeof g_line, "%s%s", g_cliPrefix, command);
+          line = g_line;
+        }
+        const SendResult sent = mesh_->sendCli(line, sensitive, tag);
         if (timestampUsed != nullptr) *timestampUsed = tag;
         return sent;
       },
       escape);
+  // `g_line` carried the bytes of a `password` or `set guest.password` line, as `g_secretLine`
+  // did: gone the moment the exchange is over, and under the same rule.
+  if (sensitive) wipeBytes(g_line, sizeof g_line);
+  return got;
 }
 
 Outcome JobRunner::adminSession(const ClaimedJob& job, Context& ctx) {

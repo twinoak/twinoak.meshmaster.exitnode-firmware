@@ -22,6 +22,43 @@ pull request, as `docs/` moves with code.
 
 ## Unreleased
 
+- **A console reply belongs to its line** (task p1.10-49). **Nothing of a pin
+  moved** - not a method of `IMesh`, `IUplink`, `IPlatform`, `IClock`,
+  `IJobExtension`, `JobContext`, `ResultWriter` or `TextOut`, not
+  `kMeshReplyDataCap` or `kMeshPathCap`, not the fixture manifest (still
+  meshmaster.dk `cd872a7`), and no constant changed its value. **Nothing of
+  yours stops compiling, and nothing is asked of your `IMesh`** - three
+  functions were *added* to `agent/CliReplies.h` (`cliPrefixFor`,
+  `cliLineTakesPrefix`, `cliReplyBehindPrefix`) and the library is their only
+  caller.
+
+  **What moved behind it**: a CLI reply carries no tag, so the first text of CLI
+  data from the peer while one was awaited was the answer - whatever it
+  answered. The library now puts the **two-character prefix `handleCommand`
+  reflects** on every console line, counted out per line and per try, and only a
+  reply that carries this line's own is its answer; another prefix or none is a
+  late reply, dropped with a line in the job's log while the wait goes on. The
+  reply reaches the rest of the library with its prefix taken off, so
+  `cliReplyValue`, `cliReplyIsConfirmed`, the apply engine and the password echo
+  see exactly what they saw before.
+
+  **The one thing to know if you call `IMesh::sendCli` yourself** (an
+  `IJobExtension` that sends console lines, or a mesh that logs what it sends):
+  the text handed to `sendCli` may now begin with three characters that are not
+  part of the command, and the reply it is matched against begins with the same
+  three. A repeater whose login reply named no `FIRMWARE_VER_LEVEL`, or a level
+  below 1, gets its lines exactly as it got them before - the level is in that
+  reply only since `repeater-v1.9.0`, seven months after the prefix, so any
+  level at all means the prefix is reflected and none cannot be told from an
+  older repeater that would run it. Four kinds of line still go bare, and each is
+  a reading of the firmware: a line of two characters or fewer
+  (`strlen(command) > 4` is the firmware's own condition, and the region
+  loader's terminator is one space), `region` and `region def …` (their reply is
+  `RegionMap::exportTo(reply, 160)`, the whole of the repeater's reply window),
+  a line nobody awaits a reply for (the reflected prefix alone is a non-empty
+  reply) and an escape line that ends a mode the firmware reads before it reads
+  a prefix. [`docs/library.md` §3.8](docs/library.md) is the page and the table.
+
 - **A line that cannot be asked twice** (task p1.10-48; meshmaster.dk's
   p4.32-188 and p4.32-189 are the server's half). **Nothing of a pin moved** -
   not a method of `IMesh`, `IUplink`, `IPlatform`, `IClock`, `IJobExtension`,

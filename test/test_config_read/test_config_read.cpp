@@ -18,6 +18,7 @@
 #include <vector>
 
 #include <agent/Airtime.h>
+#include <agent/CliReplies.h>
 #include <agent/ConfigRead.h>
 #include <agent/JsonWriter.h>
 #include <agent/ReplyCodec.h>
@@ -307,6 +308,82 @@ TEST(CliReply, TheTextIsReadAfterTheTimestampAndTheFlags) {
   data[4] = static_cast<uint8_t>(2 << 2);  // a signed plain text, which is not a CLI reply
   EXPECT_FALSE(mm::parseCliReply(data.data(), data.size(), text, sizeof text));
   EXPECT_FALSE(mm::parseCliReply(data.data(), 5, text, sizeof text)) << "no text at all";
+}
+
+// ------------------------------------------------------------------ the prefix a line carries
+
+// **A console reply belongs to its line** (task p1.10-49). `handleCommand` reflects an optional
+// prefix - a line longer than four characters whose third character is `|` has its first three
+// characters copied to the head of the reply - so a line can carry the tag a CLI reply has not
+// got. These three functions are the whole of the reading, and `JobRunner` is the only caller.
+TEST(CliPrefix, TheSequenceIsTwoHexCharactersAndABarAndNeverARepeat) {
+  char a[mm::kCliPrefixLen + 1];
+  char b[mm::kCliPrefixLen + 1];
+  mm::cliPrefixFor(0, a, sizeof a);
+  EXPECT_STREQ(a, "00|");
+  mm::cliPrefixFor(0xA7, a, sizeof a);
+  EXPECT_STREQ(a, "a7|") << "the task file's own example";
+  mm::cliPrefixFor(0xFF, a, sizeof a);
+  EXPECT_STREQ(a, "ff|");
+  // The third character is the firmware's own marker and the first two never are, whatever the
+  // byte: a prefix that carried a second `|` would be read as another line's.
+  for (int n = 0; n < 256; n++) {
+    mm::cliPrefixFor(static_cast<uint8_t>(n), a, sizeof a);
+    ASSERT_EQ(std::strlen(a), mm::kCliPrefixLen) << n;
+    EXPECT_EQ(a[2], '|') << n;
+    EXPECT_NE(a[0], '|') << n;
+    EXPECT_NE(a[1], '|') << n;
+    mm::cliPrefixFor(static_cast<uint8_t>(n + 1), b, sizeof b);
+    EXPECT_STRNE(a, b) << "two lines running must not share a prefix: " << n;
+  }
+  // A buffer that cannot hold one gets no half of one.
+  char small[3] = {'x', 'x', 'x'};
+  mm::cliPrefixFor(1, small, sizeof small);
+  EXPECT_STREQ(small, "");
+}
+
+TEST(CliPrefix, OnlyALineTheFirmwareWouldStripAndWhoseReplyHasRoomTakesOne) {
+  EXPECT_TRUE(mm::cliLineTakesPrefix("get name"));
+  EXPECT_TRUE(mm::cliLineTakesPrefix("ver"));
+  EXPECT_TRUE(mm::cliLineTakesPrefix("setperm 0011 1"));
+  EXPECT_TRUE(mm::cliLineTakesPrefix("password hunter2"));
+  EXPECT_TRUE(mm::cliLineTakesPrefix("region default dk")) << "a sentence of a reply, not the map";
+  EXPECT_TRUE(mm::cliLineTakesPrefix("region save"));
+
+  // `strlen(command) > 4` is handleCommand's own condition, on the line **with** the prefix: a
+  // line of one character prefixed is four, which the firmware would not strip - it would run
+  // `a7| ` instead. The region loader's terminator is that one space.
+  EXPECT_FALSE(mm::cliLineTakesPrefix(" ")) << "the region loader's terminator";
+  EXPECT_FALSE(mm::cliLineTakesPrefix("x"));
+  EXPECT_TRUE(mm::cliLineTakesPrefix("xy")) << "two characters is five with the prefix";
+  EXPECT_FALSE(mm::cliLineTakesPrefix(""));
+  EXPECT_FALSE(mm::cliLineTakesPrefix(nullptr));
+
+  // `region` and `region def` are `RegionMap::exportTo(reply, 160)`, which is the whole of the
+  // repeater's reply window: the prefix is reflected into the front of that same window, so
+  // three characters of it are three the map has not got, and a full map would write past
+  // `onPeerDataRecv`'s `temp[166]` - the repeater's stack. Those two go bare.
+  EXPECT_FALSE(mm::cliLineTakesPrefix("region"));
+  EXPECT_FALSE(mm::cliLineTakesPrefix("region def * F dk F"));
+  EXPECT_FALSE(mm::cliLineTakesPrefix("region def"));
+  EXPECT_TRUE(mm::cliLineTakesPrefix("region default")) << "a sentence, and not the listing";
+  EXPECT_TRUE(mm::cliLineTakesPrefix("region defaults")) << "not the `def` form either";
+}
+
+TEST(CliPrefix, OnlyAReplyThatCarriesTheLinesOwnPrefixIsItsAnswer) {
+  EXPECT_STREQ(mm::cliReplyBehindPrefix("a7|> 240", "a7|"), "> 240");
+  EXPECT_STREQ(mm::cliReplyBehindPrefix("a7|OK", "a7|"), "OK");
+  EXPECT_STREQ(mm::cliReplyBehindPrefix("a7|", "a7|"), "") << "a command the firmware answers nothing to";
+  // Another line's prefix, or none at all: a late reply, and not this line's answer.
+  EXPECT_EQ(mm::cliReplyBehindPrefix("a6|> 240", "a7|"), nullptr);
+  EXPECT_EQ(mm::cliReplyBehindPrefix("> 240", "a7|"), nullptr);
+  EXPECT_EQ(mm::cliReplyBehindPrefix("", "a7|"), nullptr);
+  EXPECT_EQ(mm::cliReplyBehindPrefix("a7", "a7|"), nullptr) << "not three characters of it";
+  EXPECT_EQ(mm::cliReplyBehindPrefix(nullptr, "a7|"), nullptr);
+  // A line that went out bare takes whatever came back, which is the rule as it always was.
+  EXPECT_STREQ(mm::cliReplyBehindPrefix("> 240", ""), "> 240");
+  EXPECT_STREQ(mm::cliReplyBehindPrefix("a7|> 240", ""), "a7|> 240");
+  EXPECT_STREQ(mm::cliReplyBehindPrefix("> 240", nullptr), "> 240");
 }
 
 // ------------------------------------------------------------------ the result

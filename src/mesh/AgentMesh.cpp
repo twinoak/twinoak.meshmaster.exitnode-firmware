@@ -284,6 +284,7 @@ void AgentMesh::endJob() {
   waiting_ = false;
   waitingFor_ = 0;
   awaiting_ = Awaiting::None;
+  sensitiveAwait_ = false;
   reply_ = MeshReply();
   // The ECDH secret is the one thing here that is worth wiping rather than dropping.
   volatile uint8_t* p = peerSecret_;
@@ -500,14 +501,12 @@ bool AgentMesh::await(Awaiting what, uint32_t tag, uint32_t timeoutMs, void (*pu
     if (reply_.kind != MeshReply::Kind::None) {
       waiting_ = false;
       awaiting_ = Awaiting::None;
-      sensitiveAwait_ = false;
       return true;
     }
     delay(1);
   }
   waiting_ = false;
   awaiting_ = Awaiting::None;
-  sensitiveAwait_ = false;
   return false;
 }
 
@@ -526,8 +525,13 @@ int AgentMesh::searchPeersByHash(const uint8_t* hash) {
 void AgentMesh::getPeerSharedSecret(uint8_t* dest_secret, int) { std::memcpy(dest_secret, sharedSecret(), PUB_KEY_SIZE); }
 
 void AgentMesh::takeText(const uint8_t* data, size_t len) {
-  // A CLI reply carries the repeater's own timestamp and no tag: the first text of CLI data from
-  // the peer while one is awaited is the answer, which is also how the .NET agent reads it.
+  // A CLI reply carries the repeater's own timestamp and no tag, so every text of CLI data from
+  // the peer is handed through while one is awaited - and **which of them is this line's answer
+  // is the library's to decide** (task p1.10-49, `JobRunner::awaitCliReply`): the line went out
+  // with the two-character prefix `handleCommand` reflects, and a text that does not carry it is
+  // a late reply to another line. The rule lives there and not here for the reason task
+  // p1.10-47's does: the Walter's `IMesh` filters nothing, and a rule in this file would not
+  // hold for it. A text of another type is still dropped here, as it always was.
   if (awaiting_ != Awaiting::Text) return;
   char text[kMaxCliReplyLen + 1];
   if (!parseCliReply(data, len, text, sizeof text)) {

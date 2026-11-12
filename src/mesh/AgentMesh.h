@@ -296,7 +296,11 @@ class AgentMesh : public mesh::Mesh, public IMesh, public observer::NeighbourLin
   uint32_t waitingFor_ = 0;
   bool waiting_ = false;
   Awaiting awaiting_ = Awaiting::None;
-  bool sensitiveAwait_ = false;  // the text awaited answers a `password` line: its frame is starred
+  // The text awaited answers a `password` line: its frame is starred. Set by every `sendCli` to
+  // that line's own sensitivity and cleared by `endJob`, and **not** by the end of a wait: the
+  // library may wait more than once for one line's reply, dropping a console reply that carries
+  // another line's prefix (task p1.10-49), and each of those waits is the same line's.
+  bool sensitiveAwait_ = false;
 
   // The neighbours (task p1.8-33): the table, the runner's "a job is open" hook, the pump a
   // query waits with, and the one node discovery that may be open - its tag, and until when its
