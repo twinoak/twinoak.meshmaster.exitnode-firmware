@@ -223,6 +223,29 @@ JobRunner::LoginResult JobRunner::loginOnce(const ClaimedJob& job, Context& ctx,
     ctx.firmwareLevel = login.firmwareLevel;
   }
   if (stored == nullptr || !stored->satisfies(job.credentialClass)) {
+    // **Guest is enough to read with** (meshmaster.dk's task p4.30-180, EXIT-NODES §7). The
+    // answer is still the evidence it was - an `acl` login answered at guest says the entry our
+    // grant wrote is gone or demoted, and the result carries the tier so the server reads it
+    // exactly as it reads the `unauthorized` - but `handleRequest` checks no permission at all
+    // for the status request ("guests can also access this now") or for the neighbour request, so
+    // the read the job was created for is still there to be made. AAR_LH, 10 November 2026: two
+    // *Read the neighbours* of a repeater whose pair was still being proved were lost at this
+    // line to a request the firmware would have answered. `telemetry` is not one of the two: a
+    // guest sender gets `perm_mask = 0x00` and the base channels only, and a read that dropped
+    // the sensors would look like the sensors had gone.
+    if (stored != nullptr && guestIsEnough(job.type, job.credentialClass, granted)) {
+      ctx.hasSession = true;
+      ctx.sessionRole = granted;
+      ctx.sessionWasFresh = true;
+      ctx.ranBelowClass = true;
+      ctx.ranBelowClassRole = granted;
+      g_log.add("%s: logged in as %s, below the %s this job asked for%s: the ACL entry of this exit node's key is "
+                "gone or demoted, and the result says so - but this firmware answers a %s request to any login, so "
+                "the read runs at %s (task p4.30-180)",
+                what, permissionName(granted), permissionName(roleNeededFor(job.credentialClass)), level, job.type,
+                permissionName(granted));
+      return LoginResult::Ok;
+    }
     // A login judged against the class it was for, the moment it comes back (task p3.5-41):
     // answered below what the job needs is the refusal it is, and the level travels in the
     // result so the server can tell a demoted entry from one that is gone (task p4.1-60).
@@ -1741,6 +1764,12 @@ void JobRunner::runClaimed(int i) {
   report.data = dataLen > 0 ? g_data : nullptr;
   report.log = g_log.text();
   report.failedAt = failedAt;
+  // **The tier a job that ran below its class ran at** (meshmaster.dk's task p4.30-180): the
+  // `guest` of an `acl`-class `status` or `neighbours` the firmware answered to a guest login.
+  // Whatever the outcome, as the .NET runner reports `RanBelowClassAs`: what the login was is a
+  // fact about the login, and a request that failed afterwards does not unsay it. Absent on every
+  // other job, which is every job that ran at the class it asked for.
+  report.loggedInAs = ctx.ranBelowClass ? permissionName(ctx.ranBelowClassRole) : nullptr;
 
   LOG_I("jobs: job %lld: %s after %d transaction(s)%s%s", job.id, outcomeName(outcome), ctx.transactions,
         failedAt == nullptr ? "" : ", failed at the ", failedAt == nullptr ? "" : failedAt);

@@ -361,6 +361,16 @@ class JobRunner {
     uint8_t sessionRole = 0;
     bool grantedBelowClass = false;
     uint8_t grantedRole = 0;
+    // **This job ran below the class it asked for** (meshmaster.dk's task p4.30-180,
+    // `JobContext.RanBelowClassAs` there): an `acl`-class `status` or `neighbours` whose login
+    // was answered at guest, which `guestIsEnough` says is enough to read with because this
+    // firmware serves both requests whole to a guest login. The session is kept at the tier
+    // granted, the job runs, and `ranBelowClassRole` goes on the result's `loggedInAs` so the
+    // server reads the login as the same evidence about the ACL entry that an `unauthorized`
+    // with the same tier carries. False on every other job, which is every job that ran at the
+    // class it asked for.
+    bool ranBelowClass = false;
+    uint8_t ranBelowClassRole = 0;
     // FIRMWARE_VER_LEVEL as **this job's own login** was answered with (meshmaster.dk's task
     // p4.30-181, `JobContext.FirmwareVerLevel` there). `hasFirmwareLevel` is false while no login
     // of this job has come back - a session reused from an earlier job, or a legacy reply that

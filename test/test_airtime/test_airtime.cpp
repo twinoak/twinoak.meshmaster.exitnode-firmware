@@ -194,6 +194,24 @@ TEST(Sessions, ASessionIsNeverHeldAboveItsLevel) {
   EXPECT_EQ(sessions.get(key, mm::CredentialClass::None, 0), nullptr);
 }
 
+// And that rule is what keeps **guest is enough to read with** honest (meshmaster.dk's task
+// p4.30-180): an `acl`-class `status` or `neighbours` whose login was answered at guest runs on
+// the session it was given, and the store keeps that session at `guest` - so the next job of a
+// class it does not satisfy is handed nothing and logs in afresh, to be judged on its own merits.
+// Nothing about the reading that ran widens what the session may carry.
+TEST(Sessions, ASessionKeptAtGuestForAReadIsNeverHandedToAJobThatNeedsMore) {
+  mm::SessionStore sessions;
+  const char* key = "aa44";
+  const mm::RepeaterSession* stored = sessions.put(key, mm::CredentialClass::Acl, mm::kPermGuest, 0);
+  ASSERT_NE(stored, nullptr);
+  EXPECT_STREQ(stored->tier(), "guest");
+  EXPECT_FALSE(stored->satisfies(mm::CredentialClass::Acl));
+  // The read ran on it; the telemetry of the same claim, and every later acl-class job, does not.
+  EXPECT_EQ(sessions.get(key, mm::CredentialClass::Acl, 1000), nullptr);
+  EXPECT_EQ(sessions.get(key, mm::CredentialClass::Admin, 1000), nullptr);
+  EXPECT_EQ(sessions.get(key, mm::CredentialClass::Guest, 1000), stored);
+}
+
 TEST(Sessions, AnAdminSessionServesEveryClassAndAnAclOneServesItsOwn) {
   mm::SessionStore sessions;
   sessions.put("admin", mm::CredentialClass::Admin, mm::kPermAdmin, 0);

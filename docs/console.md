@@ -515,3 +515,23 @@ server comes back. What the four lines say is a pure function of a struct
     count is `none`. `set flood.scope *` and repeat: every line says
     `flood, unscoped`, and the exit node's page on meshmaster.dk shows the scope
     and the three counts within a heartbeat.
+21. A guest answer the job can use (task p1.10-46; meshmaster.dk's p4.30-180).
+    On a test repeater with **no guest password** set and an `active` `acl` pair
+    with this exit node, take the entry away from its own console:
+    `setperm <this exit node's key> 0`. Then press *Read the neighbours* on the
+    repeater's page, which asks at class `acl`. The job's log should read
+    `logged in as guest, below the read-only this job asked for … but this
+    firmware answers a neighbours request to any login, so the read runs at
+    guest (task p4.30-180)`, then the `neighbours page at 0` and its reply;
+    `jobs` shows **ok** at 2 transactions, the job's page shows the neighbour
+    list **and** says the login was answered at guest, and the association moves
+    to `needs-regrant` with the fallbacks offered - the same move the
+    `unauthorized` made before this, with the reading kept. `sessions` shows one
+    **guest** session for that repeater. A *Read the status* of the same
+    repeater is the same thing at 3 transactions, with the battery reading and
+    the owner info on the page. Then press *Read the telemetry*: it must still
+    be **unauthorized**, `{"loggedInAs": "guest", "needed": "read-only"}`, with
+    `jobs` showing a **second** login - the guest session is invisible to a job
+    of the class that asked for more - and no telemetry request on the air. Put
+    the entry back (`setperm <key> 1`, or *Re-grant* from the page) and the next
+    read says nothing about a tier at all.
