@@ -31,6 +31,12 @@ meshmaster.dk's pile 4.33 task 191 and stops at its *First* until that has merge
 pile 4.32 protects every exit node from the first of them without flashing, and only a release
 ends the other two.
 
+**13 November: 51 added, the release.** 38–50 are merged and meshmaster.dk was deployed that
+morning (its release run 66, with its piles 4.30 to 4.33 and 4.35). Thomas ran this repository's release
+workflow by hand and nothing was published: here a run by hand is a dry run, and a release is a
+tag, shipped by a task because the notes are rewritten with it. 51 is that task, for **v0.7.0**.
+Run with `-From 51`.
+
 ## Order and dependencies
 
 | # | Task | Depends on | What it leaves behind |
@@ -48,6 +54,7 @@ ends the other two.
 | 48 | [a-line-that-cannot-be-asked-twice](48-a-line-that-cannot-be-asked-twice.md) | 47 | `setperm` for our own key is sent once and its silence checked with a blank login (grant, restore, removal); a grant drops the session so the verify logs in |
 | 49 | [a-console-reply-belongs-to-its-line](49-a-console-reply-belongs-to-its-line.md) | 47 | console lines carry the firmware's two-character prefix where the repeater reflects it, and only a reply with it is the answer |
 | 50 | [nothing-of-ours-left-behind](50-nothing-of-ours-left-behind.md) | 48, meshmaster.dk 191 merged | `acl: 0` on an admin claim: the session ends by taking this board's own key off the repeater |
+| 51 | [v0-7-0](51-v0-7-0.md) | 38–50, and meshmaster.dk deployed with its 191 | the notes' *What's new since v0.6.0*, `CHANGELOG.md` and `agent-core` at 0.7.0, and `v0.7.0` tagged, published as *Latest* and checked |
 
 ```powershell
 .\tasks\run-all.ps1 -Phase '1.10'
@@ -55,7 +62,7 @@ ends the other two.
 
 ## Models
 
-- **Opus** — 38–50.
+- **Opus** — 38–51.
 
 ## Follow-ups
 
