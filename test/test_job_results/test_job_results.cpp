@@ -238,6 +238,84 @@ TEST(JobResultReport, AReadAGuestLoginServedCarriesTheTierAndMakesTheFixtureByte
   EXPECT_EQ(std::string(out, len), fixture("JobResultReportAtGuest"));
 }
 
+// **The clock a login showed**, byte for byte (meshmaster.dk's task p4.37-210): the two numbers
+// are the last members of the envelope, after `loggedInAs`, as `JobResultReport`'s own parameter
+// order has them - and `JobResultReportWithClock.json` is a file of its own for the same reason
+// `JobResultReportAtGuest.json` is, because `JobResultReport.json` carries neither.
+TEST(JobResultReport, TheClockALoginShowedIsTheLastTwoMembersAndMakesTheFixtureByteForByte) {
+  const char* path[] = {"a1", "7f"};
+  mm::JobReport r;
+  r.clientId = "e7c4";
+  r.outcome = mm::Outcome::Ok;
+  r.startedAt = at("2026-09-18T10:00:05Z");
+  r.finishedAt = at("2026-09-18T10:00:09Z");
+  r.hasPathUsed = true;
+  r.pathUsed = path;
+  r.pathCount = 2;
+  r.hasHops = true;
+  r.hops = 2;
+  r.hasRttMs = true;
+  r.rttMs = 4210;
+  r.transactions = 2;
+  r.data = kSampleStatusJson;
+  r.log = "login (guest) try 1: ok; the repeater's clock is 90 s ahead of ours; status req 1 try; 4.2 s";
+  r.hasClock = true;
+  r.repeaterClockS = 1763038890;
+  r.agentClockS = 1763038800;
+
+  char out[1024];
+  const std::size_t len = mm::writeJobResult(r, out, sizeof out);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ(std::string(out, len), fixture("JobResultReportWithClock"));
+}
+
+// **Together or not at all** (API §3: one of them alone is a 400 on `repeaterClockS`). One flag
+// writes both, so a `JobReport` whose numbers were filled in but whose flag was not sends
+// neither - there is no way through this writer to send half the pair.
+TEST(JobResultReport, TheTwoClockNumbersTravelTogetherOrNotAtAll) {
+  mm::JobReport r;
+  r.clientId = "12-abc";
+  r.outcome = mm::Outcome::Ok;
+  r.startedAt = at("2026-09-18T10:00:05Z");
+  r.finishedAt = at("2026-09-18T10:00:09Z");
+  r.transactions = 1;
+  r.repeaterClockS = 1763038890;
+  r.agentClockS = 1763038800;
+
+  char out[256];
+  std::size_t len = mm::writeJobResult(r, out, sizeof out);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ(std::string(out, len).find("ClockS"), std::string::npos) << std::string(out, len);
+
+  r.hasClock = true;
+  len = mm::writeJobResult(r, out, sizeof out);
+  ASSERT_GT(len, 0u);
+  EXPECT_NE(std::string(out, len).find("\"repeaterClockS\":1763038890,\"agentClockS\":1763038800}"), std::string::npos)
+      << std::string(out, len);
+}
+
+// The whole range four bytes hold, which is the range the server accepts (API §3: a number
+// outside 0..4294967295 is a 400). A repeater that has not been told the time since it was
+// powered up answers with a small number, and the top of the range is a `uint32_t` that must not
+// come out negative.
+TEST(JobResultReport, TheClockNumbersCarryTheWholeRangeFourBytesHold) {
+  mm::JobReport r;
+  r.clientId = "12-abc";
+  r.outcome = mm::Outcome::Ok;
+  r.startedAt = at("2026-09-18T10:00:05Z");
+  r.finishedAt = at("2026-09-18T10:00:09Z");
+  r.transactions = 1;
+  r.hasClock = true;
+  r.repeaterClockS = 4294967295u;
+  r.agentClockS = 0;
+
+  char out[256];
+  const std::size_t len = mm::writeJobResult(r, out, sizeof out);
+  ASSERT_GT(len, 0u);
+  EXPECT_NE(std::string(out, len).find("\"repeaterClockS\":4294967295,\"agentClockS\":0}"), std::string::npos)
+      << std::string(out, len);
+}
+
 // Which jobs that is, and only those: `GuestIsEnough.Covers` on the server and in the .NET
 // agent, `mm::guestIsEnough` here, so that what one runs and the other reads cannot drift.
 TEST(JobResultReport, TheRuleIsTheClassTheTypeAndTheTier) {

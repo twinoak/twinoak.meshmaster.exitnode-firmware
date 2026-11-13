@@ -436,10 +436,19 @@ size_t writeJobResult(const JobReport& r, char* out, size_t cap) {
     w.key("failedAt");
     w.string(r.failedAt);
   }
-  // Last, as `JobResultReport`'s own parameter order has it (meshmaster.dk's task p4.30-180).
+  // Last but two, as `JobResultReport`'s own parameter order has it (meshmaster.dk's task
+  // p4.30-180).
   if (r.loggedInAs != nullptr) {
     w.key("loggedInAs");
     w.string(r.loggedInAs);
+  }
+  // And the pair the login showed, last of all and **together or not at all** (meshmaster.dk's
+  // task p4.37-210): one of them alone is a 400 on `repeaterClockS`, so the one flag writes both.
+  if (r.hasClock) {
+    w.key("repeaterClockS");
+    w.integer(r.repeaterClockS);
+    w.key("agentClockS");
+    w.integer(r.agentClockS);
   }
   w.endObject();
   return w.overflowed() ? 0 : w.length();
