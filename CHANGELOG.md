@@ -22,6 +22,98 @@ pull request, as `docs/` moves with code.
 
 ## Unreleased
 
+Nothing yet.
+
+## v0.7.0 — only a login reply answers a login, a line that cannot be asked twice, and nothing of ours left behind
+
+Pile 1.10, tasks 38 to 50 (`tasks/phase-1.10/`), released by task 51.
+**`agent-core` 0.7.0** in the three manifests; the contract fixtures moved to
+meshmaster.dk **`299df66`** (78 files, from `v0.6.0`'s `42e4d45`, 77, by way of
+`cd872a7`) and the companion frame fixtures are still at **`f518ebd`** (46);
+MeshCore is still **`companion-v1.18.0`, `81dbae59`**; `kMeshReplyDataCap` 184
+and `kMeshPathCap` 64, unmoved. **This is a bump to read before taking**: the
+manifest moved, four free functions changed shape, three names were removed and
+one airtime constant changed its value. The four questions:
+
+- **Did a method move?** **Yes**, in five ways, and only the third and fourth
+  can stop your tree compiling:
+  - **`IMesh` gained three methods**, every one `virtual` **with a body**, so a
+    consumer's tree compiles untouched and a mesh that overrides nothing behaves
+    exactly as it did: `floodPathHashSize()`, the width this mesh's floods go
+    out at, defaulting to **2** (task p1.10-39); `answersLocally()`, true from a
+    `beginJob` for a repeater your mesh reaches by something other than the mesh
+    until that job's `endJob`, defaulting to **false** (p1.10-40); and
+    `answersLocallyFor(const char* publicKeyHex)`, the same door asked for a key
+    before any job has begun, so that a wake can price what it has not started,
+    also **false** (p1.10-43). The two local-door methods must agree. Nothing of
+    `IMesh` was removed or changed shape.
+  - **`AgentLoop::restore` took a second argument, with a default**:
+    `bool restore(const WakeState&, uint32_t awayMs = 0)` (p1.10-42), the
+    milliseconds between that `state()` and this `restore()` on a clock that ran
+    through the sleep. `restore(s)` with one argument is **exactly** the call it
+    was. `WakeState` did not move: same 76 bytes, same `kVersion` 1, so the blob
+    in your NVS still restores.
+  - **Four free functions changed shape.** `mm::parseOwnerInfoFirmware(data,
+    len, char*, cap)` is gone and `mm::parseOwnerInfo(data, len,
+    mm::OwnerInfoReply&)` is in its place; `mm::writeStatusResult` takes
+    `const mm::OwnerInfoReply* owner` where it took `const char* firmware`; and
+    `mm::readsFirmwareVersion(job)` is now `mm::readsOwnerInfo(job)`, with the
+    credential class no longer part of the answer (all three p1.10-45).
+    `mm::loginMaterialFor` took a second parameter, `bool answeredLocally`
+    (p1.10-41). Each is a compile error only if you call it yourself, which a
+    consumer has no reason to: `JobRunner` is the one caller of all four.
+  - **Three names of `agent/LoginSequence.h` were removed** (p1.10-47):
+    `mm::ProbeAnswer::Refused`, `mm::LoginVerdict::probeRefused` and
+    `mm::kProbeAnsweredRefused`. Nothing of MeshCore at the pin refuses a login
+    — `handleLoginReq` answers `RESP_SERVER_LOGIN_OK` or `return 0` — so the
+    blank login of the rotation path is **answered or silent**, and what used to
+    make the third value was a response that is not a login reply, which is now
+    dropped. The **wire** is unchanged: `LoginSilentResult.probeAnsweredAs` still
+    admits `refused` for an agent whose companion emits `PUSH_CODE_LOGIN_FAIL`.
+  - **One member and five free functions were added**, and nothing of yours has
+    to know about any of them: `mm::JobReport::loggedInAs`, written **last** in
+    the envelope and absent on the wire when it is nullptr (p1.10-46);
+    `mm::servedWholeAtGuest` and `mm::guestIsEnough` (`agent/JobEnvelopes.h`,
+    p1.10-46); and `mm::cliPrefixFor`, `mm::cliLineTakesPrefix` and
+    `mm::cliReplyBehindPrefix` (`agent/CliReplies.h`, p1.10-49), whose only
+    caller is the library.
+
+  **Nothing of `IUplink`, `IPlatform`, `IClock`, `IJobExtension`, `JobContext`,
+  `ResultWriter` or `TextOut` moved**, and neither did `Backoff` or `WakeState`.
+- **Did a `MeshReply` constant move?** **No.** `kMeshReplyDataCap` is 184 and
+  `kMeshPathCap` is 64, at the same MeshCore pin. **Two pieces of airtime
+  arithmetic did move**, which a consumer that prices a wake sees in its own
+  numbers rather than in a compile error: `mm::kTransactionsForAclRestore` is
+  **2** and not 1, and `mm::transactionsFor("acl.set", …)` answers 2 — both out
+  of the new `mm::kTransactionsForOwnEntryWrite`, the line and the blank login
+  that checks it (p1.10-48) — and `mm::transactionsFor("status", class)` is **2
+  at every class** where it was 1 below `acl` (p1.10-45). So
+  `mm::transactionsOf()` prices any job that may write this key's own entry one
+  transaction higher than before; if your wake refuses jobs by that figure, give
+  it one more.
+- **Did the fixtures' manifest commit move?** **Yes**, twice — `42e4d45` →
+  `cd872a7` → `299df66` — and **no record lost a member**. `cd872a7`
+  (p1.10-45) added `JobResultReportAtGuest.json` and put `nodeName` and
+  `ownerInfo` into `StatusResult.json` and `JobResultReport.json`, both optional;
+  `299df66` (p1.10-50) added no file and changed three, and changed no shape:
+  `JobTimeouts.json`, `ClaimedJob.json` and `ClaimResponse.json` now say
+  `perHopMs: 8000` and `loginMs: 16000`, which is meshmaster.dk's own p4.32-187
+  doubling the two timeouts a claim carries. The library reads both off the claim
+  and always has, and `ClaimedJob`'s defaults for a claim with no `timeouts`
+  member are unchanged (4 000 and 8 000) — so what moved for you is **the wait**
+  and not the code: a flood waits 32 s against meshmaster.dk now, and a lease
+  estimate built on the old numbers is half of what a job will take. The
+  **companion** frame fixtures did not move: no MeshCore bump in this pile.
+- **The version and the pin:** `agent-core` 0.7.0; MeshCore
+  `companion-v1.18.0`, `81dbae59`.
+
+What a consumer changes: **nothing it must**, unless it calls one of the four
+free functions above or drives `loginSequence()` itself. What it should read
+first is the three doors this pile opened for a consumer that is **not** this
+board — a local door (p1.10-40, 41, 43) and a sleep (p1.10-42) — and, if it
+implements `IMesh` at all, the paragraph on `answersLocallyFor`. The thirteen
+tasks, each with what it moves and why:
+
 - **Nothing of ours left behind** (task p1.10-50; meshmaster.dk's p4.33-191 is
   the server's half). **The fixture manifest moved**, which is the dangerous one
   of the four: `tests/fixtures/contracts/MANIFEST.txt` now names meshmaster.dk

@@ -227,30 +227,75 @@ jobs:
               echo
               echo "**This is a dry run.** The images are the workflow's artifacts and nothing is published."
             fi
-            # This release's own five lines. Version-specific, like the console section below:
-            # the task that ships a tag rewrites it (p1.8-35, p1.9-37), and CHANGELOG.md is the per-tag record.
+            # This release's own lines. Version-specific, like the console section below: the task
+            # that ships a tag rewrites it (p1.8-35, p1.9-37, p1.10-51), and CHANGELOG.md is the per-tag record.
             cat <<'EOF'
 
-          ## What's new since v0.5.0
+          ## What's new since v0.6.0
 
-          - **A lighter TLS: a V3 runs the observer beside its MeshMaster connection again.** The
-            ESP-IDF is built from source under the same Arduino core, with mbedtls's TLS content
-            buffers allocated while a record is in flight instead of held for the life of a
-            connection. Nothing the firmware does changed; what changed is what a connection costs.
-          - **Two broker slots on both boards.** Measured on a Heltec V3 on 2 November: a broker
-            connection costs **19 468** bytes of heap where it cost 63 564, and the MeshMaster
-            uplink's handshake dips **26 404** where it dipped 81 116 - so a V3 with 120 392 bytes
-            free keeps two brokers and a handshake with about 55 000 to spare, and
-            `set mqtt2.preset meshmapper` now takes on a V3 as it does on a V4. The heap gate is
-            unchanged and still decides board by board: a slot the heap cannot take waits, and a
-            MeshMaster call that comes near the floor closes the highest slot for ten minutes.
-            `get mqtt.status`'s `memory` line prints the whole sum. **Two slots on a V4 are expected,
-            not walked** - no V4 was at hand on 2 November, so its figures are the V3's measured ones
-            and its PSRAM share is derived.
-          - **Smaller images, by about 58 KB of flash**, which is DTLS and the components this build
-            does not have; static RAM moves by under a kilobyte.
-          - **Nothing else moved.** No setting, no console line, no message on the air and no
-            interface: the only change is the build underneath.
+          Thirteen changes. The first four are what you will see on meshmaster.dk the day you flash
+          this one, and they are all about repeaters that answer slowly, and about the access-list
+          entry an exit node is given and gives back.
+
+          - **A slow repeater is no longer reported as *the ACL entry is gone*.** While the board
+            waits for a login reply, an answer that is not one - a late reply to the request before
+            it - is now dropped and the wait goes on, instead of being taken for the login's own
+            answer. So a login the repeater never refused is never reported `unauthorized`, and the
+            board says *refused* of a login only when the repeater answered it **below** the class
+            the job asked for. On 12 November meshmaster.dk parked ten working ACL associations as
+            *the ACL entry is gone* for want of this.
+          - **A grant whose "OK" was lost is confirmed by a login, and not failed.**
+            `setperm <this board's key> <level>` is the session's own level on a repeater: the
+            moment it runs, the repeater stops answering this board's console lines, so the line
+            cannot be asked twice and a missed "OK" used to fail the job. It now goes **once**, and
+            what it did is read back with a blank login - answered at the level asked for is the
+            confirmation, by the login and not by an "OK". meshmaster.dk lost 20 of 52 grants, and
+            found one association *elevated* seven times in 39 days, for want of it.
+          - **An admin job through an exit node that holds no grant leaves no key behind.** Logging
+            in with an admin password writes this board's key into the repeater's access list at
+            **admin**, and the repeater saves it to flash - so a daily configuration read through a
+            guest association used to leave an admin entry on every repeater it touched. Where
+            meshmaster.dk says this board should hold nothing there, the session's last command is
+            now `setperm <own key> 0`, and the job's result reports what became of the entry in the
+            same place a restore is reported. It costs one more exchange a day per repeater whose
+            association is a guest one.
+          - **A guest answer the job can use, and the owner info at any class.** A repeater answers
+            *Read the status* and *Read the neighbours* to anyone, guest included. When the ACL
+            entry is gone or demoted, the reading those two jobs got is now **kept** and reported
+            `ok` beside the tier the login was given, instead of being thrown away with the login -
+            and the server moves the association exactly as it did before. A status read also asks
+            for the owner info at **any** class now, so *Name on the radio* and *Owner info* fill on
+            a repeater this board has only a guest door to. Everything else is judged as it was:
+            `telemetry` at guest is still refused, and a `get` is still admin's.
+
+          Then the rest, one line each:
+
+          - **A job's log reads line by line** on the job's page, one entry per line as the .NET
+            agent writes it; a log that fills its kilobyte drops whole entries and never begins
+            mid-word.
+          - **A trace to a direct neighbour goes at the board's own two bytes**, so its hops are
+            four hex digits where they were two and two repeaters that share a first byte can be
+            told apart.
+          - **An empty `get` reply is a value.** A repeater whose `guest.password` is unset answers
+            `"> "`, which now reaches meshmaster.dk as *none* instead of as an unreadable line - so
+            a guest password taken off a repeater no longer stays stored on the server until
+            somebody clears it by hand.
+          - **Every console line of a job carries the repeater's own two-character prefix**, where
+            the repeater's firmware reflects one, and only a reply that carries this line's prefix
+            is its answer. Nobody has seen a configuration read take the value of the line above it;
+            this is what stops it.
+          - **Four changes for the other consumer of this repository's `lib/agent-core`** - the
+            Walter of a repeater-v2 unit, which reaches its own repeater over a wire: such a job is
+            no longer paced or priced as airtime, it logs in with no password at any class, and a
+            board that sleeps can tell the library how long it was away, so a 30 s backoff is no
+            longer spent five seconds at a time. **None of the four changes anything on a Heltec**,
+            which has no such door and does not sleep.
+
+          **What no board has run.** None of the thirteen sessions could open a serial port - every
+          change above was built and held to the host test suite and to the agent's contract
+          fixtures, and nothing of it has been on the air - so the walks are still to be made with a
+          board on the bench: a guest-class read that keeps its reading, an owner info at guest, a
+          grant whose "OK" never came home, and a key taken off a repeater.
           EOF
             echo
             echo "## Flashing"
@@ -278,15 +323,15 @@ jobs:
             and the exit node then needs a new token and its associations made again, because the
             repeaters know it by that key.
           - **An upgrade needs nothing typed.** Every setting the board already has is kept, and this
-            release adds none. The one thing a V3 gains is its second broker slot, which it will now
-            open - below.
-          - **The `-merged.bin`'s bootloader is new in this release, and untried on a board.** It is
-            built from source with this release (13 936 bytes where the core's precompiled one was
-            15 104), with the same header, the same flash mode, size and frequency, and the same
-            partition table byte for byte - but no board has been flashed from 0x0 with it yet. The
-            plain `.bin` does not touch it, so an **upgrade is unaffected**. A **first install** is
-            the case to watch: if a board stays silent after the flash instead of printing its banner
-            at 115200, that is this, and `v0.5.0`'s `-merged.bin` is the way back.
+            release adds none: no new setting, no new console line, and nothing to provision again.
+          - **The `-merged.bin`'s bootloader is the one `v0.6.0` introduced, and is still untried on
+            a board.** It is built from source with the firmware (13 936 bytes where the core's
+            precompiled one was 15 104), with the same header, the same flash mode, size and
+            frequency, and the same partition table byte for byte - but no first install from 0x0
+            with it is on record. The plain `.bin` does not touch it, so an **upgrade is
+            unaffected**. A **first install** is the case to watch: if a board stays silent after the
+            flash instead of printing its banner at 115200, that is this, and `v0.5.0`'s
+            `-merged.bin` is the way back.
 
           `SHA256SUMS` lists every file.
 
@@ -319,11 +364,11 @@ jobs:
           ```
 
           **On either board, add MeshMapper as the second broker**: `set mqtt2.preset meshmapper`.
-          Until this release a Heltec V3 had memory for one broker only and answered that line with a
-          refusal; the lighter TLS above took a broker connection from 63 564 bytes of heap to
-          19 468, and the walk of 2 November measured a V3 keeping two brokers and a MeshMaster
-          handshake with about 55 000 bytes still free. A V3 upgraded from v0.5.0 with a second slot
-          stored in it opens that slot now instead of showing it off with the reason.
+          Both boards have had the memory for two slots since `v0.6.0`, whose lighter TLS took a
+          broker connection from 63 564 bytes of heap to 19 468; the walk of 2 November measured a
+          V3 keeping two brokers and a MeshMaster handshake with about 55 000 bytes still free. A V3
+          that came from `v0.5.0` with a second slot already stored in it opens that slot instead of
+          showing it off with the reason.
 
           The gate has not changed and is still what decides, board by board: a slot the heap cannot
           take stays `waiting-for-heap` and looks again every five seconds, and a MeshMaster call
