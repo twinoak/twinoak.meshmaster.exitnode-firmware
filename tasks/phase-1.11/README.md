@@ -19,11 +19,17 @@ the notes inside the workflow, move the changelog and the library's version, and
 
 The repeater firmware and the Walter firmware get the same, each in its own pile.
 
+**13 November, later: 53 added.** Thomas wants meshmaster.dk to track a repeater's clock and warn
+when it is too far out (its pile 4.37). 53 is this firmware's half. It follows the contract of
+meshmaster.dk's task 210 and stops at its *First* until that has merged; run it then with
+`-From 53`.
+
 ## Order and dependencies
 
 | # | Task | Depends on | What it leaves behind |
 |---|---|---|---|
 | 52 | [a-release-from-the-button](52-a-release-from-the-button.md) | — | *Run workflow* publishes the version the repository names, with notes compiled from the tasks' own lines, and then moves the version on; a dry run by a tick; the tag trigger gone |
+| 53 | [the-repeaters-clock](53-the-repeaters-clock.md) | meshmaster.dk 210 merged | every answered login of its own puts the repeater's clock and the board's own time in the job's report |
 
 ```powershell
 .\tasks\run-all.ps1 -Phase '1.11'
@@ -31,7 +37,7 @@ The repeater firmware and the Walter firmware get the same, each in its own pile
 
 ## Models
 
-- **Opus** — 52.
+- **Opus** — 52, 53.
 
 ## Afterwards (Thomas)
 
