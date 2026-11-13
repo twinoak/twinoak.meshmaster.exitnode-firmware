@@ -35,6 +35,11 @@ a reading and absent is not.
   46 turns an `acl` login answered at guest into an `ok` with `loggedInAs`. A server without 180
   ignores the field and reads that `ok` as the pair verifying itself - in the flow's verify step,
   as the ACL entry working. The order is the server first, then this firmware.
+  **Done by task p1.10-51** (`tasks/phase-1.10/reports/51.md`): the order was held and checked
+  before anything was written. meshmaster.dk's newest successful `release` run on 13 November is
+  `9796e1e`, which carries `tasks/phase-4.33/reports/191.md` and therefore its piles 4.30 to 4.33 -
+  180 and 186 among them - so the server was deployed with 45's and 46's halves, and with 47's,
+  48's and 50's, before `v0.7.0` was tagged. The release is the one that carries 45 and 46.
 - [ ] **[later] `loggedInAs` on an outcome that is neither `ok` nor `unauthorized`.** Report 46
   says the server reads the tier "on an `ok` and on a refusal alike". It does, and on nothing
   else: `AclLoginFellShort` judges `unauthorized` and `ok`, so an `unreachable` that carries
