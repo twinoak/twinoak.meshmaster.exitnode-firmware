@@ -306,11 +306,30 @@ TEST(Library, TheRunnerAndTheLoopAreCompiledAndLinkedOnTheHost) {
   EXPECT_TRUE(claimAndRun != nullptr);
   EXPECT_TRUE(loop != nullptr);
 
-  // And the library's own version, from its manifest, is a string the firmware can print.
-  EXPECT_STREQ("0.7.0", AGENT_CORE_VERSION);
+  // And the library's own version, from its manifest, is a string the firmware can print. Which
+  // number it is, is TheVersionIsTheOneTheRepositoryNames below.
+  EXPECT_GT(std::string(AGENT_CORE_VERSION).size(), 0u);
 }
 
 // ---- the manifests ---------------------------------------------------------------------------
+
+// Since task p1.11-52 the version lives in ONE place - the file `VERSION` at the root, which names
+// the release that comes NEXT - and the three manifests carry a copy of it. This case is the half
+// of that rail a compiler can hold: the number the library was *compiled* with is the number on
+// disk, so a manifest moved by hand without `VERSION` is a red native suite and not a release that
+// publishes one version and reports another. The other half, which also holds CHANGELOG.md's top
+// heading and the format of every waiting release note, is `tools/release.ps1 -Action check`, a
+// step of CI's native job.
+TEST(Library, TheVersionIsTheOneTheRepositoryNames) {
+  std::string named = fileAt("VERSION");
+  // VERSION is one line and nothing else, so the number ends at its last digit: that trims the
+  // newline after it without a view on which one the file was written with.
+  const size_t end = named.find_last_of("0123456789");
+  named = (end == std::string::npos) ? std::string() : named.substr(0, end + 1);
+  ASSERT_FALSE(named.empty()) << "VERSION is the one place this repository's version lives";
+  EXPECT_EQ(named, std::string(AGENT_CORE_VERSION))
+      << "agent/Version.h compiled as " << AGENT_CORE_VERSION << " and VERSION says " << named;
+}
 
 TEST(Library, TheManifestNamesTheLibraryItsVersionAndOneDependency) {
   const std::string manifest = fileAt("lib/agent-core/library.json");

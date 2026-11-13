@@ -39,6 +39,14 @@
 #                       self-hosted runner, because this repository is public and a fork's pull
 #                       request would otherwise run a stranger's code on the Unraid host (task
 #                       p1.8-29). It is the native job's first real step
+#   the release         tools/release.ps1 - its `check`, which is the rail of the version living in
+#                       ONE place (`VERSION`, naming the release that comes next): the three
+#                       manifests that carry the library's version and CHANGELOG.md's top heading
+#                       must agree with it, and every line waiting in release-notes/unreleased/
+#                       must parse. Then its `-SelfTest`, which builds a scratch repository and
+#                       runs the refusals, the compiling of the lines, the move after a release and
+#                       the commit the release's *ci is green* gate reads (task p1.11-52,
+#                       docs/release.md). Seconds, and no PlatformIO, so it is early
 #
 # WHERE THIS RUNS. On GitHub's runners (`ubuntu-latest`), like every job of every workflow here,
 # for two reasons that both come of the same fact: **this repository is public**. Actions on
@@ -194,6 +202,19 @@ jobs:
           set -euo pipefail
           python tools/check-runners.py --self-test
           python tools/check-runners.py
+
+      # The release's rails and the release script's own tests, before anything is installed: the
+      # version is in one place and the four files that carry it agree, the changelog's top section
+      # is headed with it, every waiting release note parses - and then the whole of a release,
+      # from the refusals to the move afterwards, against a scratch repository in /tmp. A release
+      # is one press of a button since task p1.11-52, so what the press does is held by a test
+      # rather than by a person reading the workflow. The self-test's own scratch repositories are
+      # the fixtures; nothing here touches this one.
+      - name: The release is in one place, and does what it says
+        shell: pwsh
+        run: |
+          ./tools/release.ps1 -Action check
+          ./tools/release.ps1 -SelfTest
 
       - name: Cache PlatformIO
         uses: actions/cache@v4

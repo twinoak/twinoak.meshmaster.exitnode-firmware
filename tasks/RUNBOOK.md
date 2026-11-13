@@ -50,6 +50,17 @@ them. Say in the report that the task was done in more than one session.
 - The conventions in `tasks/README.md` apply: spec wins, no scope creep,
   libraries pinned to an exact version with a one-line justification, secrets
   never in the repo, docs move with code, leave the evidence.
+- **A task that changes something a person who runs an exit node will notice
+  adds its one line to `release-notes/unreleased/NN.md`, in this same pull
+  request** (task p1.11-52). One or two sentences, at most 400 characters,
+  plain words, about what a person will notice - not about what was done, and
+  naming no task, decision or spec. A change nobody can see (CI, a refactoring,
+  tests, documentation) writes **no** file. [`docs/release.md`](../docs/release.md)
+  is the rule and the examples; a file that breaks the format fails a check.
+  The release workflow compiles the waiting lines into the release's *What's
+  new*, in the order the tasks merged, so a line not written here is a change
+  nobody is ever told about. It is not `CHANGELOG.md`, which is the *library
+  consumer's* file and its four questions; most tasks write one of the two.
 - Run the task's verification commands, plus **`pio run -e heltec_v3`** (every
   board environment if the task added one) and **`pio test -e native`**. Fix
   until green. `-Werror` is on for our own sources (`build_src_flags`), which
@@ -123,9 +134,11 @@ task/pP-NN-<name>`. CI runs on `master`; the reviewer watches it.
 
 The driver considers the task done when `tasks/phase-P/reports/NN.md` exists
 on `origin/master`. Nothing else counts. Merging never releases: a release is
-a person pushing a tag `vX.Y.Z` (or pressing *Run workflow* for a dry run),
-and what it publishes is in `docs/upstream.md`'s neighbour,
-`.github/workflows/release.yml`.
+a person pressing *Run workflow* on `release.yml`, which publishes the version
+`VERSION` names with the lines the tasks left and then moves the version on in
+a pull request of its own. **A tag pushed by hand starts nothing.**
+[`docs/release.md`](../docs/release.md) is the page; the dry-run box on the
+same button rehearses it and publishes nothing.
 
 ## 5. Stop conditions
 

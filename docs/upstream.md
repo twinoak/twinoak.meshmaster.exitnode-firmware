@@ -243,6 +243,12 @@ this repository's changelog *for the library*, written in a consumer's terms
 version) rather than in a person-with-a-board's. A consumer's upstream watch is
 that file and the three below; nothing else here needs watching.
 
+That file's **top section is headed with the version this repository names next**
+(`VERSION`, and [`docs/release.md`](release.md)), not with *Unreleased*, so a
+consumer reading `CHANGELOG.md` **at the tag it pinned** finds that release's own
+heading first — which is exactly what the Walter's weekly watch quotes into its
+bump pull request.
+
 | What | Where | Why a consumer cares |
 |---|---|---|
 | the three interfaces | `agent/IMesh.h`, `agent/IUplink.h`, `agent/IPlatform.h` (and `agent/IJobExtension.h`, `agent/TextOut.h`) | they are the consumer's own code: a method added, removed or re-signatured is a compile error in *their* tree, which is the whole point of them being a contract and not a convenience |

@@ -119,7 +119,9 @@ gets and what it must provide, the three interfaces method by method, the
 lifecycle, the rails it inherits and must keep, the fixtures that are the wire
 contract, and what a bump may change.
 [`docs/upstream.md`](docs/upstream.md) says what pinning it means and
-[`CHANGELOG.md`](CHANGELOG.md) is what a consumer watches. The first consumer
+[`CHANGELOG.md`](CHANGELOG.md) is what a consumer watches — whose top section is
+headed with the version [`VERSION`](VERSION) names, so that the file reads right
+at the tag ([`docs/release.md`](docs/release.md)). The first consumer
 is the Walter of a repeater-v2 unit, whose platform is the ESP-IDF and whose
 mesh is a RAK on a serial link — which is why there are three interfaces and
 not one.
@@ -195,10 +197,15 @@ esptool.py --chip esp32s3 --port COM5 --baud 921600 write_flash 0x10000 firmware
 
 A release publishes, per board, a **merged** image (bootloader + partition table
 + application, flashed at `0x0`) and the **application** image alone beside it,
-with `SHA256SUMS` and the one `esptool` line to use. A tag `vX.Y.Z` on a commit
-CI has passed is what makes one; *Run workflow* on `release.yml` rehearses it
-and publishes nothing. Both are built on a **GitHub-hosted** runner, a machine
-that is new every time, like every other job here (*Where CI runs*, below).
+with `SHA256SUMS` and the one `esptool` line to use. **One press of a button
+makes one**: *Actions → release → Run workflow*, which publishes the version
+[`VERSION`](VERSION) names, from `master`'s head, with CI green on it, and with
+*What's new* compiled from the lines the tasks left in `release-notes/unreleased/`;
+it then moves the version on in a pull request of its own. A **dry run** box on
+the same button rehearses the whole thing and publishes nothing, and a tag pushed
+by hand starts nothing at all. [`docs/release.md`](docs/release.md) is the page.
+Both are built on a **GitHub-hosted** runner, a machine that is new every time,
+like every other job here (*Where CI runs*, below).
 
 **Which of the two.** The merged image is for a board **out of the box, or one
 coming from other firmware** — the repeater image, a companion build — because
@@ -535,7 +542,7 @@ decision rather than an omission.
 |---|---|---|
 | [`ci.yml`](.github/workflows/ci.yml) | every pull request and every push to `master`: the board matrix, the native tests, the library, the fixtures | `ubuntu-latest` |
 | [`upstream.yml`](.github/workflows/upstream.yml) | the weekly MeshCore check | `ubuntu-latest` |
-| [`release.yml`](.github/workflows/release.yml) | a tag `vX.Y.Z`: the images people flash, and the Release | `ubuntu-latest` |
+| [`release.yml`](.github/workflows/release.yml) | *Run workflow*: the images people flash, the Release, and the pull request that moves the version on ([`docs/release.md`](docs/release.md)) | `ubuntu-latest` |
 
 Twinoak's other repositories — meshmaster.dk, the repeater firmware — moved
 their CI home in October 2026, to self-hosted runners on Thomas's Unraid box
