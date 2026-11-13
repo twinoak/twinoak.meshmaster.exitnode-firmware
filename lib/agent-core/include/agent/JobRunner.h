@@ -405,6 +405,23 @@ class JobRunner {
     // is not a login reply does not end the probe's wait, so the probe is answered or silent.
     bool silentAfterReachable = false;
     uint8_t probeAnsweredRole = 0;
+    // **The clock the repeater showed at the last login of this job that was answered**
+    // (meshmaster.dk's task p4.37-210), and this board's own time at that same moment. The four
+    // bytes a login reply begins with are `MeshReply::tag`, which this firmware has always read
+    // and thrown away; `noteRepeaterClock` is the one place they are kept, and it is called from
+    // `awaitLoginReply` - so **whichever login it was** contributes: the job's own, the blank
+    // reachability probe between its two tries, the one after *no reply on a reused session*,
+    // and the discover's.
+    //
+    // **The last answered login wins**, which is the freshest reading and, where a job made more
+    // than one, the login the job went on to run on: a probe answered and then a second try
+    // answered reports the second. `hasRepeaterClock` is false for a job that made no login of
+    // its own at all - a reused session, a `trace`, a type nothing was sent for - for a job the
+    // mesh answered without the air, and for a board whose own clock is not set, which has no
+    // second number to put beside the first.
+    bool hasRepeaterClock = false;
+    uint32_t repeaterClockS = 0;
+    uint32_t agentClockS = 0;
     // **The tags of the requests this job has sent** (task p1.10-47), most recent first to fall
     // off the end. A login reply carries the repeater's own clock and no tag of ours, so a login
     // is awaited with tag 0 and whatever the peer sends next reaches `awaitLoginReply` - and a
@@ -503,6 +520,15 @@ class JobRunner {
   // what stock firmware answers a login it will not take anyway. Both logins of this file use
   // it, so neither can call a late reply a refusal.
   bool awaitLoginReply(const ClaimedJob& job, Context& ctx, const char* what, LoginReply& out);
+  // **The four bytes a login reply begins with, kept** (meshmaster.dk's task p4.37-210): the
+  // repeater's own clock as the reply gave it, and this board's own time read at that moment,
+  // onto the context for the result to carry. Called from `awaitLoginReply` and from nowhere
+  // else, so every answered login of the job contributes and the last of them wins. It refuses
+  // two cases, each for want of a number rather than by policy: a job the mesh **answers
+  // without the air**, whose login was answered by the door at this end and whose four bytes
+  // are no repeater's clock; and a board whose own clock is **not set**, which has nothing to
+  // put beside the repeater's. No arithmetic: the two numbers travel and the server subtracts.
+  void noteRepeaterClock(const ClaimedJob& job, Context& ctx, const char* what, uint32_t fromReply);
   // One blank login between the two tries of the `new` candidate of an unverified rotation (task
   // p1.3-13; meshmaster.dk's task p4.7-95): one transaction through the gate as every send is
   // (refused by the gate: no probe, false), the ACL login the status probes already make, and

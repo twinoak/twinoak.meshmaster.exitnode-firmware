@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -248,6 +249,33 @@ class RunnerTest : public ::testing::Test {
     if (at != std::string::npos) envelope.erase(at, data.size());
     return memberOf(envelope, "loggedInAs");
   }
+  // The clock the last answered login of the job showed, and this board's own at that moment
+  // (meshmaster.dk's task p4.37-210), or "" when the envelope carries no such member - which is
+  // every job that made no login of its own, every job the mesh answered without the air, and
+  // every result of a board whose own clock is not set. Neither name appears in any result
+  // record, so the top-level member is the only one there is to find.
+  std::string repeaterClockOf(const std::string& body) const { return memberOf(body, "repeaterClockS"); }
+  std::string agentClockOf(const std::string& body) const { return memberOf(body, "agentClockS"); }
+
+  // **The envelope of a job that carries `loggedInAs` *and* the clock pair**, which no single
+  // fixture has: `JobResultReportAtGuest.json` ends at `loggedInAs` and
+  // `JobResultReportWithClock.json` never carries one. `JobResultReport`'s own parameter order
+  // ends `… log, failedAt, loggedInAs, repeaterClockS, agentClockS`, and each fixture proves
+  // half of it - so a body that follows **both**, with the other half cut out, follows the
+  // record. An `acl`-class read a guest login served and which made that login itself is the one
+  // result with both halves at once.
+  ::testing::AssertionResult followsBothFixtures(const std::string& body) const {
+    const std::size_t clockAt = body.find(",\"repeaterClockS\":");
+    if (clockAt == std::string::npos) return ::testing::AssertionFailure() << "no clock members: " << body;
+    const ::testing::AssertionResult tierLast =
+        fake::followsShapeOf(body.substr(0, clockAt) + "}", fake::contract("JobResultReportAtGuest"));
+    if (!tierLast) return tierLast;
+    const std::size_t tierAt = body.find(",\"loggedInAs\":\"");
+    if (tierAt == std::string::npos) return ::testing::AssertionFailure() << "no loggedInAs: " << body;
+    std::string withoutTheTier = body;
+    withoutTheTier.erase(tierAt, body.find(',', tierAt + 1) - tierAt);
+    return fake::followsShapeOf(withoutTheTier, fake::contract("JobResultReportWithClock"));
+  }
   std::string dataOf(const std::string& body) const { return memberOf(body, "data"); }
   std::string logOf(const std::string& body) const { return memberOf(body, "log"); }
   int transactionsOf(const std::string& body) const { return std::atoi(memberOf(body, "transactions").c_str()); }
@@ -455,8 +483,11 @@ TEST_F(RunnerTest, AStatusReadAtGuestAsksForTheOwnerInfoToo) {
   EXPECT_EQ(mesh.requestsOf(mm::kReqTypeGetStatus), 1);
   EXPECT_EQ(mesh.requestsOf(mm::kReqTypeGetOwnerInfo), 1) << "at every class since task p4.30-181";
 
-  // The envelope and the data, against the shapes ContractsJson writes.
-  EXPECT_TRUE(fake::followsShapeOf(body, fake::contract("JobResultReport")));
+  // The envelope and the data, against the shapes ContractsJson writes. The envelope's fixture is
+  // `JobResultReportWithClock.json` since meshmaster.dk's task p4.37-210: this job made a login
+  // of its own, so it carries the two clock members, and that file is `JobResultReport.json`'s
+  // members plus those two, in the record's order.
+  EXPECT_TRUE(fake::followsShapeOf(body, fake::contract("JobResultReportWithClock")));
   const std::string data = dataOf(body);
   EXPECT_TRUE(fake::followsShapeOf(data, fake::contract("StatusResult")));
   // The values are status-response.hex's, which test/test_reply_codec asserts for the same bytes.
@@ -1920,9 +1951,10 @@ TEST_F(RunnerTest, TheNeighbourReadAnAclLoginAnsweredAtGuestRunsAndSaysWhatItRan
   EXPECT_EQ(failedAtOf(body), "") << "nothing failed";
   EXPECT_EQ(transactionsOf(body), 2) << "the login and one page of nine";
   EXPECT_EQ(mesh.requestsOf(mm::kReqTypeGetNeighbours), 1) << "the request the firmware answers was sent";
-  // The envelope is `JobResultReportAtGuest.json`'s shape - `loggedInAs` last - and the data is
-  // the reading a `neighbours` job always answers.
-  EXPECT_TRUE(fake::followsShapeOf(body, fake::contract("JobResultReportAtGuest"))) << body;
+  // The envelope is `JobResultReportAtGuest.json`'s shape - `loggedInAs` after the log - with the
+  // clock the login showed after it (`JobResultReportWithClock.json`, meshmaster.dk's task
+  // p4.37-210), and the data is the reading a `neighbours` job always answers.
+  EXPECT_TRUE(followsBothFixtures(body)) << body;
   const std::string data = dataOf(body);
   EXPECT_TRUE(fake::followsShapeOf(data, fake::contract("NeighboursResult"))) << data;
   EXPECT_NE(data.find("\"prefix\":\"" + repeater().substr(0, 16) + "\""), std::string::npos) << data;
@@ -1940,7 +1972,7 @@ TEST_F(RunnerTest, TheStatusReadAnAclLoginAnsweredAtGuestRunsWholeAndSaysWhatItR
   EXPECT_EQ(outcomeOf(body), "ok");
   EXPECT_EQ(loggedInAsOf(body), "guest");
   EXPECT_EQ(transactionsOf(body), 3) << "the login, the status request and the owner-info request";
-  EXPECT_TRUE(fake::followsShapeOf(body, fake::contract("JobResultReportAtGuest"))) << body;
+  EXPECT_TRUE(followsBothFixtures(body)) << body;
   const std::string data = dataOf(body);
   EXPECT_TRUE(fake::followsShapeOf(data, fake::contract("StatusResult"))) << data;
   EXPECT_NE(data.find("\"batteryMv\":4012"), std::string::npos) << data;
@@ -2317,7 +2349,9 @@ TEST_F(RunnerTest, AnOkResultCarriesNoFailedAt) {
 
   EXPECT_EQ(outcomeOf(body), "ok");
   EXPECT_EQ(failedAtOf(body), "") << body;
-  EXPECT_TRUE(fake::followsShapeOf(body, fake::contract("JobResultReport"))) << body;
+  // The login this job made puts the clock pair on the envelope (meshmaster.dk's task p4.37-210),
+  // which is `JobResultReportWithClock.json`'s shape.
+  EXPECT_TRUE(fake::followsShapeOf(body, fake::contract("JobResultReportWithClock"))) << body;
 }
 
 // The two words are the server's `JobFailedAt`, read out of the fixture rather than typed here:
@@ -2329,6 +2363,167 @@ TEST(FailedAt, TheTwoWordsAreTheOnesTheFixtureCarries) {
   EXPECT_STREQ("request", mm::kFailedAtRequest);
   // And the ok fixture has neither word: the member is the one an ok result never carries.
   EXPECT_EQ(fake::contract("JobResultReport").find("failedAt"), std::string::npos);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The clock a login showed (meshmaster.dk's task p4.37-210; API §3, EXIT-NODES §7)
+//
+// A login reply begins with four bytes of the repeater's own clock - `MeshReply::tag`, which
+// this firmware has always read and always thrown away. Since this task a job that made a login
+// of its own and was answered reports that number and this board's own time at the same moment,
+// as `repeaterClockS` and `agentClockS`, and meshmaster.dk stores the difference. **Two numbers
+// and no arithmetic here.** The tests below are the one rule and its three absences, plus the
+// one reply that must never be taken for a clock.
+
+TEST_F(RunnerTest, AJobThatLoggedInReportsTheRepeatersClockAndThisBoardsOwn) {
+  mesh.setGuestPassword("gu3st-pass");
+  mesh.setRepeaterClock(kNow - 600);  // ten minutes behind this board
+  const std::string body = run(fake::Job(25190, "status")
+                                   .atClass("guest")
+                                   .leasedUntil(kLease)
+                                   .withGuestPassword("gu3st-pass")
+                                   .withPayload("{\"version\":false}"));
+
+  EXPECT_EQ(outcomeOf(body), "ok");
+  EXPECT_EQ(mesh.logins(), 1);
+  // The reply's own four bytes, verbatim: `getCurrentTimeUnique` hands out the repeater's second
+  // itself for the first reply of a second, and this is the first login of this job.
+  EXPECT_EQ(repeaterClockOf(body), std::to_string(kNow - 600)) << body;
+  // And this board's clock, read at the moment that reply came back: after the job began and not
+  // after it ended.
+  const uint32_t ours = static_cast<uint32_t>(std::atoll(agentClockOf(body).c_str()));
+  EXPECT_GE(ours, kNow) << body;
+  EXPECT_LE(ours, platform.clock().now()) << body;
+  // The envelope's shape is the fixture's, with the pair last of all.
+  EXPECT_TRUE(fake::followsShapeOf(body, fake::contract("JobResultReportWithClock"))) << body;
+  // The difference is said on the **console**, for a bench, and nowhere else: nothing worked out
+  // from the two numbers travels in the result, and the job's own log - 1 024 bytes, whole
+  // entries falling off the front - is left for what the job did.
+  EXPECT_TRUE(fake::LogCapture::the().holds("the repeater's clock says " + std::to_string(kNow - 600)));
+  EXPECT_TRUE(fake::LogCapture::the().holds(" s behind; both go in the result"));
+  EXPECT_EQ(logOf(body).find("the repeater's clock says"), std::string::npos)
+      << "the job's log is not where this goes: " << logOf(body);
+}
+
+// Whatever the outcome, as `loggedInAs` is: a login that was answered said what time the
+// repeater thought it was, and a request lost after it does not unsay it.
+TEST_F(RunnerTest, ARequestLostAfterAnAnsweredLoginStillReportsTheClock) {
+  mesh.setRepeaterClock(kNow + 3600);  // an hour ahead, which is the reading this exists to see
+  mesh.silenceLine("set tx 20");
+  const std::string body = run(fake::Job(25191, "cli")
+                                   .atClass("admin")
+                                   .leasedUntil(kLease)
+                                   .withAdminPassword("adm1n-pass")
+                                   .withPayload("{\"command\":\"set tx 20\"}"));
+
+  EXPECT_EQ(outcomeOf(body), "unreachable");
+  EXPECT_EQ(failedAtOf(body), "request") << body;
+  EXPECT_EQ(repeaterClockOf(body), std::to_string(kNow + 3600)) << body;
+  EXPECT_FALSE(agentClockOf(body).empty()) << "together or not at all: " << body;
+}
+
+// The discover's own login is a login of this job's, and its reply is the one the path is learned
+// from - so a discover reports the clock like any other job (deliverable 3).
+TEST_F(RunnerTest, TheDiscoversLoginReportsTheClockToo) {
+  mesh.setGuestPassword("gu3st-pass");
+  mesh.setRepeaterClock(kNow - 99);
+  mesh.setReturnPath({0x11, 0x22, 0x33, 0x44}, 2);
+  const std::string body = run(fake::Job(25192, "discover")
+                                   .atClass("guest")
+                                   .leasedUntil(kLease)
+                                   .withGuestPassword("gu3st-pass")
+                                   .withNoPath());
+
+  EXPECT_EQ(outcomeOf(body), "ok");
+  EXPECT_EQ(mesh.logins(), 1);
+  EXPECT_EQ(repeaterClockOf(body), std::to_string(kNow - 99)) << body;
+}
+
+// **A job that made no login of its own reports none.** The second job finds the session the
+// first opened, sends its request on it and never asks the repeater what time it is - so there
+// is nothing to report, and the first job's reading is not repeated as though it were this
+// job's.
+TEST_F(RunnerTest, AJobThatReusedASessionReportsNoClock) {
+  mesh.grant(self(), mm::kPermReadOnly);
+  const std::string first =
+      run(fake::Job(25193, "status").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
+  ASSERT_EQ(mesh.logins(), 1);
+  ASSERT_FALSE(repeaterClockOf(first).empty()) << first;
+
+  const std::string second =
+      run(fake::Job(25194, "status").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
+
+  EXPECT_EQ(outcomeOf(second), "ok");
+  EXPECT_EQ(mesh.logins(), 1) << "the session was reused, so no login went out";
+  EXPECT_NE(logOf(second).find("session reused"), std::string::npos) << second;
+  EXPECT_EQ(repeaterClockOf(second), "") << second;
+  EXPECT_EQ(agentClockOf(second), "") << second;
+  // And the shape of a result with neither member is still the fixture's.
+  EXPECT_TRUE(fake::followsShapeOf(second, fake::contract("JobResultReportWithClock"))) << second;
+}
+
+// **A job through the local door reports none.** The door at this end answers the login itself
+// (task p1.10-41), so the four bytes are no repeater's clock and the repeater behind the door was
+// never asked what time it thinks it is.
+TEST_F(RunnerTest, AJobThroughTheLocalDoorReportsNoClock) {
+  mesh.grant(self(), mm::kPermReadOnly);
+  mesh.setLocalDoorKey(repeater());
+  const std::string body = run(fake::Job(25195, "status")
+                                   .atClass("acl")
+                                   .leasedUntil(kLease)
+                                   .withAclLevel(mm::kPermReadOnly)
+                                   .withPayload("{\"version\":false}"));
+
+  EXPECT_EQ(outcomeOf(body), "ok");
+  EXPECT_EQ(transactionsOf(body), 0) << "none of it was on the air";
+  EXPECT_EQ(repeaterClockOf(body), "") << body;
+  EXPECT_EQ(agentClockOf(body), "") << body;
+  EXPECT_TRUE(fake::LogCapture::the().holds("the door at this end answered it"));
+}
+
+// **A board whose own clock is not set reports none.** One of the pair alone is a 400 on the
+// result (API §3), and a board with no time of its own has no second number: the repeater's
+// reading would be worth nothing without something to hold it against.
+TEST_F(RunnerTest, ABoardWithNoClockOfItsOwnReportsNeitherNumber) {
+  platform.fakeClock().unset();
+  mesh.grant(self(), mm::kPermReadOnly);
+  const std::string body = run(fake::Job(25196, "status")
+                                   .atClass("acl")
+                                   .leasedUntil(kLease)
+                                   .withAclLevel(mm::kPermReadOnly)
+                                   .withPayload("{\"version\":false}"));
+
+  EXPECT_EQ(outcomeOf(body), "ok");
+  EXPECT_EQ(mesh.logins(), 1) << "the login went out and was answered";
+  EXPECT_EQ(repeaterClockOf(body), "") << body;
+  EXPECT_EQ(agentClockOf(body), "") << body;
+  EXPECT_TRUE(fake::LogCapture::the().holds("this board's own clock is not set"));
+}
+
+// **The late reply task p1.10-47 drops is never taken for the clock.** The field's job 24142:
+// a session 147 s old, a request answered past its own wait, and that answer arriving during the
+// wait of the login that follows. A request's reply is stamped with the tag *this board* drew,
+// so reading it as a clock would report this board's own number back as the repeater's - which
+// would make a repeater that is ten minutes out look perfect.
+TEST_F(RunnerTest, ALateRequestReplyIsNotTakenForTheRepeatersClock) {
+  mesh.grant(self(), mm::kPermReadOnly);
+  mesh.setRepeaterClock(kNow - 600);
+  run(fake::Job(25197, "status").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
+  ASSERT_EQ(mesh.logins(), 1);
+  mesh.forgetSends();
+
+  mesh.deliverTheNextReplyLate(1);
+  const std::string body =
+      run(fake::Job(25198, "status").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << body;
+  EXPECT_NE(logOf(body).find("the late reply to a request this job sent arrived instead"), std::string::npos) << body;
+  // The re-login's own reply, which is the repeater's clock one second on from the first job's
+  // reading (`getCurrentTimeUnique` never hands the same second out twice) - and never the tag of
+  // the request that arrived late, which is a number of this board's own series above `kNow`.
+  const uint32_t reported = static_cast<uint32_t>(std::atoll(repeaterClockOf(body).c_str()));
+  EXPECT_GE(reported, kNow - 600);
+  EXPECT_LT(reported, kNow - 500) << "a reply of this board's own series was read as the clock: " << body;
 }
 
 TEST_F(RunnerTest, AnUnknownTypeIsUnsupportedAtNoTransaction) {

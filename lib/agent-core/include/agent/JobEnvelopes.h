@@ -266,6 +266,24 @@ struct JobReport {
   // the job asked for**, which is every other result and every result from an exit node built
   // before this.
   const char* loggedInAs = nullptr;
+
+  // **What time the repeater thought it was, and what time this board thought it was at that
+  // same moment** (meshmaster.dk's task p4.37-210; API §3, EXIT-NODES §7). A login reply begins
+  // with four bytes of the repeater's own clock - `getRTCClock()->getCurrentTimeUnique()` in
+  // `handleLoginReq` - which this firmware has always read as `MeshReply::tag` and thrown away.
+  // They cost no request and no airtime, and they are the cheapest reading there is of a
+  // repeater whose battery-backed clock started again from an old date.
+  //
+  // **Two numbers and no arithmetic here**: the server stores the difference. They go
+  // **together or not at all** - one of them alone is a 400 on `repeaterClockS` - which is what
+  // the single `hasClock` is for, and each is a `uint32_t`, which is exactly the range four
+  // bytes hold and the range the server accepts. Absent from a job that reused a session and so
+  // made no login of its own, from a job the mesh answered without the air, and from a board
+  // whose own clock is not set; absent is also every result of every exit node built before
+  // this, which the server reads exactly as it read them.
+  bool hasClock = false;
+  uint32_t repeaterClockS = 0;
+  uint32_t agentClockS = 0;
 };
 
 // The two words `JobReport::failedAt` may carry (the server's `JobFailedAt`). Static strings, so

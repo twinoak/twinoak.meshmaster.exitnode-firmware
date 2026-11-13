@@ -33,7 +33,43 @@ disagree.
 
 ## v0.7.1
 
-Nothing yet.
+Pile 1.11 (`tasks/phase-1.11/`), in progress. **`agent-core` 0.7.1** in the three
+manifests; the contract fixtures moved to meshmaster.dk **`461469e`** (79 files,
+from `v0.7.0`'s `299df66`, 78) and the companion frame fixtures are still
+**`f518ebd`** (46); MeshCore is still **`companion-v1.18.0`, `81dbae59`**;
+`kMeshReplyDataCap` 184 and `kMeshPathCap` 64, unmoved. **Nothing of yours stops
+compiling and nothing of yours has to change**: one struct grew three members,
+each with a default, and the wire grew two optional ones. The four questions:
+
+- **Did a method move?** **No.** Nothing of `IMesh`, `IUplink`, `IPlatform`,
+  `IClock`, `IJobExtension`, `JobContext`, `ResultWriter` or `TextOut` moved, and
+  neither did `Backoff` or `WakeState`. **Three members were added to
+  `mm::JobReport`** and nothing of yours has to know about them:
+  `hasClock`, `repeaterClockS` and `agentClockS` (p1.11-53, `docs/library.md`
+  §6.4) — the four bytes a login reply begins with, which are the repeater's own
+  clock, and this board's own time at the same moment. `JobRunner` fills them for
+  every job that made a login of its own and was answered, so **you get them for
+  nothing**; a `JobReport` you write yourself sends neither number unless you set
+  `hasClock`, which is what every consumer built before this does.
+  Two things your mesh already decides now decide a reading as well:
+  `IMesh::answersLocally()` true means the door at your end answered the login,
+  so there is no repeater's clock to report, and `IClock::hasTime()` false means
+  there is no second number to put beside the first.
+- **Did a `MeshReply` constant move?** **No.** `kMeshReplyDataCap` is 184 and
+  `kMeshPathCap` is 64, at the same MeshCore pin, and no airtime arithmetic
+  moved: the pair costs **no request and no airtime**, because the four bytes
+  were already in every login reply this library read.
+- **Did the fixtures' manifest commit move?** **Yes**, `299df66` → `461469e`
+  (p1.11-53, the commit that has meshmaster.dk's p4.37-210), and **no record lost
+  a member and no existing file's bytes changed**. One file was added,
+  `JobResultReportWithClock.json`: the result envelope with `repeaterClockS` and
+  `agentClockS` last of all, after `loggedInAs`. Both are optional, both are
+  `long?` on the server, and they are accepted **together or not at all** — one
+  alone is a `400` on `repeaterClockS`, and either outside `0..4294967295` is a
+  `400` too. A result that carries neither is read exactly as it was. The
+  **companion** frame fixtures did not move: no MeshCore bump in this pile.
+- **The version and the pin:** `agent-core` 0.7.1; MeshCore
+  `companion-v1.18.0`, `81dbae59`.
 
 ## v0.7.0 — only a login reply answers a login, a line that cannot be asked twice, and nothing of ours left behind
 

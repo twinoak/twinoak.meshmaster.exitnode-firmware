@@ -1,5 +1,5 @@
 # The contract fixtures of the .NET agent, copied - never edited here.
-# source: twinoak/meshmaster.dk/tests/fixtures/contracts at commit 299df666b549a1d7abfc88e7beec8be43307e37f
+# source: twinoak/meshmaster.dk/tests/fixtures/contracts at commit 461469e8b6062c5687f22a873fdc4e808aba10ae
 # written by tools/sync-fixtures.ps1; see README.md in this directory
 #
 # sha256                                                           bytes  name
@@ -57,6 +57,7 @@ f39804cbd8b263563ddf42a595076e1102ed76a4dcbcc0baeeb70b009ea35865      65  JobRes
 1988b7bd8aeb5a4bcce7311fb33d82ca5e0207dd418364702bd4e948f5ec1683     598  JobResultReport.json
 b3d315b1ab6cf52d922d0b9df34ccbca7e63e7a9b286961b8d6862062c332eac     383  JobResultReportAtGuest.json
 0aef12f18aa353b60a291a93aaae9514e3a8b0ac06daf2e8b86699d7d965970b     247  JobResultReportFailed.json
+3fccb829a6ecaa6439ce530c9a937f3848829bb3a21136dfcb31356a4e9111eb     693  JobResultReportWithClock.json
 1cf114904be010e71f73480bc32a02c81afc8158f3eab7e2fa8f6ca8a3104bab      34  JobTimeouts.json
 196a5c5249aad26ce839d5a5a525b18989a89f6273da54edad373d0a473643df     147  JsonEscaping.json
 ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356       3  NeighboursPayload.json

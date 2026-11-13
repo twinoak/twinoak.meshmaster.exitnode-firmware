@@ -231,7 +231,12 @@ bool JobRunner::awaitLoginReply(const ClaimedJob& job, Context& ctx, const char*
     if (!mesh_->awaitReply(0, static_cast<uint32_t>(left), pump_)) return false;
     const MeshReply& reply = mesh_->reply();
     const bool ours = reply.kind == MeshReply::Kind::Response && ctx.sentTag(reply.tag);
-    if (!ours && reply.kind == MeshReply::Kind::Response && parseLoginReply(reply.data, reply.len, out)) return true;
+    if (!ours && reply.kind == MeshReply::Kind::Response && parseLoginReply(reply.data, reply.len, out)) {
+      // This reply, and nothing else that arrived in this wait, is the login's: so these four
+      // bytes, and no others, are the repeater's own clock (meshmaster.dk's task p4.37-210).
+      noteRepeaterClock(job, ctx, what, reply.tag);
+      return true;
+    }
     if (ours) {
       g_log.add("%s: the late reply to a request this job sent arrived instead; dropped, and the login's wait goes "
                 "on (task p1.10-47)",
@@ -245,6 +250,57 @@ bool JobRunner::awaitLoginReply(const ClaimedJob& job, Context& ctx, const char*
     }
   }
   return false;
+}
+
+// **The clock a login showed, kept** (meshmaster.dk's task p4.37-210, EXIT-NODES §7 *What a
+// login reply says besides yes*). `handleLoginReq` writes `getRTCClock()->getCurrentTimeUnique()`
+// into the four bytes every response begins with, so a login reply's `tag` - the one field of a
+// reply this firmware has always read and always thrown away - is the repeater's own clock in
+// Unix seconds. It costs no request and no airtime, and it is the only reading there is of a
+// repeater whose battery-backed clock started again from an old date after a power loss.
+//
+// **Two numbers, no arithmetic here**: the repeater's as the reply gave it, and this board's own
+// at that moment, which the server subtracts one from the other and stores. The log says the
+// difference because a bench reads the log, and that sentence is no part of the result.
+//
+// The two refusals are for want of a number and not by policy:
+//
+//   - a job the mesh **answers without the air** (IMesh::answersLocally, task p1.10-40) logs in
+//     to a door at this end, which answers the login itself: the four bytes are the door's and
+//     the repeater behind it was never asked what time it thinks it is;
+//   - a board whose own clock is **not set** has no second number to put beside the first, and
+//     one of the pair alone is a 400 on the result (API §3).
+//
+// A job that made no login of its own - a reused session, a `trace`, a job nothing was sent for -
+// never reaches here, which is the third absence and needs no test of its own.
+// **It says nothing in the job's log**, which is the one decision here that is not the spec's.
+// That log is 1 024 bytes and whole entries fall off the front of it when it fills (JobLog), and
+// a long job - a 34-line `config.read`, an `acl.set` confirmed by a blank login - spends the
+// whole of it on what it did. A line per answered login would push that evidence out to say
+// again what the result already carries as two numbers, which is the one place the server reads
+// it. So the reading goes to the **console**, where a bench reads it, and the job's log is left
+// exactly as long as it was.
+void JobRunner::noteRepeaterClock(const ClaimedJob& job, Context& ctx, const char* what, uint32_t fromReply) {
+  if (mesh_->answersLocally()) {
+    // Every job of a unit's own repeater does this, so it is debug and not info.
+    LOG_D("jobs: job %lld: %s: the door at this end answered it, so there is no repeater's clock to report", job.id,
+          what);
+    return;
+  }
+  if (!clock_->hasTime()) {
+    LOG_I("jobs: job %lld: %s: this board's own clock is not set, so the repeater's clock is not reported", job.id,
+          what);
+    return;
+  }
+  ctx.hasRepeaterClock = true;
+  ctx.repeaterClockS = fromReply;
+  ctx.agentClockS = clock_->now();
+  // The difference is the console's, for a bench; the result carries the two numbers and nothing
+  // worked out from them.
+  const long long difference = static_cast<long long>(ctx.repeaterClockS) - static_cast<long long>(ctx.agentClockS);
+  LOG_I("jobs: job %lld: %s: the repeater's clock says %lu and ours %lu, which is %lld s %s; both go in the result",
+        job.id, what, static_cast<unsigned long>(ctx.repeaterClockS), static_cast<unsigned long>(ctx.agentClockS),
+        difference < 0 ? -difference : difference, difference < 0 ? "behind" : "ahead");
 }
 
 const char* JobRunner::loginMaterial(const ClaimedJob& job) {
@@ -2229,6 +2285,14 @@ void JobRunner::runClaimed(int i) {
   // fact about the login, and a request that failed afterwards does not unsay it. Absent on every
   // other job, which is every job that ran at the class it asked for.
   report.loggedInAs = ctx.ranBelowClass ? permissionName(ctx.ranBelowClassRole) : nullptr;
+  // **The clock the last answered login of this job showed, and ours at that moment**
+  // (meshmaster.dk's task p4.37-210). Whatever the outcome, as `loggedInAs` is: a login that was
+  // answered said what time the repeater thought it was, and a request lost after it does not
+  // unsay it. Absent for a job that made no login of its own, one the mesh answered without the
+  // air, and a board whose own clock is not set (`noteRepeaterClock`).
+  report.hasClock = ctx.hasRepeaterClock;
+  report.repeaterClockS = ctx.repeaterClockS;
+  report.agentClockS = ctx.agentClockS;
 
   LOG_I("jobs: job %lld: %s after %d transaction(s)%s%s", job.id, outcomeName(outcome), ctx.transactions,
         failedAt == nullptr ? "" : ", failed at the ", failedAt == nullptr ? "" : failedAt);
