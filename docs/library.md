@@ -1259,7 +1259,18 @@ published anywhere — not the PlatformIO registry, not `components.espressif.co
 — because a tag is already a pin and a registry entry would be a second thing to
 keep in step. `library.json`, `idf_component.yml` and `agent/Version.h` carry the
 same number; a release moves them together and `test_library` fails if one of
-them moves alone. Report both versions from your firmware: yours, and
+them moves alone.
+
+**How that tag is made**, because a consumer watching for one should know what it
+means: somebody presses *Run workflow* on `release.yml`, and nothing is typed.
+The number comes from `VERSION` at the root of this repository, which holds the
+**next** release's version and which the three manifests above copy; the release
+is cut from `master`'s head with CI green on it, the tag is created by the
+release itself, and a pull request the workflow opens and merges then moves all
+four to the next patch. A tag pushed by hand starts nothing, and no release is
+made from a side branch. [`docs/release.md`](release.md) is the page; the
+changelog's top section is headed with the version that is coming, so **at the
+tag** the first heading of `CHANGELOG.md` is that release's own. Report both versions from your firmware: yours, and
 `AGENT_CORE_VERSION`.
 
 **What a bump may change**, by interface, and what it means for you:

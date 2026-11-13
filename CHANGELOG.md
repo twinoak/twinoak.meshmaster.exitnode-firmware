@@ -18,9 +18,20 @@ flashing it does to a provisioned board, is in the GitHub release notes that
 this repository changed and why is in `tasks/phase-*/reports/`.
 
 A task that moves one of the four things above adds its line here in the same
-pull request, as `docs/` moves with code.
+pull request, as `docs/` moves with code. It is **not** the release note a task
+leaves for a person with a board - that is one line in `release-notes/unreleased/`
+([`docs/release.md`](docs/release.md)) - and most tasks write one of the two and
+not both.
 
-## Unreleased
+**The top section is headed with the version `VERSION` names**, which is the
+release that comes next, so that this file reads right *at the tag*: at `v0.7.1`
+the first heading says `v0.7.1` and not *Unreleased*, which is what a consumer
+reading it at its pin wants and what the Walter's upstream watch quotes. The
+release workflow opens the next section when it moves the version on, and
+`tools/release.ps1 -Action check` fails in CI when the heading and `VERSION`
+disagree.
+
+## v0.7.1
 
 Nothing yet.
 
