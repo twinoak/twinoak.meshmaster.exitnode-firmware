@@ -120,9 +120,9 @@ Per board, the application image and the merged image, with `SHA256SUMS` — see
 
 The release is created with its tag on `master`'s head, as **Latest**.
 
-## 5. Afterwards: one pull request, opened and merged by the workflow
+## 5. Afterwards: one pull request, opened by the workflow and merged by you
 
-With the release out, the run opens `release/vX.Y.Z` and merges it:
+With the release out, the run opens `release/vX.Y.Z`:
 
 - the lines move from `release-notes/unreleased/` into `release-notes/vX.Y.Z.md`,
   as published;
@@ -130,23 +130,47 @@ With the release out, the run opens `release/vX.Y.Z` and merges it:
 - `CHANGELOG.md`'s next section opens above the released one.
 
 **The commit touches the release's own files and nothing else.** That is not
-tidiness: it is what lets the *next* release trust it. No check runs on that pull
-request — GitHub starts no workflow from an event raised with the job's own
-token — so the commit it puts on `master` has no `ci` run of its own, and the
-next press would wait twenty minutes for a run that is never coming. The gate
-therefore asks `tools/release.ps1 -Action ci-commit` which commit to read `ci`'s
-verdict from: it walks `master`'s head back over commits that are **the
-`github-actions` bot's** *and* touch **nothing but** `VERSION`, `CHANGELOG.md`,
-`release-notes/` and the three manifests, and stops at the first commit that is
-anything else. Nothing that can change what is built is ever walked over; the
-build and the tag still use `master`'s head.
+tidiness: it is what lets the *next* release trust it. A commit that a workflow
+run puts on `master` with the job's own token gets no `ci` run — GitHub starts no
+workflow from an event raised with that token — so the next press could wait
+twenty minutes for a run that is never coming. The gate therefore asks
+`tools/release.ps1 -Action ci-commit` which commit to read `ci`'s verdict from:
+it walks `master`'s head back over commits that are **the `github-actions` bot's**
+*and* touch **nothing but** `VERSION`, `CHANGELOG.md`, `release-notes/` and the
+three manifests, and stops at the first commit that is anything else. Nothing
+that can change what is built is ever walked over; the build and the tag still
+use `master`'s head.
 
-**Where `master`'s rules do not let the workflow merge it**, the pull request is
-left open, the run's summary says so, and the step goes red. The release stands
-and nothing needs undoing — and the next press refuses, *the tag of the version
-already exists*, until somebody merges it by hand or moves the version
-themselves. The one repository setting it depends on is **Settings → Actions →
-General → Allow GitHub Actions to create and approve pull requests**.
+### You merge that pull request, and the run is green
+
+**Expect to merge it by hand**, at every release, for as long as `master`
+requires a check. `master` requires `build (heltec_v3)` and `native tests`
+before a merge; GitHub *does* start a `ci` run for the pull request the job
+opened, but **holds it for a maintainer's approval** (*1 workflow awaiting
+approval* on the pull request), so until somebody approves it neither check
+reports and the job's three attempts to merge are answered *2 of 2 required
+status checks are expected*. A run left unapproved ends as a failure.
+
+So the release's last step ends **green**, and the first line of the run's
+summary names the pull request that is left for a person to merge. **A release
+that published is not a failing run.** Either way of finishing it is right:
+
+- **approve the run** on the pull request and merge it when it is green;
+- **merge it without waiting** — the commit touches the release's own files and
+  nothing else, which is also what the gate above reads it as.
+
+Two endings are still red, because nothing is then waiting for anybody and
+something really failed: the branch could not be **pushed**, or the pull request
+could not be **opened**. The second one is where *Settings → Actions → General
+→ Allow GitHub Actions to create and approve pull requests* belongs — switched
+off, that is the press that cannot open it.
+
+Whatever the ending, the release stands and nothing needs undoing, and the next
+press refuses — *the tag of the version already exists* — until the pull request
+lands or the version is moved by hand. Which ending it is, and what the summary
+says first, is decided in one place with a test: `tools/release.ps1 -Action
+outcome` (pushed or not, opened or not, merged or not, in; the exit code and the
+summary's first line, out).
 
 ## 6. The changelog at the tag
 
@@ -180,5 +204,6 @@ shell inside the workflow, so that it can be run twice and tested:
 `-SelfTest` builds throwaway repositories in the temporary directory and walks
 every case: the rails, the format of a line, each of the three refusals, a dry
 run that refuses nothing, two lines compiling in merge order, the move after a
-release, and the commit the `ci is green` gate reads. CI runs it in the native
-job.
+release, the commit the `ci is green` gate reads, and how the step that files the
+notes ends — green with the pull request named, red for a branch that was not
+pushed or a pull request that was not opened. CI runs it in the native job.
