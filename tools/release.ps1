@@ -19,10 +19,19 @@
       move        after the release is out: the lines into release-notes/vX.Y.Z.md as published,
                   release-notes/unreleased/ emptied, the version moved to the next patch in every
                   place that carries it, and CHANGELOG.md's next section opened.
-      ci-commit   which commit the *ci is green* gate must look at. The pull request the workflow
-                  merges after a release gets no ci run of its own - GitHub starts no workflow from
-                  an event raised with the job's own token - so the release after it would wait for
-                  a run that never comes. This walks master's head back over commits that are the
+      pr-body     what that pull request says about itself, including why it is a person who
+                  merges it: master requires checks, and GitHub holds the ci run of a pull request
+                  the job's own token opened for a maintainer's approval.
+      outcome     how the step that files them ends. Pushed or not, opened or not, merged or not,
+                  in; the exit code and the first line of the run's summary, out. A pull request
+                  left OPEN is what every release leaves while master requires a check, so that
+                  ending is GREEN and says which pull request a person must merge; a branch that
+                  could not be pushed and a pull request that could not be opened are failures and
+                  are red.
+      ci-commit   which commit the *ci is green* gate must look at. A commit a run of the release
+                  workflow puts on master itself gets no ci run - GitHub starts no workflow from an
+                  event raised with the job's own token - so the release after it would wait for a
+                  run that never comes. This walks master's head back over commits that are the
                   github-actions bot's AND touch nothing but the release's own files, and names the
                   commit ci really ran on.
 
@@ -34,7 +43,7 @@
     docs/release.md is the page. tasks/RUNBOOK.md is where a task is told to leave its line.
 
 .PARAMETER Action
-    check, plan, notes, move or ci-commit. See above.
+    check, plan, notes, move, pr-body, outcome or ci-commit. See above.
 
 .PARAMETER Repository
     The working tree to act in. The repository root by default.
@@ -48,7 +57,26 @@
     ci-commit: where to start walking. HEAD by default.
 
 .PARAMETER Out
-    notes: the file to write the bullets to. Standard output as well, either way.
+    notes, pr-body: the file to write to. Standard output as well, either way.
+
+.PARAMETER Tag
+    pr-body, outcome: the tag of the release that was just published. It is passed in rather than
+    read, because by then the move has already put the NEXT version in VERSION.
+
+.PARAMETER Branch
+    outcome: the branch the notes' commit was pushed to, release/vX.Y.Z.
+
+.PARAMETER Number
+    outcome: the pull request, once there is one.
+
+.PARAMETER Pushed
+.PARAMETER Opened
+.PARAMETER Merged
+    outcome: how far the step got.
+
+.PARAMETER Because
+    outcome: what failed, in the step's own words, where it knows better than the state does - the
+    move itself failing is the one case. The sentence of the state otherwise.
 
 .PARAMETER DryRun
     plan: a rehearsal. The version is 0.0.0-dryrun+<sha7>, nothing is refused, and what a real
@@ -67,12 +95,19 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('check', 'plan', 'notes', 'move', 'ci-commit')]
+    [ValidateSet('check', 'plan', 'notes', 'move', 'pr-body', 'outcome', 'ci-commit')]
     [string]$Action = '',
     [string]$Repository = '',
     [string]$Ref = '',
     [string]$Sha = '',
     [string]$Out = '',
+    [string]$Tag = '',
+    [string]$Branch = '',
+    [string]$Number = '',
+    [string]$Because = '',
+    [switch]$Pushed,
+    [switch]$Opened,
+    [switch]$Merged,
     [switch]$DryRun,
     [datetime]$At = [datetime]::UtcNow,
     [switch]$SelfTest
@@ -96,6 +131,15 @@ $script:ReleaseOwnFiles = @(
     'lib/agent-core/include/agent/Version.h'
 )
 $script:ReleaseOwnPrefixes = @('release-notes/')
+
+# What master requires before a merge, which is why the pull request after a release is a person's
+# to merge and not the job's: the job's own token cannot wait for these. GitHub does start a `ci`
+# run for that pull request and then holds it for a maintainer's approval, so neither check reports
+# until somebody approves it. It is a repository setting - Settings > Branches - and this is the
+# only copy of it in the tree: the sentence a release ends with and the pull request's own body
+# both read it from here. Taking the checks off master is what would let the job merge its own
+# pull request (pile 1.12's FOLLOWUPS.md, Thomas's to decide).
+$script:MasterRequires = @('build (heltec_v3)', 'native tests')
 
 # The identity the workflow commits as. ci-commit insists on it: a commit touching only the files
 # above, made by anybody else, is a commit ci did run on and must be waited for.
@@ -478,6 +522,157 @@ $bullets
     Write-Pair 'next' $next
 }
 
+# ---- the pull request a release leaves behind ----------------------------------------------------
+
+function Format-RequiredChecks {
+    return (@($script:MasterRequires | ForEach-Object { "``$_``" }) -join ' and ')
+}
+
+# What that pull request says about itself. The last half is the part that matters to whoever opens
+# it: master requires checks, GitHub holds this pull request's own ci run for a maintainer's
+# approval, and either way of finishing is right (task p1.12-54). It used to say that no check runs
+# on it at all, which is not what happens.
+function Get-NotesPullRequestBody {
+    param([string]$Tag)
+
+    $requires = Format-RequiredChecks
+    return (@(
+        "**$Tag is published.** This is what a release leaves behind, and the workflow that published it opened this (``.github/workflows/release.yml``, docs/release.md):",
+        '',
+        "- the lines that release shipped, out of ``release-notes/unreleased/`` and into ``release-notes/$Tag.md``, as published;",
+        '- the version moved to the next patch in the four places that carry it: `VERSION`, `lib/agent-core/include/agent/Version.h`, `lib/agent-core/library.json` and `lib/agent-core/idf_component.yml`;',
+        "- ``CHANGELOG.md``'s next section opened above the released one, so the file reads right at ``$Tag`` for a consumer that pins it.",
+        '',
+        "**A person merges this one.** ``master`` requires $requires before a merge, and the job that opened this cannot wait for them: GitHub does start a ``ci`` run for a pull request raised with the job's own token, but holds it for a maintainer's approval (*1 workflow awaiting approval*), so until somebody approves it neither check reports - and a run left unapproved ends as a failure.",
+        '',
+        'Either way of finishing is right:',
+        '',
+        '- **approve the run** on this pull request and merge it when it is green;',
+        "- **merge it without waiting.** The commit touches the release's own files and nothing else, which is also what lets the next release read ``ci``'s verdict from the commit underneath this one.",
+        '',
+        'Until this lands, the next press refuses: the tag of the version it would release already exists.'
+    ) -join "`n")
+}
+
+# How the step that files the notes ends, in ONE place (task p1.12-54, deliverable 2): pushed or
+# not, opened or not, merged or not, in; the exit code, the first line of the run's summary and the
+# sentence the step ends with, out.
+#
+# The ending that is not a failure is the one every release of this repository has: the pull request
+# is open, master requires checks on it, and the job cannot wait for them. A release that published
+# is a GREEN run whose summary's first line names the pull request a person must merge - the Walter
+# firmware's release.yml ends the same way (its `waiting`). Red is kept for the two endings where
+# nothing is waiting for anybody because something failed: the branch never reached origin, or the
+# pull request was not opened.
+function Get-NotesPullRequestOutcome {
+    param(
+        [string]$Tag,
+        [string]$Branch,
+        [string]$Number,
+        [bool]$Pushed,
+        [bool]$Opened,
+        [bool]$Merged,
+        [string]$Because
+    )
+
+    $refuses = "Until then the next press refuses with *the tag $Tag already exists* - which is the point: the version has not moved (docs/release.md)."
+
+    if ($Merged) {
+        return [pscustomobject]@{
+            code  = 0
+            why   = ''
+            lines = @("$Tag's notes and version went to master as pull request #$Number, squashed from ``$Branch``.")
+        }
+    }
+
+    if ($Opened) {
+        $requires = Format-RequiredChecks
+        return [pscustomobject]@{
+            code  = 0
+            why   = "$Tag is published; pull request #$Number files its notes and moves the version on, and is left for a person to merge"
+            lines = @(
+                "### $Tag is published; pull request #$Number is left for a person to merge",
+                '',
+                "The release is out and nothing needs undoing. What is left is the pull request that files its notes and moves the version on: #$Number, from ``$Branch``. This job cannot merge it, and that is every release - ``master`` requires $requires before a merge, and GitHub holds the ``ci`` run of a pull request raised with the job's own token for a maintainer's approval (*1 workflow awaiting approval*), so neither check reports by itself.",
+                '',
+                'Either way of finishing it is right:',
+                '',
+                '- approve the run on the pull request and merge it when it is green;',
+                "- merge it without waiting: the commit touches the release's own files and nothing else - ``VERSION``, the three manifests, ``CHANGELOG.md`` and ``release-notes/``.",
+                '',
+                $refuses
+            )
+        }
+    }
+
+    if ($Pushed) {
+        $what = $Because
+        if (-not $what) { $what = "the pull request for ``$Branch`` could not be opened" }
+        return [pscustomobject]@{
+            code  = 1
+            why   = $what
+            lines = @(
+                "### $Tag is published; the pull request that files its notes was not opened",
+                '',
+                "The release is out and nothing needs undoing. Nothing here is waiting for a person, though - something failed: $what.",
+                '',
+                'Two things cause that: Settings > Actions > General > "Allow GitHub Actions to create and approve pull requests" was switched off, or master changed one of the release''s own files while this run was publishing.',
+                '',
+                "The commit is on origin as ``$Branch``: open a pull request from it and merge it, or move VERSION and the three manifests to the next patch yourself. $refuses"
+            )
+        }
+    }
+
+    $what = $Because
+    if (-not $what) { $what = "the branch ``$Branch`` could not be pushed" }
+    return [pscustomobject]@{
+        code  = 1
+        why   = $what
+        lines = @(
+            "### $Tag is published; its notes were not filed",
+            '',
+            "The release is out and nothing needs undoing. Nothing here is waiting for a person, though - something failed: $what.",
+            '',
+            "Nothing reached origin, so there is no branch and no pull request: run ``tools/release.ps1 -Action move`` on master's head and open the pull request yourself, or move VERSION and the three manifests to the next patch by hand. $refuses"
+        )
+    }
+}
+
+function Write-Summary {
+    param([string[]]$Lines)
+
+    $text = ($Lines -join "`n")
+    Write-Output $text
+    if ($env:GITHUB_STEP_SUMMARY) { Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $text }
+}
+
+function Invoke-PrBody {
+    param([string]$Tag, [string]$Out)
+
+    if (-not $Tag) { throw 'pr-body needs -Tag: the release that has just been published.' }
+    $body = Get-NotesPullRequestBody -Tag $Tag
+    if ($Out) {
+        # .NET's current directory is not PowerShell's, and Write-Text is [System.IO.File]'s.
+        if (-not [System.IO.Path]::IsPathRooted($Out)) { $Out = Join-Path (Get-Location).Path $Out }
+        $parent = Split-Path -Parent $Out
+        if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+        Write-Text $Out ($body + "`n")
+    }
+    Write-Output $body
+}
+
+function Invoke-Outcome {
+    param([string]$Tag, [string]$Branch, [string]$Number, [bool]$Pushed, [bool]$Opened, [bool]$Merged, [string]$Because)
+
+    if (-not $Tag) { throw 'outcome needs -Tag: the release that has just been published.' }
+    $outcome = Get-NotesPullRequestOutcome -Tag $Tag -Branch $Branch -Number $Number -Pushed $Pushed -Opened $Opened -Merged $Merged -Because $Because
+    Write-Summary $outcome.lines
+    # A green run that leaves something for a person says so where a run is glanced at and not only
+    # where its summary is read.
+    if ($outcome.code -eq 0 -and $outcome.why) { Write-Output "::warning::$($outcome.why)" }
+    if ($outcome.code -ne 0) { throw $outcome.why }
+}
+
 # ---- ci-commit -----------------------------------------------------------------------------------
 
 function Test-ReleaseOwnCommit {
@@ -556,6 +751,10 @@ function Invoke-SelfTest {
     if ($PSVersionTable.PSEdition -eq 'Core') { $host_ = 'pwsh' }
     $realOutput = $env:GITHUB_OUTPUT
     $env:GITHUB_OUTPUT = ''
+    # outcome writes the run's summary where a workflow names one; the cases below must not write
+    # into the real one.
+    $realSummary = $env:GITHUB_STEP_SUMMARY
+    $env:GITHUB_STEP_SUMMARY = ''
 
     function Run {
         param([string]$Root, [string[]]$Arguments)
@@ -809,9 +1008,102 @@ function Invoke-SelfTest {
         if ($r.text -notmatch "ci_sha=$head") { throw "it walked past a person's commit: $($r.text)" }
     }
 
+    # 12. How the step that files the notes ends (task p1.12-54). Four endings, one place: the
+    # function is called here rather than through a child process because what is asserted is
+    # exactly its two outputs, the exit code and the summary's first line. The case after them
+    # holds the door: a red ending really does end the step.
+    function Ending {
+        param([bool]$Pushed, [bool]$Opened, [bool]$Merged, [string]$Because = '')
+
+        return Get-NotesPullRequestOutcome -Tag 'v1.2.3' -Branch 'release/v1.2.3' -Number '58' `
+            -Pushed $Pushed -Opened $Opened -Merged $Merged -Because $Because
+    }
+
+    Confirm 'pushed, opened, not merged: the run is green and the first line names the pull request' {
+        $o = Ending -Pushed $true -Opened $true -Merged $false
+        if ($o.code -ne 0) { throw "it ended $($o.code): $($o.lines[0])" }
+        if ($o.lines[0] -notmatch 'pull request #58') { throw "the first line does not name it: $($o.lines[0])" }
+        if ($o.lines[0] -notmatch 'v1\.2\.3 is published') { throw "the first line does not say the release is out: $($o.lines[0])" }
+        if ($o.lines[0] -notmatch 'for a person to merge') { throw "the first line does not say what is left: $($o.lines[0])" }
+    }
+
+    Confirm 'and it names the checks master requires, and both ways to finish it' {
+        $text = (Ending -Pushed $true -Opened $true -Merged $false).lines -join "`n"
+        foreach ($check in $script:MasterRequires) {
+            if ($text -notmatch [regex]::Escape($check)) { throw "it does not name $check : $text" }
+        }
+        if ($text -notmatch 'awaiting approval') { throw "it does not say GitHub holds the run: $text" }
+        if ($text -notmatch 'merge it when it is green') { throw "it does not offer the first way: $text" }
+        if ($text -notmatch 'merge it without waiting') { throw "it does not offer the second way: $text" }
+    }
+
+    Confirm 'not pushed: the run is red, with its own sentence' {
+        $o = Ending -Pushed $false -Opened $false -Merged $false
+        if ($o.code -eq 0) { throw "it ended green: $($o.lines[0])" }
+        if ($o.why -notmatch 'release/v1\.2\.3` could not be pushed') { throw "the sentence is not the branch's: $($o.why)" }
+        if ($o.lines[0] -notmatch 'its notes were not filed') { throw "the first line is not its own: $($o.lines[0])" }
+    }
+
+    Confirm 'pushed but not opened: the run is red, with the other sentence' {
+        $o = Ending -Pushed $true -Opened $false -Merged $false
+        if ($o.code -eq 0) { throw "it ended green: $($o.lines[0])" }
+        if ($o.why -notmatch 'could not be opened') { throw "the sentence is not the pull request's: $($o.why)" }
+        if ($o.lines[0] -notmatch 'was not opened') { throw "the first line is not its own: $($o.lines[0])" }
+    }
+
+    Confirm 'and the move''s own failure is the sentence that ending carries' {
+        $o = Ending -Pushed $false -Opened $false -Merged $false -Because 'the move itself failed: nothing to move'
+        if ($o.code -eq 0) { throw 'it ended green' }
+        if ($o.why -ne 'the move itself failed: nothing to move') { throw "the step's own words were lost: $($o.why)" }
+    }
+
+    Confirm 'merged: one line, and nothing is left for anybody' {
+        $o = Ending -Pushed $true -Opened $true -Merged $true
+        if ($o.code -ne 0) { throw "it ended $($o.code)" }
+        if ($o.lines.Count -ne 1) { throw "$($o.lines.Count) lines where one will do" }
+        if ($o.lines[0] -notmatch 'went to master as pull request #58') { throw "it does not say so: $($o.lines[0])" }
+        if ($o.why) { throw "it left something for a person: $($o.why)" }
+    }
+
+    # The two sentences this task took out, where the release of 13 November put them: a setting
+    # nobody had touched, offered as the reason a pull request that exists was not merged.
+    Confirm 'no ending blames a switched-off setting for a pull request that exists' {
+        foreach ($state in @(@($true, $true, $false), @($true, $true, $true))) {
+            $text = (Ending -Pushed $state[0] -Opened $state[1] -Merged $state[2]).lines -join "`n"
+            if ($text -match 'create and approve pull requests') { throw "it still offers the setting: $text" }
+            if ($text -match 'master changed one of') { throw "it still offers master moving: $text" }
+        }
+        $text = (Ending -Pushed $true -Opened $false -Merged $false).lines -join "`n"
+        if ($text -notmatch 'create and approve pull requests') { throw "the setting is gone from where it IS the cause: $text" }
+    }
+
+    Confirm 'the pull request says which checks master requires, and not that no check runs' {
+        $body = Get-NotesPullRequestBody -Tag 'v1.2.3'
+        if ($body -match 'No check runs') { throw "it still says no check runs: $body" }
+        foreach ($check in $script:MasterRequires) {
+            if ($body -notmatch [regex]::Escape($check)) { throw "it does not name $check : $body" }
+        }
+        if ($body -notmatch 'awaiting approval') { throw "it does not say GitHub holds the run: $body" }
+        if ($body -notmatch 'approve the run') { throw "it does not offer the first way: $body" }
+        if ($body -notmatch 'merge it without waiting') { throw "it does not offer the second way: $body" }
+    }
+
+    Confirm 'and the door ends the step on a red ending and not on a green one' {
+        $threw = ''
+        try { & $me -Action outcome -Tag 'v1.2.3' -Branch 'release/v1.2.3' | Out-Null }
+        catch { $threw = $_.Exception.Message }
+        if (-not $threw) { throw 'a branch that was never pushed ended the step green' }
+        if ($threw -notmatch 'could not be pushed') { throw "it ended with: $threw" }
+
+        $green = @(& $me -Action outcome -Tag 'v1.2.3' -Branch 'release/v1.2.3' -Number '58' -Pushed -Opened)
+        if (($green -join "`n") -notmatch 'pull request #58 is left for a person to merge') { throw "the green ending said: $($green -join "`n")" }
+        if (($green -join "`n") -notmatch '::warning::') { throw 'a green run with something left on it says nothing where a run is glanced at' }
+    }
+
     if (-not $env:RELEASE_SELFTEST_KEEP) { Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue }
     else { Write-Host "the scratch repositories are in $scratch" }
     $env:GITHUB_OUTPUT = $realOutput
+    $env:GITHUB_STEP_SUMMARY = $realSummary
 
     Write-Host ''
     if ($script:selfFailures.Count -gt 0) {
@@ -828,7 +1120,7 @@ if ($SelfTest) {
     return
 }
 
-if (-not $Action) { throw 'Name an -Action (check, plan, notes, move, ci-commit) or -SelfTest. Get-Help .\tools\release.ps1 -Detailed.' }
+if (-not $Action) { throw 'Name an -Action (check, plan, notes, move, pr-body, outcome, ci-commit) or -SelfTest. Get-Help .\tools\release.ps1 -Detailed.' }
 
 $root = Resolve-Root $Repository
 
@@ -837,5 +1129,7 @@ switch ($Action) {
     'plan' { Invoke-Plan -Root $root -Ref $Ref -IsDryRun ([bool]$DryRun) }
     'notes' { Invoke-Notes -Root $root -Out $Out }
     'move' { Invoke-Move -Root $root -Sha $Sha -At $At }
+    'pr-body' { Invoke-PrBody -Tag $Tag -Out $Out }
+    'outcome' { Invoke-Outcome -Tag $Tag -Branch $Branch -Number $Number -Pushed ([bool]$Pushed) -Opened ([bool]$Opened) -Merged ([bool]$Merged) -Because $Because }
     'ci-commit' { Invoke-CiCommit -Root $root -Sha $Sha }
 }
