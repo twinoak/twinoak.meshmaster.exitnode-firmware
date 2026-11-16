@@ -31,6 +31,10 @@ release workflow opens the next section when it moves the version on, and
 `tools/release.ps1 -Action check` fails in CI when the heading and `VERSION`
 disagree.
 
+## v0.7.3
+
+Nothing yet.
+
 ## v0.7.2
 
 Pile 1.13 (`tasks/phase-1.13/`). **`agent-core` 0.7.2** in the three manifests;
