@@ -33,7 +33,43 @@ disagree.
 
 ## v0.7.2
 
-Nothing yet.
+Pile 1.13 (`tasks/phase-1.13/`). **`agent-core` 0.7.2** in the three manifests;
+the contract fixtures and the companion frame fixtures are unmoved, and so is
+MeshCore (**`companion-v1.18.0`, `81dbae59`**). **Nothing of yours stops
+compiling and nothing of yours has to change.** What moved is the kept image
+(`docs/library.md` §5.1), and it moved in the one direction that costs you
+nothing: **`kKeptImageVersion` is 2, and version 1 is still read.**
+
+- **Did a method move?** **No.** Nothing of `IMesh`, `IUplink`, `IPlatform`,
+  `IClock`, `IJobExtension`, `JobContext`, `ResultWriter`, `TextOut`, `Backoff`,
+  `WakeState` or `IRetained` moved. Three reads were **added**:
+  `AgentLoop::pendingBatchCount()` and `pendingBatchId()` — the batch that has
+  gone out and is still waiting for an answer — and `ObservationRing::oldestSeq()`.
+- **Did a `MeshReply` constant move?** **No.** `kMeshReplyDataCap` is 184 and
+  `kMeshPathCap` is 64, at the same pin, and no airtime arithmetic moved.
+- **Did the fixtures' manifest commit move?** **No.** Nothing of the wire
+  changed: an observation batch is the bytes it always was, and the `clientId`
+  the server de-duplicates on is the one it always was. What changed is that a
+  **sleep no longer loses it** (p1.13-55): a batch that went out and was not
+  answered now goes out again under the id it was built with after a deep sleep,
+  which is what keeps the server from storing the same adverts at every wake.
+- **The version, and the MeshCore pin.** `agent-core` **0.7.2** against MeshCore
+  **`companion-v1.18.0`** (`81dbae59`).
+
+**The kept image is version 2** (p1.13-55). It appends one block — 40 bytes of
+the pending batch's client id, last of all — and uses version 1's `reserved`
+header field for how many of the adverts that batch holds. Two things follow for
+a consumer that keeps images across an update:
+
+- **The image in your store is read, not refused.** A version 1 image is taken
+  as an image with no batch pending, so the update costs you neither the result
+  it kept nor the adverts it held. Any *other* version is still refused whole,
+  counted in `keptImagesRefused()`, and written over by the next wake.
+- **`mm::kMaxKeptImageLen` is the figure to size your scratch and your store by**
+  — the largest image this library can write, **19 368** bytes: a full result
+  buffer, a full ring and a pending batch's id. It is a constant so that it moves
+  when the library moves; `docs/library.md` §6 step 8 uses it in place of the
+  "about 19.5 kB" a reader used to have to add up.
 
 ## v0.7.1
 

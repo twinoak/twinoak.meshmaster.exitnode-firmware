@@ -702,8 +702,9 @@ knows nor includes any of them.
 | `read(out, cap)` | The image last stored, into `out`: how many bytes were put there, or 0 when the store holds none. Handing back more than the image is long (a whole flash region) is fine; the image says its own length |
 
 **The rule the loop keeps, in one sentence:** *kept results first, oldest first,
-then the waiting adverts with the moment each was heard, whole or not at all,
-one write a wake and none when nothing changed.* What the store cannot hold is
+then the waiting adverts with the moment each was heard, then the id of the
+batch still waiting for an answer, whole or not at all, one write a wake and
+none when nothing changed.* What the store cannot hold is
 dropped from RAM as well and counted in the two figures the heartbeat already
 carries, `resultsDropped` and `observationsDropped`, which the image carries
 across the sleep too — so a store that is too small is a number on the exit
@@ -721,13 +722,44 @@ outage. `WakeReport::observationsNotKept` counts both kinds and the log line say
 which it was. If your unit has an RTC, or takes the server's time before it ever
 sleeps, this never happens.
 
+**And the batch still waiting for an answer crosses the sleep with them**
+(since `0.7.2`). A batch that has gone out and not been accepted must go out
+again *under the id it was built with*, because the server de-duplicates on that
+id (`EXIT-NODES` §6). The id and how many of the ring's oldest adverts it holds
+used to live in the loop's RAM and nowhere else, so a unit that slept woke with
+the adverts and no id, built a new batch of the old ones and the new, and the
+server — which had no id it knew — stored every advert a second time. They are in
+the image now, as **version 2** of it: after `restoreKept()` the first post
+carries that id and those adverts, a server that answers *had it already* costs
+the ring exactly them, and what was heard since follows as a new batch under a
+new id. `AgentLoop::pendingBatchCount()` and `pendingBatchId()` are the pair, and
+the console's `status` prints a `batchid` line while one is waiting.
+
+A batch that is **no longer whole is no longer that batch**, and its id is
+forgotten rather than re-used: a batch whose adverts the ring dropped from its
+front while it waited, or that the image could not hold every advert of, is
+rebuilt as a new batch under a new id. Posting the remainder under the old id
+would have the server de-duplicate on it, store nothing, and the board consume
+adverts it never saw.
+
+**A version 1 image is still read**, as an image with no batch pending: the
+first boot after an update takes what the older firmware kept rather than
+refusing it. Any *other* version is refused whole, as ever.
+
 **The image may hold nothing a result does not.** Its layout is written down in
 `agent/KeptImage.h` — a 32-byte header, then result bodies exactly as
 `postJobResult` would be handed them, then adverts exactly as the ring holds
-them — and the runner's rule already keeps every credential out of a result.
+them, then the 40 bytes of a pending batch's id — and the runner's rule already
+keeps every credential out of a result.
 `test_loop`'s `TheImageHoldsNothingAResultDoesNot` greps the image's own bytes
 for the fixtures' sample passwords after a rotation, a guest login and a `cli`
 job. A person with your flash in hand learns what the server would have.
+
+**How large is an image?** `mm::kMaxKeptImageLen` — the largest this library can
+write, a full result buffer, a full ring and a pending batch's id, **19 368
+bytes** at this version. Size a scratch and a store by that constant rather than
+by a sum done by hand: it moves when the library moves, and a buffer of that many
+bytes can never itself be the reason something is dropped.
 
 **Wear.** At most one write a wake, and none when the image would be what the
 store already holds — in particular none when nothing is kept and the previous
@@ -824,12 +856,12 @@ neighbour list alone is more than the 8 kB of stack the Arduino loop task has.
 8. **What the sleep keeps** (optional, §5.1): `agent.setRetained(&store,
    scratch, sizeof scratch)` once after `begin()`, with a store of yours and a
    scratch the image is built in — the library allocates nothing, so the RAM is
-   yours; a full image is about 19.5 kB (`ResultBuffer::kCapacityBytes` of
-   results, 64 adverts at `kKeptAdvertLen`, and the headers), and the image is
-   never larger than the smaller of the scratch and the store's `capacity()`.
+   yours; **`mm::kMaxKeptImageLen`** (19 368 bytes) is the largest image it can
+   ever write, and the image is never larger than the smaller of the scratch and
+   the store's `capacity()`.
    Then, once a boot and before the first wake, **`agent.restoreKept()`**
-   after `restore(s)`: it reads the image back into the offline buffer and the
-   ring, true when one was read. The end of every `wake()` writes the next
+   after `restore(s)`: it reads the image back into the offline buffer, the ring
+   and the batch that was waiting for an answer, true when one was read. The end of every `wake()` writes the next
    image by itself; `report.keptImageWritten` says whether this wake did, and
    `report.resultsNotKept` / `observationsNotKept` what the store was too small
    for. A torn, short, foreign-version or bad-checksum image is refused whole —
@@ -838,7 +870,7 @@ neighbour list alone is more than the 8 kB of stack the Arduino loop task has.
    wake writes a fresh image over it.
 
 ```cpp
-static uint8_t keptScratch[20480];        // yours: the image is built here
+static uint8_t keptScratch[mm::kMaxKeptImageLen];   // yours: the image is built here
 MyRetained kept;                          // : mm::IRetained, over a flash region
 
 agent.setRetained(&kept, keptScratch, sizeof keptScratch);
@@ -1337,7 +1369,7 @@ tag** the first heading of `CHANGELOG.md` is that release's own. Report both ver
 | add a job type, a log line, a console report | nothing; new behaviour behind the same interfaces |
 | add a defaulted argument to a method of `AgentLoop` — `restore()`'s `awayMs` (task p1.10-42) | **nothing stops compiling**, and what changed is the meaning of a call you already make: read the changelog's entry and pass the figure if you have it. A device that never sleeps has nothing to do |
 | change `WakeState`'s layout | `WakeState::kVersion` goes up, and `restore()` refuses your stored blob rather than misreading it. You lose a backoff across one sleep, which is the right failure |
-| change the kept image's layout (§5.1) | `kKeptImageVersion` goes up, and `restoreKept()` refuses the image in your store whole, counts it, and the next wake writes a fresh one. You lose what one sleep kept, once, across the update — and the counter says so |
+| change the kept image's layout (§5.1) | `kKeptImageVersion` goes up. A version this library knows is read — `0.7.2` reads version 1 as an image with no batch pending, so that update costs nothing — and any other is refused whole, counted, and written over by the next wake, which loses what one sleep kept, once, and says so |
 
 **The changelog is [`CHANGELOG.md`](../CHANGELOG.md)** at the root of this
 repository, and it is written for exactly this page's reader: one section per
@@ -1424,16 +1456,18 @@ already has (`components/interfaces/`, `components/platform/`):
 
 **`IRetained` → a flash region of the Walter's own** (§5.1), not a retained
 slot: its RTC SLOW memory had 36 bytes free after phase 3 (its report 05, *What
-RTC memory costs, again*), and a full image is about 19.5 kB. The three methods
+RTC memory costs, again*), and the largest image is `mm::kMaxKeptImageLen`,
+19 368 bytes. The three methods
 map onto a partition the size of one image or a little more: `capacity()` is the
 region's size, `write()` is an erase and a write of the image's bytes, `read()`
 is a read of the whole region (the image says its own length and carries its own
 CRC-32 — `esp_rom_crc32_le` computes the same one, should the Walter want to
 check it itself). An NVS blob does as well at a few writes a day. The scratch is
-the Walter's RAM, 20 kB at namespace scope; `restoreKept()` goes right after
+the Walter's RAM, `mm::kMaxKeptImageLen` bytes at namespace scope; `restoreKept()` goes right after
 `restore()` in step 8's set-up, and the write at the end of `wake()` needs
 nothing of the Walter's. What the image never holds: the token, a password, a
-message — nothing a result does not.
+message — nothing a result does not, and of the batch that is waiting only its
+client id, which is a random one of this board's own making.
 
 **And the wiring**: `AgentLoop::wake()` is step 8 of the Walter's `WakeCycle`
 (`tasks/phase-3/05-the-wake-cycle.md`, `docs/ARCHITECTURE.md` §10) — the step that
