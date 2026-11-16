@@ -23,3 +23,28 @@ Review findings, tagged with the task that must pick them up. Only the reviewer 
   only a path packet from the sender sets and a flood login clears, and floods the answer when it
   has none (`MyMesh.cpp`, `onPeerDataRecv`, `onPeerPathRecv`). To read: whether this firmware
   sends its path back after a flood login, and how long it waits for a flooded answer.
+
+## Review of 54 (14 November)
+
+Read: the report, `release.yml`'s last step, `tools/release.ps1` (`Get-NotesPullRequestOutcome`,
+`-Action outcome`, `-Action pr-body`, the self-test's cases for them), `docs/release.md` §5, and
+the runs on github.com (pull request #59 merged as 2358192; `ci` green on it and on `master`
+after it; the dry run 43580722678 green). **It does what the task asked. No finding needs a
+task.**
+
+- One place decides how the step ends and writes its summary; the step itself only gathers how
+  far it got. Pushed, opened, not merged is green with the pull request named in the first line
+  and a warning on the run; not pushed, and not opened, are red with their own sentences.
+- The summary and the pull request's body come from the same script, so the rail reads the text
+  it guards.
+
+- [ ] **[later] `master`'s two required checks are written down a second time**
+  (`$script:MasterRequires` in `tools/release.ps1`), because the job's token cannot read branch
+  protection. The report says so. It moves when the rules do (*Thomas to decide*, above).
+- [ ] **[later] Not seen until a release publishes.** `release-notes/unreleased/` is empty and
+  `VERSION` is 0.7.2, so the next press refuses for want of a line. The ending this task built is
+  first read at the release after the next task that leaves one.
+- [ ] **[later] The repeater firmware has not had the same yet.** Its phase 3.12 stopped at its
+  first task on 14 November: that repository is public since 13 November and still asks for the
+  organisation's runners, which public repositories are not offered. This repository's own rule
+  (`tools/check-runners.py`) is the model its task 03 follows.
