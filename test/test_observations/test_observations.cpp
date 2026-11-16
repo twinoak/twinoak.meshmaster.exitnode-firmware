@@ -69,6 +69,29 @@ TEST(Ring, ABatchTheServerTookIsConsumedFromTheOldestEnd) {
   EXPECT_TRUE(ring.empty());
 }
 
+TEST(Ring, TheOldestSeqMovesWithTheFrontOfTheRingAndWithNothingElse) {
+  // What says whether a pending batch is still the ring's oldest adverts (task p1.13-55): the
+  // batch is the first `batchCount` of them, and only something leaving the **front** can make
+  // them other adverts than the ones the batch was built over.
+  mm::ObservationRing ring;
+  EXPECT_EQ(0u, ring.oldestSeq()) << "a fresh ring";
+  for (uint8_t i = 0; i < mm::ObservationRing::kCapacity; i++) ring.push(advert(i, i));
+  EXPECT_EQ(0u, ring.oldestSeq()) << "filling it moves nothing out of the front";
+
+  ring.push(advert(200, 200));  // full: the oldest goes
+  EXPECT_EQ(1u, ring.oldestSeq());
+  EXPECT_EQ(1u, ring.dropped());
+
+  ring.dropNewest(5);  // the other end: the oldest is the same advert
+  EXPECT_EQ(1u, ring.oldestSeq());
+
+  ring.consume(3);  // a batch the server took
+  EXPECT_EQ(4u, ring.oldestSeq());
+
+  ring.clear();  // everything, at once
+  EXPECT_EQ(4u + (mm::ObservationRing::kCapacity - 8), ring.oldestSeq());
+}
+
 TEST(Ring, TheRolesAreTheWordsTheServerStores) {
   EXPECT_STREQ("companion", mm::roleName(1));
   EXPECT_STREQ("repeater", mm::roleName(2));

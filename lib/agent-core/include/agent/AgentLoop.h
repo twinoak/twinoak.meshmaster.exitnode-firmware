@@ -371,22 +371,33 @@ class AgentLoop {
   // a device that sleeps: the Heltec calls neither.
   //
   // `setRetained` hands the loop a store and a scratch the image is built in - the library
-  // allocates nothing, so the RAM is yours, sized to the most you want kept: a full image is
-  // ResultBuffer::kCapacityBytes plus ObservationRing::kCapacity adverts at kKeptAdvertLen and a
-  // few hundred bytes of headers, about 19.5 kB; the image is never larger than the smaller of
+  // allocates nothing, so the RAM is yours, sized to the most you want kept: `kMaxKeptImageLen`
+  // (agent/KeptImage.h) is the largest image this library can write, a full result buffer, a
+  // full ring and a pending batch's id, and a scratch and a store of that many bytes can never
+  // be the reason something is dropped. The image is never larger than the smaller of
   // `scratchLen` and the store's `capacity()`, and what does not fit is dropped and counted. A
   // scratch too small for a header, or a null store, is "no store".
   //
   // At the end of every `wake()` the loop writes **one image** - the kept results first, oldest
-  // first, as many whole ones as fit, then the ring's waiting adverts with the moment each was
-  // heard, as many as fit after them - and only when that image is not the one the store already
-  // holds; a unit whose wakes post everything writes nothing. `restoreKept()` is the way back in:
-  // call it once a boot, after `begin()` and before the first wake, and it reads the image into
-  // the offline buffer and the ring, with the two dropped counters the image carried. True when
-  // an image was read, false when the store held none or the image was refused - a torn, short,
-  // foreign-version or bad-checksum image is refused **whole**, never half-read, counted
-  // (`keptImagesRefused()`, which the next image carries across the sleep too) and logged with
-  // the reason.
+  // first, then the ring's waiting adverts with the moment each was heard, as many as fit after
+  // them, then the client id of the batch still waiting for an answer - and only when that image
+  // is not the one the store already holds; a unit whose wakes post everything writes nothing.
+  //
+  // **The pending batch crosses the sleep with it** (task p1.13-55). A batch that went out and
+  // whose answer was lost must go out again under the id it was built with, because the server
+  // de-duplicates on that id; before this the id was RAM and a sleep took it, so the unit woke
+  // with the adverts, built a new batch of them, and the server stored every advert a second
+  // time. After `restoreKept()` the first post carries that id and those adverts, and a server
+  // that answers *had it already* costs the ring exactly them. A batch the image could not hold
+  // whole is not kept: a batch missing an advert is not that batch.
+  //
+  // `restoreKept()` is the way back in: call it once a boot, after `begin()` and before the
+  // first wake, and it reads the image into the offline buffer, the ring and the pending batch,
+  // with the two dropped counters the image carried. True when an image was read, false when the
+  // store held none or the image was refused - a torn, short, bad-checksum or foreign-version
+  // image is refused **whole**, never half-read, counted (`keptImagesRefused()`, which the next
+  // image carries across the sleep too) and logged with the reason. **Version 1 is not foreign**:
+  // an image written before this task is read, as one with no batch pending.
   void setRetained(IRetained* store, uint8_t* scratch, size_t scratchLen);
   bool restoreKept();
   uint32_t keptImagesRefused() const { return imagesRefused_; }
@@ -407,6 +418,13 @@ class AgentLoop {
 
   // After `set meshmaster.*` or `erase confirm`: forget a 401 and start again.
   void reconfigure();
+
+  // The batch that has gone out and is still waiting for an answer, if any: how many of the
+  // ring's oldest adverts it holds, and the client id it was built with - the id the server
+  // de-duplicates on, so a resend of it costs nothing twice. 0 and "" when none is waiting. The
+  // pair crosses a sleep in the kept image (task p1.13-55) and the console's `status` says so.
+  size_t pendingBatchCount() const { return batchCount_; }
+  const char* pendingBatchId() const { return batchId_; }
 
   ObservationRing& ring() { return ring_; }
   const Counters& counters() const { return counters_; }
@@ -492,6 +510,9 @@ class AgentLoop {
   // `maxItems` is the ceiling on how many of the ring's entries go into this batch; a wake with
   // a byte cap comes back down through it until the body fits.
   size_t buildBatch(uint32_t nowMs, char* out, size_t cap, size_t maxItems = kObservationBatchSize);
+  // The pending batch, if its adverts are no longer the ring's oldest, is forgotten whole: its
+  // id goes and the next batch is a new one (task p1.13-55).
+  void forgetBatchIfNotWhole();
   uint32_t epochOf(uint32_t heardAtMillis, uint32_t nowMs) const;
   // The platform's millisecond clock, under the name every line of AgentLoop.cpp already used
   // when it was Arduino's.
@@ -541,8 +562,16 @@ class AgentLoop {
   int lastBatchCount_ = 0;
 
   // A batch keeps its client id across a retry: that id is what the server de-duplicates on.
+  // Across a **sleep** as well, since task p1.13-55: the id and the count go into the kept image
+  // and `restoreKept` puts them back, because a board that woke without them built a new batch
+  // of the same adverts and the server, having no id it knew, stored every one of them again.
   char batchId_[40] = {0};
   size_t batchCount_ = 0;
+  // The ring's `oldestSeq()` when that batch was built. The batch is the ring's `batchCount_`
+  // oldest adverts; this number having moved means they are not those adverts any more - the
+  // ring was full and dropped its oldest while the batch waited - and a batch that is no longer
+  // whole is no longer that batch (`forgetBatchIfNotWhole`).
+  uint32_t batchOldestSeq_ = 0;
 
   // ---- one wake (task p1.5-18) ----------------------------------------------------------------
   // The intent is a member because the heartbeat is built in one place for both ways of driving

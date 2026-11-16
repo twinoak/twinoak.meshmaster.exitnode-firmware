@@ -107,6 +107,69 @@ mm::HeardAdvert advert(uint8_t n, uint32_t heardAtMs) {
   return a;
 }
 
+// How many items a batch body carries, counted the way the fake server counts them.
+int itemsIn(const std::string& batch) {
+  int n = 0;
+  size_t at = 0;
+  while ((at = batch.find("\"publicKey\":", at)) != std::string::npos) {
+    n++;
+    at += 12;
+  }
+  return n;
+}
+
+// A kept image of **version 1**, written here byte for byte as the library wrote one before task
+// p1.13-55 - the header with `reserved` 0 and no block for a pending batch, then the results,
+// then the adverts - so that what the reader is held to is the format as it was shipped and not
+// today's writer with a field turned off. The fixture of the acceptance criterion.
+std::vector<uint8_t> versionOneImage(long long jobId, const std::string& body, const std::vector<mm::HeardAdvert>& adverts,
+                                     uint32_t heardAtEpoch) {
+  const auto put16 = [](std::vector<uint8_t>& out, size_t at, uint16_t v) {
+    out[at] = static_cast<uint8_t>(v);
+    out[at + 1] = static_cast<uint8_t>(v >> 8);
+  };
+  const auto put32 = [](std::vector<uint8_t>& out, size_t at, uint32_t v) {
+    for (size_t i = 0; i < 4; i++) out[at + i] = static_cast<uint8_t>(v >> (8 * i));
+  };
+  std::vector<uint8_t> img(32, 0);
+  img[0] = 0x4B;  // "KEPT"
+  img[1] = 0x45;
+  img[2] = 0x50;
+  img[3] = 0x54;
+  put16(img, 8, 1);                                        // version 1
+  put16(img, 10, 1);                                       // one result
+  put16(img, 12, static_cast<uint16_t>(adverts.size()));   // the adverts
+  put16(img, 14, 0);                                       // `reserved`, which version 1 wrote 0
+
+  img.resize(img.size() + 12);
+  put32(img, img.size() - 12, static_cast<uint32_t>(jobId));
+  put32(img, img.size() - 8, static_cast<uint32_t>(jobId >> 32));
+  put32(img, img.size() - 4, static_cast<uint32_t>(body.size()));
+  img.insert(img.end(), body.begin(), body.end());
+
+  for (const mm::HeardAdvert& a : adverts) {
+    const size_t at = img.size();
+    img.resize(at + 108, 0);
+    std::memcpy(&img[at], a.publicKey, mm::kPublicKeyLen);
+    put32(img, at + 32, heardAtEpoch);
+    std::memcpy(&img[at + 36], a.pathBytes, mm::kMaxObservationPathBytes);
+    img[at + 60] = a.pathByteLen;
+    img[at + 61] = a.pathHashSize;
+    img[at + 62] = a.hops;
+    img[at + 63] = static_cast<uint8_t>(a.snrQ4);
+    put16(img, at + 64, static_cast<uint16_t>(a.rssi));
+    img[at + 66] = a.advType;
+    img[at + 67] = a.hasPosition ? 1 : 0;
+    put32(img, at + 68, static_cast<uint32_t>(a.latE6));
+    put32(img, at + 72, static_cast<uint32_t>(a.lonE6));
+    std::memcpy(&img[at + 76], a.name, mm::kMaxObservationNameLen);
+  }
+
+  put32(img, 16, static_cast<uint32_t>(img.size()));
+  put32(img, 4, mm::crc32Of(img.data() + 8, img.size() - 8));
+  return img;
+}
+
 std::string memberOf(const std::string& json, const std::string& key) {
   const std::string needle = "\"" + key + "\":";
   const size_t found = json.find(needle);
@@ -2322,6 +2385,18 @@ TEST_F(LoopTest, EveryKindOfBadImageIsRefusedWholeAndCounted) {
          reseal(img);
        },
        "records do not add up"},
+      {"a batch of more adverts than the image holds",
+       [&](std::vector<uint8_t>& img) {
+         img[14] = 4;  // the image holds three adverts, so no batch of four is in it
+         reseal(img);
+       },
+       "counts do not add up"},
+      {"a batch whose id is not in the image",
+       [&](std::vector<uint8_t>& img) {
+         img[14] = 2;  // two of the three adverts, but no block for the id behind them
+         reseal(img);
+       },
+       "records do not add up"},
   };
   for (const Damage& damage : damages) {
     std::vector<uint8_t> bad = good;
@@ -2527,6 +2602,283 @@ TEST_F(LoopTest, AWakeWritesAtMostOneImageAndNoneWhenTheStoreAlreadyHoldsIt) {
   EXPECT_EQ(empty.resultCount(), 0u);
   EXPECT_EQ(empty.advertCount(), 0u);
   EXPECT_EQ(store.image().size(), mm::kKeptImageHeaderLen);
+}
+
+// ---------------------------------------------------------------------------------------------
+// A batch keeps its id over a sleep (task p1.13-55)
+//
+// `doObservations` says it itself: a batch built and not yet accepted must go out again exactly
+// as it was, under the client id it was built with, because the server de-duplicates on that id.
+// Until this task the id and the count lived in two fields of the loop and nowhere else, so a
+// board that deep-sleeps woke with the adverts and no id, built a new batch of the old adverts
+// and the new ones, and the server - which could not know - stored every one of them again. On
+// 16 November 2026 the Walter unit sent batches of 13, 14, 15, 16, 17 and 18 adverts in six
+// wakes running, and the hundred newest rows meshmaster.dk held from it were 19 adverts.
+
+TEST_F(LoopTest, ABatchWhoseAnswerWasLostGoesOutAgainUnderItsIdAfterASleep) {
+  fake::FakeRetained store;
+  Boot unit = boot(store);
+  server.answerHeartbeat(60, 1, 3600, false, platform.clock().now());
+  for (uint8_t i = 0; i < 5; i++) unit.loop->ring().push(advert(i, platform.millis()));
+
+  // The post reaches the server, which stores it; the answer never reaches the board.
+  server.loseTheAnswerToObservations(1);
+  const mm::WakeReport first = unit.loop->wake(hourly(), mm::Budget());
+
+  EXPECT_EQ(first.observations, mm::StepOutcome::Failed);
+  ASSERT_EQ(server.observations().size(), 1u);
+  const std::string id = memberOf(server.observations()[0], "clientId");
+  ASSERT_FALSE(id.empty());
+  EXPECT_EQ(itemsIn(server.observations()[0]), 5);
+  EXPECT_EQ(unit.loop->pendingBatchCount(), 5u);
+  EXPECT_STREQ(unit.loop->pendingBatchId(), id.c_str());
+  EXPECT_EQ(unit.loop->ring().size(), 5u) << "nothing is consumed until the server says it has them";
+  ASSERT_TRUE(first.keptImageWritten);
+
+  // The image holds the id and how many of its adverts the batch is - the whole of what a sleep
+  // used to lose.
+  mm::KeptImageReader image;
+  ASSERT_EQ(image.check(store.image().data(), store.image().size()), nullptr);
+  EXPECT_EQ(image.version(), mm::kKeptImageVersion);
+  EXPECT_EQ(image.advertCount(), 5u);
+  EXPECT_EQ(image.batchCount(), 5u);
+  EXPECT_STREQ(image.batchId(), id.c_str());
+  EXPECT_NE(store.text().find(id), std::string::npos) << "and it is in the bytes";
+
+  // The sleep, and the boot after it: the first post is that batch, under that id.
+  Boot woken = boot(store, &unit);
+  ASSERT_TRUE(woken.restored);
+  EXPECT_EQ(woken.loop->pendingBatchCount(), 5u);
+  EXPECT_STREQ(woken.loop->pendingBatchId(), id.c_str());
+  EXPECT_EQ(woken.loop->ring().size(), 5u);
+  server.forgetCalls();
+  server.answerHeartbeat(60, 1, 3600, false, platform.clock().now());
+  platform.advanceSeconds(3600);  // past the backoff the failed post left in the state
+
+  const mm::WakeReport second = woken.loop->wake(hourly(), mm::Budget());
+
+  ASSERT_EQ(server.observations().size(), 1u);
+  EXPECT_EQ(memberOf(server.observations()[0], "clientId"), id) << "the id it was built with";
+  EXPECT_EQ(itemsIn(server.observations()[0]), 5) << "and the same five";
+  for (int i = 0; i < 5; i++) {
+    const std::string name = "\"name\":\"Repeater " + std::to_string(i) + "\"";
+    EXPECT_NE(server.observations()[0].find(name), std::string::npos) << name;
+  }
+  // The server answers *had it already*, and the five cost the ring exactly themselves.
+  EXPECT_TRUE(fake::LogCapture::the().holds("the server had this batch already"));
+  EXPECT_EQ(second.observationsPosted, 5);
+  EXPECT_EQ(woken.loop->ring().size(), 0u);
+  EXPECT_EQ(woken.loop->pendingBatchCount(), 0u);
+  EXPECT_STREQ(woken.loop->pendingBatchId(), "");
+
+  // What was heard since goes out next, as a new batch under another id.
+  for (uint8_t i = 10; i < 13; i++) woken.loop->ring().push(advert(i, platform.millis()));
+  server.forgetCalls();
+  server.answerHeartbeat(60, 1, 3600, false, platform.clock().now());
+  const mm::WakeReport third = woken.loop->wake(hourly(), mm::Budget());
+
+  EXPECT_EQ(third.observationsPosted, 3);
+  ASSERT_EQ(server.observations().size(), 1u);
+  EXPECT_NE(memberOf(server.observations()[0], "clientId"), id) << "a new batch is a new id";
+  EXPECT_EQ(itemsIn(server.observations()[0]), 3);
+  EXPECT_EQ(server.seenBatches().size(), 2u) << "two batches in all, and neither stored twice";
+}
+
+TEST_F(LoopTest, TheBatchIsStillThatBatchAfterASecondSleepWithTheAnswerLostAgain) {
+  fake::FakeRetained store;
+  Boot unit = boot(store);
+  server.answerHeartbeat(60, 1, 3600, false, platform.clock().now());
+  for (uint8_t i = 0; i < 5; i++) unit.loop->ring().push(advert(i, platform.millis()));
+  server.loseTheAnswerToObservations(2);
+
+  const mm::WakeReport first = unit.loop->wake(hourly(), mm::Budget());
+  EXPECT_EQ(first.observations, mm::StepOutcome::Failed);
+  ASSERT_EQ(server.observations().size(), 1u);
+  const std::string id = memberOf(server.observations()[0], "clientId");
+  ASSERT_FALSE(id.empty());
+
+  // The first sleep, and a second wake whose answer is lost in the same way.
+  Boot second = boot(store, &unit);
+  ASSERT_TRUE(second.restored);
+  EXPECT_STREQ(second.loop->pendingBatchId(), id.c_str());
+  platform.advanceSeconds(3600);
+  server.answerHeartbeat(60, 1, 3600, false, platform.clock().now());
+  const mm::WakeReport again = second.loop->wake(hourly(), mm::Budget());
+  EXPECT_EQ(again.observations, mm::StepOutcome::Failed);
+  ASSERT_EQ(server.observations().size(), 2u);
+  EXPECT_EQ(memberOf(server.observations()[1], "clientId"), id);
+  EXPECT_EQ(second.loop->pendingBatchCount(), 5u);
+  EXPECT_EQ(second.loop->ring().size(), 5u);
+
+  // The second sleep: the third post is still that batch under that id, and the server - which
+  // has had it since the first - stores nothing a third time.
+  Boot third = boot(store, &second);
+  ASSERT_TRUE(third.restored);
+  EXPECT_STREQ(third.loop->pendingBatchId(), id.c_str());
+  platform.advanceSeconds(3600);
+  server.answerHeartbeat(60, 1, 3600, false, platform.clock().now());
+  const mm::WakeReport last = third.loop->wake(hourly(), mm::Budget());
+
+  ASSERT_EQ(server.observations().size(), 3u);
+  EXPECT_EQ(memberOf(server.observations()[2], "clientId"), id) << "two sleeps on, the same batch";
+  EXPECT_EQ(itemsIn(server.observations()[2]), 5);
+  EXPECT_EQ(last.observationsPosted, 5);
+  EXPECT_EQ(third.loop->ring().size(), 0u);
+  EXPECT_EQ(server.seenBatches().size(), 1u) << "one batch reached the server, three times";
+}
+
+TEST_F(LoopTest, ABatchTheRingNoLongerHoldsIsForgottenAndNothingIsConsumedUnsent) {
+  // A batch that is no longer whole is no longer that batch. Before this task the loop kept the
+  // count and the id whatever the ring did under them: it would have posted the **new** oldest
+  // five under the old id, the server would have de-duplicated on that id and stored nothing,
+  // and `ring_.consume(5)` would have taken five adverts the server never saw. That is the same
+  // failure a sleep caused, without a sleep.
+  fake::FakeRetained store;
+  Boot unit = boot(store);
+  server.answerHeartbeat(60, 1, 3600, false, platform.clock().now());
+  for (uint8_t i = 0; i < 5; i++) unit.loop->ring().push(advert(i, platform.millis()));
+  server.loseTheAnswerToObservations(1);
+  ASSERT_EQ(unit.loop->wake(hourly(), mm::Budget()).observations, mm::StepOutcome::Failed);
+  ASSERT_EQ(server.observations().size(), 1u);
+  const std::string id = memberOf(server.observations()[0], "clientId");
+  ASSERT_EQ(unit.loop->pendingBatchCount(), 5u);
+
+  // The channel is busy while the batch waits: the ring fills and drops its oldest, which are
+  // the batch's own five.
+  for (size_t i = 0; i < mm::ObservationRing::kCapacity; i++) {
+    unit.loop->ring().push(advert(static_cast<uint8_t>(100 + i), platform.millis()));
+  }
+  ASSERT_EQ(unit.loop->ring().size(), mm::ObservationRing::kCapacity);
+  ASSERT_EQ(unit.loop->ring().dropped(), 5u);
+
+  platform.advanceSeconds(3600);
+  server.forgetCalls();
+  server.answerHeartbeat(60, 1, 3600, false, platform.clock().now());
+  const mm::WakeReport second = unit.loop->wake(hourly(), mm::Budget());
+
+  EXPECT_TRUE(fake::LogCapture::the().holds("is not the ring's oldest"));
+  EXPECT_EQ(unit.loop->pendingBatchCount(), 0u);
+  ASSERT_FALSE(server.observations().empty());
+  int posted = 0;
+  for (const std::string& batch : server.observations()) {
+    EXPECT_NE(memberOf(batch, "clientId"), id) << "the forgotten id is never used again";
+    posted += itemsIn(batch);
+  }
+  EXPECT_EQ(posted, static_cast<int>(mm::ObservationRing::kCapacity))
+      << "every advert the ring still held went out; nothing was consumed unsent";
+  EXPECT_EQ(second.observationsPosted, static_cast<int>(mm::ObservationRing::kCapacity));
+  EXPECT_EQ(unit.loop->ring().size(), 0u);
+  EXPECT_EQ(unit.loop->ring().dropped(), 5u) << "and the five the ring dropped are counted once";
+}
+
+TEST_F(LoopTest, AnImageThatCannotHoldEveryAdvertOfThePendingBatchKeepsNoBatch) {
+  // Three of the five is not that batch: an id over three adverts would have the server
+  // de-duplicate the whole of the batch away and store none of them.
+  fake::FakeRetained small(mm::kKeptImageHeaderLen + 3 * mm::kKeptAdvertLen + mm::kKeptBatchIdLen);
+  Boot unit = boot(small);
+  server.answerHeartbeat(60, 1, 3600, false, platform.clock().now());
+  for (uint8_t i = 0; i < 5; i++) unit.loop->ring().push(advert(i, platform.millis()));
+  server.loseTheAnswerToObservations(1);
+
+  const mm::WakeReport first = unit.loop->wake(hourly(), mm::Budget());
+
+  ASSERT_EQ(server.observations().size(), 1u);
+  const std::string id = memberOf(server.observations()[0], "clientId");
+  ASSERT_EQ(unit.loop->pendingBatchCount(), 5u) << "in RAM it is still pending; the image is what cannot hold it";
+  EXPECT_EQ(first.observationsNotKept, 2);
+  EXPECT_TRUE(fake::LogCapture::the().holds("did not fit the image whole"));
+  mm::KeptImageReader image;
+  ASSERT_EQ(image.check(small.image().data(), small.image().size()), nullptr);
+  EXPECT_EQ(image.advertCount(), 3u);
+  EXPECT_EQ(image.batchCount(), 0u);
+  EXPECT_STREQ(image.batchId(), "");
+  EXPECT_EQ(small.image().size(), mm::kKeptImageHeaderLen + 3 * mm::kKeptAdvertLen)
+      << "and the block held back for the id is not written";
+  EXPECT_EQ(small.text().find(id), std::string::npos) << "the id is nowhere in the store";
+
+  // After the sleep nothing is pending, and the three that came back go out as a new batch.
+  Boot woken = boot(small, &unit);
+  ASSERT_TRUE(woken.restored);
+  EXPECT_EQ(woken.loop->pendingBatchCount(), 0u);
+  EXPECT_EQ(woken.loop->ring().size(), 3u);
+  server.forgetCalls();
+  server.answerHeartbeat(60, 1, 3600, false, platform.clock().now());
+  platform.advanceSeconds(3600);
+
+  const mm::WakeReport second = woken.loop->wake(hourly(), mm::Budget());
+
+  EXPECT_EQ(second.observationsPosted, 3);
+  ASSERT_EQ(server.observations().size(), 1u);
+  EXPECT_NE(memberOf(server.observations()[0], "clientId"), id);
+  EXPECT_EQ(itemsIn(server.observations()[0]), 3);
+}
+
+TEST_F(LoopTest, AVersionOneImageIsStillReadAndHasNoBatchPending) {
+  // The first boot after an update: what is in the store was written by the code as it was, and
+  // it is taken rather than refused - the unit loses neither the result it kept nor the adverts
+  // it heard, and there is no batch pending in it because that version could not keep one.
+  fake::FakeRetained store;
+  const std::string body = "{\"jobId\":16051,\"clientId\":\"job-16051\",\"outcome\":\"ok\"}";
+  std::vector<mm::HeardAdvert> adverts{advert(7, 0), advert(8, 0)};
+  store.set(versionOneImage(16051, body, adverts, kNow - 60));
+
+  Boot unit = boot(store);
+
+  EXPECT_TRUE(unit.restored);
+  EXPECT_EQ(unit.loop->keptImagesRefused(), 0u) << "an image written before the update is not refused";
+  EXPECT_EQ(unit.jobs->queueDepth(), 1);
+  EXPECT_EQ(unit.loop->ring().size(), 2u);
+  EXPECT_EQ(unit.loop->pendingBatchCount(), 0u);
+  EXPECT_STREQ(unit.loop->pendingBatchId(), "");
+  mm::KeptImageReader image;
+  ASSERT_EQ(image.check(store.image().data(), store.image().size()), nullptr);
+  EXPECT_EQ(image.version(), mm::kKeptImageVersionWithoutBatch);
+  EXPECT_EQ(image.batchCount(), 0u);
+  EXPECT_STREQ(image.batchId(), "");
+
+  // And the wake posts both, under a batch id of its own, and writes a version 2 image over it.
+  server.answerHeartbeat(60, 1, 3600, false, platform.clock().now());
+  const mm::WakeReport first = unit.loop->wake(hourly(), mm::Budget());
+
+  EXPECT_EQ(first.resultsFlushed, 1);
+  ASSERT_EQ(server.results().size(), 1u);
+  EXPECT_EQ(server.results()[0].jobId, 16051);
+  EXPECT_EQ(server.results()[0].body, body) << "byte for byte what the older firmware kept";
+  EXPECT_EQ(first.observationsPosted, 2);
+  ASSERT_EQ(server.observations().size(), 1u);
+  EXPECT_EQ(itemsIn(server.observations()[0]), 2);
+  mm::KeptImageReader after;
+  ASSERT_EQ(after.check(store.image().data(), store.image().size()), nullptr);
+  EXPECT_EQ(after.version(), mm::kKeptImageVersion) << "and what it writes from here is version 2";
+}
+
+TEST(WhatASleepKeeps, TheLargestImageTheLibraryCanWriteIsTheConstant) {
+  // The figure a consumer sizes its scratch and its flash region by, against what the writer
+  // actually produces for the most it can ever be asked to hold: a full result buffer, a full
+  // ring, and a pending batch's id (task p1.13-55).
+  std::vector<uint8_t> scratch(mm::kMaxKeptImageLen);
+  mm::KeptImageWriter image(scratch.data(), scratch.size());
+  image.setPendingBatch("obs-0102030405060708090a0b0c0d0e0f10", mm::kObservationBatchSize);
+  const size_t bodyLen = mm::ResultBuffer::kCapacityBytes / mm::ResultBuffer::kMaxResults;
+  const std::string body(bodyLen, 'x');
+  for (size_t i = 0; i < mm::ResultBuffer::kMaxResults; i++) {
+    ASSERT_TRUE(image.addResult(static_cast<long long>(i), body.data(), body.size())) << i;
+  }
+  mm::HeardAdvert a;
+  for (size_t i = 0; i < mm::ObservationRing::kCapacity; i++) ASSERT_TRUE(image.addAdvert(a, kNow)) << i;
+  EXPECT_FALSE(image.addAdvert(a, kNow)) << "the ring's capacity is the most there can be";
+
+  const size_t len = image.finish(0, 0, 0);
+
+  EXPECT_EQ(len, mm::kMaxKeptImageLen) << "the constant and what the writer produces are one figure";
+  EXPECT_EQ(image.length(), mm::kMaxKeptImageLen);
+  EXPECT_EQ(image.batchCount(), mm::kObservationBatchSize);
+  mm::KeptImageReader back;
+  ASSERT_EQ(back.check(scratch.data(), len), nullptr);
+  EXPECT_EQ(back.resultCount(), mm::ResultBuffer::kMaxResults);
+  EXPECT_EQ(back.advertCount(), mm::ObservationRing::kCapacity);
+  EXPECT_EQ(back.batchCount(), mm::kObservationBatchSize);
+  EXPECT_STREQ(back.batchId(), "obs-0102030405060708090a0b0c0d0e0f10");
 }
 
 TEST(WhatASleepKeeps, TheCrcIsTheOneZlibAndTheEspRomCompute) {

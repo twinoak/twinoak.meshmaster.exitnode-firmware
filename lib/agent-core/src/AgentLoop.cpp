@@ -423,6 +423,22 @@ uint32_t AgentLoop::epochOf(uint32_t heardAtMillis, uint32_t nowMs) const {
   return agoS < now ? now - agoS : now;
 }
 
+void AgentLoop::forgetBatchIfNotWhole() {
+  if (batchCount_ == 0) return;
+  // The batch is the ring's `batchCount_` oldest adverts. The ring drops its oldest when a push
+  // finds it full, and `keepAcrossSleep` drops the newest the store had no room for: either can
+  // leave the batch short, and a batch short of an advert is not the batch the server has under
+  // that id. Posting the remainder under it would have the server de-duplicate on the id, store
+  // nothing, and `ring_.consume` take the adverts it never saw. So the id goes and the adverts
+  // that are left go out as a new batch (task p1.13-55).
+  if (ring_.oldestSeq() == batchOldestSeq_ && ring_.size() >= batchCount_) return;
+  LOG_W("observations: the batch of %u that was waiting for an answer is not the ring's oldest %u any more; "
+        "its id is forgotten and a new batch is built",
+        static_cast<unsigned>(batchCount_), static_cast<unsigned>(batchCount_));
+  batchCount_ = 0;
+  batchId_[0] = '\0';
+}
+
 size_t AgentLoop::buildBatch(uint32_t nowMs, char* out, size_t cap, size_t maxItems) {
   // A batch that is being retried is the same batch: the same items and the same client id, or
   // the server's de-duplication would take the id, store nothing, and the extra items would be
@@ -482,6 +498,8 @@ size_t AgentLoop::buildBatch(uint32_t nowMs, char* out, size_t cap, size_t maxIt
     // "obs-" and 32 hex, the shape the .NET observer's Guid gives its batches.
     std::snprintf(batchId_, sizeof batchId_, "obs-%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32,
                   platform_->random(), platform_->random(), platform_->random(), platform_->random());
+    // Which adverts this id was built over, so that a drop from the front of the ring is seen.
+    batchOldestSeq_ = ring_.oldestSeq();
   }
   return writeObservationBatch(batchId_, g_items, static_cast<int>(count), out, cap);
 }
@@ -490,7 +508,10 @@ bool AgentLoop::doObservations(bool* capped) {
   const uint32_t now = millis();
   // A batch already built and not yet accepted is pending: it must go out again exactly as it
   // was, under the client id it was built with, or the server would de-duplicate on that id and
-  // the items this one does not carry would be consumed unsent.
+  // the items this one does not carry would be consumed unsent. **While it is still whole**:
+  // one whose adverts the ring no longer holds is not that batch and is forgotten here, before
+  // anything below treats this as a retry.
+  forgetBatchIfNotWhole();
   const bool retrying = batchCount_ > 0;
   size_t len = buildBatch(now, g_batchJson, sizeof g_batchJson);
   // A wake on a metered uplink says how many bytes it may send, and a batch goes whole: the
@@ -991,16 +1012,26 @@ bool AgentLoop::restoreKept() {
     if (body != nullptr) results.push(jobId, body, len);
   }
   const uint32_t nowMs = millis();
+  // The pending batch is the image's first `batchCount()` adverts, so it is only that batch when
+  // every one of them reaches the front of the ring: a ring that already held something, or an
+  // advert of the batch that is dropped below, puts other adverts in front of it (task p1.13-55).
+  // The reader has already held the id to ending inside its own block, so this length is sound;
+  // it is checked all the same, because a cut id is another batch to the server.
+  bool batchWhole = image.batchCount() > 0 && ring_.empty() && std::strlen(image.batchId()) < sizeof batchId_;
   size_t undated = 0;
   for (size_t i = 0; i < image.advertCount(); i++) {
     HeardAdvert a;
-    if (!image.advert(i, a)) break;
+    if (!image.advert(i, a)) {
+      if (i < image.batchCount()) batchWhole = false;
+      break;
+    }
     // An advert with no epoch is one no clock could date, and this version does not write one
     // (keepAcrossSleep, task p1.7-25). An image a build before 0.3.1 left behind can hold one:
     // it is dropped and counted here rather than stamped with the moment of this restore, which
     // is what gave it the wrong time in the first place.
     if (a.heardAtEpoch == 0) {
       undated++;
+      if (i < image.batchCount()) batchWhole = false;
       continue;
     }
     // The moment it was heard travels as `heardAtEpoch`; the uptime clock it was heard on is
@@ -1011,6 +1042,20 @@ bool AgentLoop::restoreKept() {
   if (undated > 0) {
     LOG_W("kept: %u advert(s) in the image carry no time at all; they are dropped rather than stamped with now",
           static_cast<unsigned>(undated));
+  }
+  if (batchWhole) {
+    // The batch goes out again under the id it was built with, and the server de-duplicates on
+    // it: the post the sleep lost the answer to costs nothing twice.
+    std::memcpy(batchId_, image.batchId(), std::strlen(image.batchId()) + 1);
+    batchCount_ = image.batchCount();
+    batchOldestSeq_ = ring_.oldestSeq();
+    LOG_I("kept: the batch of %u that was waiting for an answer came back with the image; it goes out again under "
+          "the id it was built with",
+          static_cast<unsigned>(batchCount_));
+  } else if (image.batchCount() > 0) {
+    LOG_W("kept: the batch of %u the image named is not the ring's oldest after the restore; its id is forgotten "
+          "and a new batch is built",
+          static_cast<unsigned>(image.batchCount()));
   }
   results.addDropped(image.resultsDropped());
   ring_.addDropped(image.observationsDropped() + static_cast<uint32_t>(undated));
@@ -1029,6 +1074,14 @@ void AgentLoop::keepAcrossSleep(WakeReport& report) {
   if (retained_ == nullptr) return;
   const size_t cap = imageCap();
   KeptImageWriter image(imageScratch_, cap);
+  // The batch still waiting for an answer, before a record is added, because the writer holds
+  // room back for its id from here on (task p1.13-55). It is the ring's oldest `batchCount_`
+  // adverts, which the image writes first, and `finish` drops it if the image did not hold them
+  // all - a batch missing an advert is not that batch, and the next wake builds a new one.
+  // A batch id that did not fit the image's block would come back cut, and a cut id is another
+  // batch to the server; the two sizes are held together here rather than hoped about.
+  static_assert(sizeof batchId_ <= kKeptBatchIdLen, "the kept image's block must hold a whole batch id");
+  image.setPendingBatch(batchId_, batchCount_);
 
   // The results first, oldest first, whole ones only, stopping at the first that does not fit:
   // a lost result leaves a job leased, a lost advert is heard again.
@@ -1067,6 +1120,10 @@ void AgentLoop::keepAcrossSleep(WakeReport& report) {
     if (epoch == 0 && haveClock) epoch = epochOf(a.heardAtMillis, nowMs);
     if (epoch == 0) {
       undated++;
+      // An advert of the pending batch that nothing can date is dropped like any other, and the
+      // batch is short of it: the id is not kept, and the room held back for it goes back to the
+      // records.
+      if (i < batchCount_) image.forgetPendingBatch();
       continue;
     }
     if (!image.addAdvert(a, epoch)) break;
@@ -1097,6 +1154,11 @@ void AgentLoop::keepAcrossSleep(WakeReport& report) {
   }
 
   const size_t len = image.finish(results.dropped(), ring_.dropped(), imagesRefused_);
+  if (batchCount_ > 0 && image.batchCount() == 0) {
+    LOG_W("kept: the batch of %u that is waiting for an answer did not fit the image whole; the boot after the "
+          "sleep builds a new batch of what is left",
+          static_cast<unsigned>(batchCount_));
+  }
   if (imageKnown_ && image.crc() == lastImageCrc_) {
     // The store already holds this - the same results, the same adverts, the same counters - so
     // nothing is written: a wake that posted everything and keeps nothing costs no wear at all.
@@ -1113,9 +1175,10 @@ void AgentLoop::keepAcrossSleep(WakeReport& report) {
   imageKnown_ = true;
   lastImageCrc_ = image.crc();
   report.keptImageWritten = true;
-  LOG_I("kept: %u result(s) and %u advert(s) written to the store, %u bytes of %u",
+  LOG_I("kept: %u result(s), %u advert(s) and %u of them as a batch still waiting written to the store, "
+        "%u bytes of %u",
         static_cast<unsigned>(image.resultCount()), static_cast<unsigned>(image.advertCount()),
-        static_cast<unsigned>(len), static_cast<unsigned>(cap));
+        static_cast<unsigned>(image.batchCount()), static_cast<unsigned>(len), static_cast<unsigned>(cap));
 }
 
 void AgentLoop::report(TextOut& out) const {
@@ -1161,6 +1224,13 @@ void AgentLoop::report(TextOut& out) const {
   out.printf("pending   %u of %u in the ring, %lu dropped, %lu heard in all\r\n",
              static_cast<unsigned>(ring_.size()), static_cast<unsigned>(ObservationRing::kCapacity),
              static_cast<unsigned long>(ring_.dropped()), static_cast<unsigned long>(ring_.heard()));
+  // A batch that went out and was never answered goes out again under the same id, across a
+  // sleep as well (task p1.13-55): a person at the port can see which of the waiting adverts
+  // that is, and that the id did not change.
+  if (batchCount_ > 0) {
+    out.printf("batchid   %s: the oldest %u of them went out under it and are waiting for an answer\r\n",
+               batchId_, static_cast<unsigned>(batchCount_));
+  }
   out.printf("jobs      %lu claim(s), %lu job(s) run, %lu claim(s) unanswered; `jobs` prints the last ten\r\n",
              static_cast<unsigned long>(jobs_->claims()), static_cast<unsigned long>(jobs_->ran()),
              static_cast<unsigned long>(counters_.claimFailures));

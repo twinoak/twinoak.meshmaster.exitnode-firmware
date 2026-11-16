@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -96,6 +97,10 @@ class FakeUplink : public mm::IUplink {
 
   void setServerTime(uint32_t epoch) { serverEpoch_ = epoch; }
 
+  // Every batch id this fake has been handed, whether its answer reached the board or not: a
+  // post under an id that is in here is answered *had it already*, as the server answers one.
+  const std::set<std::string>& seenBatches() const { return seenBatches_; }
+
   // ------------------------------------------------------------------ the faults, on cue
 
   // The next `calls` calls answer this instead of 200.
@@ -110,6 +115,7 @@ class FakeUplink : public mm::IUplink {
   void answerAgain() {
     fault_ = Fault::None;
     faultCalls_ = 0;
+    obsAnswerLost_ = 0;
   }
   // The next `calls` **result** posts answer this, whatever the other calls do: the offline
   // buffer is what a server that went away under a running job fills, and the claim that handed
@@ -118,6 +124,11 @@ class FakeUplink : public mm::IUplink {
     resultFault_ = fault;
     resultFaultCalls_ = calls;
   }
+  // The next `calls` **observation** posts are taken and stored by the server and the answer
+  // never reaches the board - the Walter's failure of 16 November 2026, and the one a batch's
+  // client id exists for (task p1.13-55). A later post under the same id is answered *had it
+  // already*, with nothing stored twice.
+  void loseTheAnswerToObservations(int calls) { obsAnswerLost_ = calls; }
   void setRetryAfter(uint32_t seconds) { retryAfterS_ = seconds; }
   void setCallMs(uint32_t ms) { callMs_ = ms; }
   // A slow call: this long on the clock, once.
@@ -189,9 +200,18 @@ class FakeUplink : public mm::IUplink {
 
   bool postObservations(const char* body, size_t len, int& accepted, bool& duplicate) override {
     observations_.emplace_back(body, len);
+    const std::string posted = clientIdOf(std::string(body, len));
+    // An answer that was lost on the way back: the server has the batch, the board does not know
+    // it (loseTheAnswerToObservations). It is remembered **before** the call fails, because the
+    // server stored it and the next post of the same id is a duplicate to it.
+    if (obsAnswerLost_ != 0) seenBatches_.insert(posted);
     if (!begin("observations")) return false;
-    accepted = countItems(std::string(body, len));
-    duplicate = false;
+    // The server de-duplicates on the batch's client id (EXIT-NODES section 6). A batch whose id
+    // it has seen before is answered 200 with nothing stored and `duplicate` set - which is what
+    // the board gets when the answer to the first post was lost on the way back (task p1.13-55).
+    duplicate = seenBatches_.count(posted) != 0;
+    accepted = duplicate ? 0 : countItems(std::string(body, len));
+    seenBatches_.insert(posted);
     return true;
   }
 
@@ -287,6 +307,9 @@ class FakeUplink : public mm::IUplink {
     if (std::strcmp(what, "result") == 0 && resultFaultCalls_ != 0) {
       fault = resultFault_;
       if (resultFaultCalls_ > 0) resultFaultCalls_--;
+    } else if (std::strcmp(what, "observations") == 0 && obsAnswerLost_ != 0) {
+      fault = Fault::Unreachable;
+      if (obsAnswerLost_ > 0) obsAnswerLost_--;
     } else if (faultCalls_ != 0) {
       fault = fault_;
       if (faultCalls_ > 0) faultCalls_--;
@@ -327,6 +350,15 @@ class FakeUplink : public mm::IUplink {
     return true;
   }
 
+  // The batch's `clientId`, which is what the server de-duplicates on.
+  static std::string clientIdOf(const std::string& batch) {
+    const size_t at = batch.find("\"clientId\":\"");
+    if (at == std::string::npos) return "";
+    const size_t from = at + 12;
+    const size_t end = batch.find('"', from);
+    return end == std::string::npos ? "" : batch.substr(from, end - from);
+  }
+
   static int countItems(const std::string& batch) {
     int n = 0;
     size_t at = 0;
@@ -349,6 +381,7 @@ class FakeUplink : public mm::IUplink {
   Fault fault_ = Fault::None;
   int faultCalls_ = 0;
   Fault resultFault_ = Fault::None;
+  int obsAnswerLost_ = 0;
   int resultFaultCalls_ = 0;
   uint32_t retryAfterS_ = 0;
   uint32_t callMs_ = 120;
@@ -358,6 +391,7 @@ class FakeUplink : public mm::IUplink {
   std::vector<std::string> heartbeats_;
   std::vector<PostedResult> results_;
   std::vector<std::string> observations_;
+  std::set<std::string> seenBatches_;
   std::vector<std::pair<long long, std::string>> extends_;
   std::vector<std::pair<long long, std::string>> progress_;
   int configCalls_ = 0;
