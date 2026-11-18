@@ -58,6 +58,7 @@
 #include "net/MqttClient.h"
 #include "net/WifiLink.h"
 #include "observer/Observer.h"
+#include "platform/BootChoice.h"
 #include "platform/Esp32Platform.h"
 #include "platform/OtaSlot.h"
 #include "platform/TableBytes.h"
@@ -68,7 +69,9 @@
 #include "update/FetchSeams.h"
 #include "update/ImageDescriptor.h"
 #include "update/SlotRecord.h"
+#include "update/Trial.h"
 #include "update/Trust.h"
+#include "update/UpdateRecord.h"
 #include "ui/DisplayLines.h"
 #include "ui/Oled.h"
 #include "version.h"
@@ -100,6 +103,11 @@ mm::ServerRoutes releaseRoutes(server);
 mm::SettingsRecord slotRecordStore(settings);
 mm::update::Fetcher fetcher;
 bool fetcherReady = false;
+// Switching to a judged image, and the ten minutes it then has to prove itself (task p1.15-60).
+// The machine is portable; its four seams are the three small classes below and the board's
+// src/platform/BootChoice.cpp.
+mm::update::Updater updater;
+bool updaterReady = false;
 
 uint32_t uplinkMemoryFailuresSeen = 0;  // AgentClient::memoryFailures() as last handed to the observer
 uint32_t uplinkCallsSeen = 0;           // KeepAlive's call count as last handed to the observer's gate (task p1.8-31)
@@ -144,6 +152,46 @@ class LogTextOut final : public mm::TextOut {
 };
 
 LogTextOut fetchLog;
+
+// The trial's three conditions (task p1.15-60, deliverable 2), each a plain reading of something
+// this file already has: the mesh started, the WiFi joined and the clock came off the network,
+// and a heartbeat was answered 2xx. Nothing is measured here that is not measured anyway.
+class TrialNow final : public mm::update::TrialConditions {
+ public:
+  bool meshStarted() const override { return radio_ok; }
+  bool linkAndClock() const override { return wifi.connected() && agentClock.fromNetwork(); }
+  bool heartbeatAnswered() const override { return agent.everHeartbeated(); }
+};
+
+// Both clocks the trial needs: the milliseconds the ten minutes are counted in, and the UNIX
+// seconds a journal entry is stamped with - 0 while the board has no time, which is what a
+// journal entry then says.
+class TrialClockNow final : public mm::update::TrialClock {
+ public:
+  uint32_t ms() const override { return millis(); }
+  uint32_t epoch() const override { return agentClock.now(); }
+};
+
+// The firmware's own deliberate restart path (src/Health.h): the reason kept where every
+// restart's reason is kept, what waits in RAM given its one try, and then the restart.
+class TrialRestart final : public mm::update::DeliberateRestart {
+ public:
+  void note(const char* why) override { mm::healthNoteReboot(why); }
+  void postWhatWaits() override {
+    const mm::AgentLoop::Posted posted = agent.postWhatWaits();
+    LOG_W("update: %d result(s) and %u observation(s) went out before the restart", posted.results,
+          static_cast<unsigned>(posted.observations));
+  }
+  void restart() override {
+    Serial.flush();
+    delay(100);
+    board.reboot();
+  }
+};
+
+TrialNow trialConditions;
+TrialClockNow trialClock;
+TrialRestart trialRestart;
 
 // What the observer's connections read of this board (observer/Connection.h, Environment).
 uint32_t millisNow() { return millis(); }
@@ -287,7 +335,12 @@ void printStatus(Stream& out) {
   formatUptime(uptime, sizeof uptime);
   publicKeyHex(key, sizeof key);
 
-  out.printf("firmware  %s (%.8s)\r\n", mm::firmwareString(), mm::meshcorePin());
+  // *on trial* while a switched image has not proved itself: the first thing a person at the
+  // window reads, because it is the one state in which this board may restart by itself and come
+  // back as another firmware (task p1.15-60, deliverable 8).
+  const char* trial = updater.statusNote();
+  out.printf("firmware  %s (%.8s)%s%s\r\n", mm::firmwareString(), mm::meshcorePin(), trial[0] != 0 ? " - " : "",
+             trial);
   out.printf("board     %s, %s, up %s\r\n", mm::boardName(), board.getResetReasonString(board.getResetReason()), uptime);
   out.printf("identity  %s%s\r\n", key, identity_ok ? "" : (radio_ok ? "" : " (radio init failed, none made)"));
 
@@ -517,13 +570,22 @@ void printUpdate(Stream& out) {
   // judged image survives a restart, and this is where a person sees that it did. Nothing of
   // this is a secret: a version, a hash, a length and a path the server published.
   char held[200];
-  mm::update::renderRecordLine(mm::update::loadRecord(slotRecordStore), held, sizeof(held));
+  const mm::update::SlotRecord judged = mm::update::loadRecord(slotRecordStore);
+  mm::update::renderRecordLine(judged, held, sizeof(held));
   out.printf("other     %s\r\n", held);
   if (fetcher.running()) {
     out.println("          a fetch is running now; its steps are in the log");
-  } else if (r.kind == mm::TableKind::Two) {
+  } else if (r.kind == mm::TableKind::Two && !judged.judged) {
     out.printf("          `update %s <release id>` fetches a release into it and judges it\r\n", mm::kFetchWord);
+  } else if (r.kind == mm::TableKind::Two && !updater.onTrial()) {
+    out.printf("          `update %s` switches to it and restarts; it then has ten minutes to prove itself\r\n",
+               mm::kApplyWord);
   }
+
+  // The trial while there is one - each condition and the minutes left - and the last update's
+  // ending, which is what the record kept across the restarts (task p1.15-60, deliverable 8).
+  mm::StreamOut text(out);
+  updater.report(text);
 }
 
 // `update fetch <id>`: fetch release `/agent/v1/firmware/<id>` into the other application slot
@@ -538,6 +600,14 @@ void printUpdateFetch(const char* id, Stream& out) {
   }
   if (fetcher.running()) {
     out.println("fetch     one is already running; its steps are in the log");
+    return;
+  }
+  // Not while a firmware is on trial (task p1.15-60): the slot a fetch writes is the one holding
+  // the image this board would go back to, and writing over it during a trial would leave a board
+  // with nothing that is known to work.
+  const char* const inTheWay = updater.whyTheOtherSlotMayNotBeWritten();
+  if (inTheWay != nullptr) {
+    out.printf("fetch     %s\r\n", inTheWay);
     return;
   }
   if (!server.configured()) {
@@ -556,6 +626,27 @@ void printUpdateFetch(const char* id, Stream& out) {
   }
   out.printf("fetch     %s: the manifest and its signature first, then the image in pieces; the steps follow\r\n",
              base);
+}
+
+// `update apply`: switch to the image task 59 judged and restart into it, so that it runs on
+// trial for ten minutes (task p1.15-60, deliverable 8). Either this does not return - the board
+// restarts - or nothing at all was switched and one sentence says why.
+void printUpdateApply(Stream& out) {
+  if (!updaterReady) {
+    out.println("apply     not ready: this board has not finished starting up");
+    return;
+  }
+  if (fetcher.running()) {
+    out.println("apply     a fetch is running; wait for its ending before switching to anything");
+    return;
+  }
+  char why[224];
+  if (updater.apply(why, sizeof(why))) {
+    out.println("apply     switching; the board restarts now");  // not reached on a board
+    return;
+  }
+  out.printf("apply     %s\r\n", why);
+  mm::logf(mm::LogLevel::Info, "update apply: %s", why);
 }
 
 // `update slot`: the one command of this console that erases and writes flash. One sector, at the
@@ -709,6 +800,10 @@ void pumpDuringAJob() {
   // is run to the end before the loop gets its turn back, and a board that is working hard is
   // not a board the server should be marking *quiet*.
   agent.heartbeatIfOverdue();
+  // And the trial, if one is running (task p1.15-60): a thirteen-minute region load must not be
+  // what makes a working image miss its ten minutes, and the heartbeat above is the condition it
+  // is usually waiting for.
+  updater.step();
 }
 
 void doReboot() {
@@ -837,6 +932,35 @@ void setup() {
   }
 
   agentClock.begin(rtc_clock);
+
+  // **What is this boot?** (task p1.15-60). Early, and before the WiFi, the server and the mesh:
+  // a board that was switched to a new image is on trial from here, a board the bootloader sent
+  // back finishes the record here, and a board running from the second slot with a firmware
+  // flashed over USB into the first one switches to it here and restarts - so none of what
+  // follows is started twice. The clock is up, so a journal entry has a time; the RTC usually
+  // holds one across a software reset, and an entry made without one says 0.
+  {
+    // What this image says it is, out of the 96 bytes the build placed inside it (task p1.15-58):
+    // the version the record is written with, and the one an image found in the other slot is
+    // told from. Static, because the machine keeps the pointer.
+    static char runningVersion[33] = {0};
+    mm::update::Descriptor self;
+    if (mm::update::thisImageDescriptor(self)) std::snprintf(runningVersion, sizeof runningVersion, "%s", self.version);
+    mm::update::Updater::Seams seams;
+    seams.slots = &mm::applicationSlots();
+    seams.slot = &mm::otherApplicationSlot();
+    seams.store = &slotRecordStore;
+    seams.conditions = &trialConditions;
+    seams.restart = &trialRestart;
+    seams.clock = &trialClock;
+    updater.begin(seams, runningVersion, mm::boardName(), mm::bootReason(), &fetchLog);
+    updaterReady = true;
+    const mm::update::BootFinding found = updater.atBoot();
+    if (found != mm::update::BootFinding::Nothing) {
+      LOG_W("update: this boot is %s", mm::update::bootFindingWord(found));
+    }
+  }
+
   wifi.begin(settings);
   server.begin(settings, agentClock, wifi, meshmaster_agent_version());
   fillIdentity();
@@ -894,7 +1018,8 @@ void setup() {
                           &printSessions, &printErrors,  &printReboots, &printDump,
                           &printWifi,     &doReboot,     &onSettingChanged, &onErased,
                           &printMqttStatus, &printKeyNote, &printDiscoverScopes,
-                          &printUpdate,   &printUpdateSlot,  &printUpdateFetch};
+                          &printUpdate,   &printUpdateSlot,  &printUpdateFetch,
+                          &printUpdateApply};
   console.begin(Serial, settings, host);
   // The fetch's three seams (task p1.15-59): the server over the one TLS client every call goes
   // through, the other application slot over the ESP-IDF's OTA writer, and the record in NVS.
@@ -935,6 +1060,11 @@ void loop() {
 
   console.loop();
   oled.loop();
+
+  // The trial, if a switched image is on one (task p1.15-60): the three conditions latched as
+  // each is first seen, the image marked valid the moment the third is, and the board sent back
+  // to the old one when ten minutes pass without them. It does nothing at all otherwise.
+  updater.step();
 
   // One piece of a fetch a pass, and only when one is running: at most one request, so the mesh,
   // the console, the observer and the watchdog above all had their turn before it and have it

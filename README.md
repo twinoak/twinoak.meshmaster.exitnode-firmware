@@ -246,6 +246,22 @@ is told so and nothing is written. The one risk is a power cut in the second
 that sector is being written: that board then needs a merged image over USB
 (`esptool`, which erases nothing outside what it writes).
 
+**Which slot a board runs from, and why the plain `.bin` still wins.** With
+two slots a board runs from one of them and an update is fetched into the
+other: `update fetch <id>` writes it, `update apply` makes it the next to boot
+and restarts, and the new firmware then has **ten minutes to prove itself**
+(*Rails that hold in every task*, below). A board that has taken an update
+that way is running from the **second** slot — and the web flasher writes the
+plain `.bin` to the **first** one whatever the board boots from. So a board
+running from the second slot looks at the first at every boot: an image there
+that the record does not know, that the framework will load, and that carries
+this product's descriptor for this board is switched to once, and runs on
+trial like any other. **Flashing by hand is always the last word**, and an
+owner who flashes a release over USB gets that release and not the one the
+board fetched. An image the record knows — the one running, the one it was
+switched from, or one it already tried and rolled back — is not switched to
+again.
+
 **The one exception, once per board.** A board provisioned under `v0.1.1` or
 earlier carries the framework's default table, which keeps NVS at `0x9000` —
 inside the span `esptool`'s merge fills with `0xFF`. The **first merged flash**
@@ -705,15 +721,34 @@ reading.
   own sector, which the ESP-IDF refuses and, as the Arduino core configures it,
   aborts the board over — so that guard is off for the whole image
   (`tools/check-sdkconfig.py` carries the key and the reason). What it used to
-  do is done by two files instead, and by no third:
+  do is done by three files instead, and by no fourth:
   `src/platform/TableFlash.cpp` holds the raw-flash calls with the address and
   the length as constants of its own and refuses every call outside that one
   sector; `src/platform/OtaSlot.cpp` holds the framework's OTA writer, bounded
-  by the application partition that is **not** running. A native test walks
-  `src/` and `lib/` and fails when one of those calls is anywhere but the file
-  named for it — in the other of the two included — and when the call that
-  changes which slot a board boots is anywhere at all, which it is not yet
+  by the application partition that is **not** running; and
+  `src/platform/BootChoice.cpp` holds the call that changes which slot a board
+  boots and the two that write the running image's verdict into `otadata`,
+  which between them decide which of two firmwares a board comes back as. A
+  native test walks `src/` and `lib/` and fails when one of those calls is
+  anywhere but the file named for it — in another of the three included — and
+  when any file but that one defines `verifyRollbackLater()`
   (`test/test_flash_writes`).
+- **A new firmware is kept only when it has reached the server.** An image
+  switched to runs **on trial** for ten minutes from its boot, and it is kept
+  only when all three of these have been seen in that one boot: the mesh
+  started, the WiFi joined with the clock set off the network, and a heartbeat
+  answered `2xx`. Then, and at no moment before, it is marked valid. Ten
+  minutes without them — or a crash, the watchdog or a power cut during
+  them — and the old image runs again without anybody's help: the bootloader
+  undoes an image that is still pending at a reset, and where a board's
+  bootloader does not, the firmware sets the boot choice back itself. The
+  Arduino core would mark a pending image valid before `setup` ran; it is told
+  not to, in the one file that owns the boot choice
+  (`src/platform/BootChoice.cpp`), so the three conditions and nothing else
+  decide. What happened is written down — the
+  versions either side, the time, and a journal of every step — and survives
+  both restarts, so `update` can say *committed* or *rolled back: no wifi*
+  afterwards (`src/update/Trial.h`, `test/test_trial`).
 - **It stays up, and says why when it did not.** A task watchdog on the loop
   that is also the network, a deliberate restart when the server has been
   unreachable against a live link for an hour and a half, and the last five

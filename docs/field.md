@@ -430,6 +430,71 @@ other     holds 0.8.0+1a2b3c4, 1446640 bytes, sha 4f2a91c0b7d2e5a8..., fetched f
   identity, the token, the WiFi and the running application are all outside the
   slot being written.
 
+### Switching to it, and the ten minutes that decide
+
+Since the release of task p1.15-60 a judged image can be switched to, and the
+firmware that comes up then has to **prove itself** before it is kept. A
+firmware that boots is not yet a firmware that works: what an exit node is for
+is reaching meshmaster.dk and the mesh, and an image that cannot do either would
+leave a board nobody can ever tell to update again. So it runs on trial.
+
+```
+> update apply
+apply     switching; the board restarts now
+[12:06:02] I update: switching: 0.7.2+4a4e791 to 0.8.0+1a2b3c4, 1446640 bytes, in app1
+... the board restarts, and the new firmware comes up ...
+[12:06:31] I update: proving: on trial for 10 min; a reset ends it and the bootloader undoes it
+> status
+firmware  meshmaster-agent 0.8.0+1a2b3c4 on MeshCore companion-v1.18.0 (81dbae59) - on trial
+> update
+trial     on trial, 9 min 2 s left: mesh yes, wifi and clock yes, heartbeat not yet
+          0.8.0+1a2b3c4, switched to from 0.7.2+4a4e791 at 2026-11-20T12:06:02Z; the bootloader undoes it if this boot does not end
+[12:06:48] I update: committing: mesh, wifi and the clock, and a heartbeat answered 17 s into the trial
+> update
+last      committed: 0.8.0+1a2b3c4, from 0.7.2+4a4e791, switched at 2026-11-20T12:06:02Z
+```
+
+- **The three conditions**, all of them in that one boot: the mesh started, the
+  WiFi joined **and** the clock was set off the network, and a heartbeat was
+  answered `2xx`. Then, and at no moment before, the image is marked valid.
+  `update` shows each of them and the minutes left while the trial runs, and
+  `status` says *on trial* in its first line.
+- **Ten minutes, and then the old firmware is back.** Nobody has to be there.
+  Ten minutes without all three and the image marks itself invalid and the board
+  restarts into the old one. A crash, the watchdog or a power cut during the
+  trial has the same end, and nothing in the application does it: the bootloader
+  undoes an image that is still pending at a reset. **On a board whose
+  bootloader came from other firmware** that may not happen — the journal's
+  `proving` line then says *this bootloader leaves it new, not pending* — and
+  the firmware sets the boot choice back itself instead, on the same three
+  conditions and the same ten minutes.
+- **What to do with a board that went back.** Nothing, at the window: the old
+  firmware is running and the exit node is itself again. `update` says what was
+  missing — `rolled back: no wifi…`, `rolled back: no server…`, or
+  *restarted during the trial* with the reset's own reason — and `reboots`
+  says when.
+  Fix what the sentence names (the access point, the token, the server) and
+  `update fetch` and `update apply` again. The image that failed stays in the
+  other slot and is **not** switched to again by itself.
+- **`update apply` is refused, and nothing is switched**, when the other slot
+  holds nothing judged, when the bytes in it no longer hash to what the record
+  says (read back from the slot before anything is written), when an update is
+  already in hand, or when this board has no second slot.
+- **And `update fetch` is refused while an update is in hand**, in a sentence:
+  the slot a fetch writes is the one holding the image the board would go back
+  to, so nothing writes over it until `update` says *committed* or
+  *rolled back*.
+- **Nothing starts an update but a person** — `update apply` here, or, from the
+  next release, one press on meshmaster.dk. A release existing starts nothing.
+- **A flash over USB is still the last word.** A board that has taken an update
+  runs from the second slot, and the web flasher writes the plain `.bin` to the
+  first one whatever the board boots from. So at its next boot the board finds a
+  firmware there it has never run, switches to it once and puts *it* on trial.
+  An image it already tried and rolled back is not taken again.
+- **On the OLED** nothing new appears: the panel shows the clock, the link and
+  the open job as it always did, and the version it shows is simply the version
+  that is running. The trial is on the console and in the log.
+
 ### ⚠ Waiting for a board on the bench
 
 These cannot be checked without hardware, and they come **before any owner is
@@ -488,3 +553,32 @@ board**, on a V3 and on a V4 that both say `two`:
 - [ ] **⚠ A board that says `one` refuses before it asks.** On a board that
       has not had `update slot`, `update fetch 12` ends `slot` at once and the
       exit node's page shows no download against it.
+
+**With a second release to update *to*** — imported on meshmaster.dk and
+served to the board — on a **V3** and on a **V4** that both say `two`, with
+release A
+running and release B fetched:
+
+- [ ] **⚠ `update apply` commits B inside two minutes.** After `update fetch`
+      and `update apply` the board restarts, `status`'s first line says
+      *on trial* and names B, and `update` shows the three conditions going
+      `yes` one after another; inside two minutes `update` says
+      `last      committed` with B and with A as the version it came from. The
+      identity is **the same 64 characters** as before, and the exit node's page
+      on meshmaster.dk shows B.
+- [ ] **⚠ With no WiFi, ten minutes later the old one is back.** From B,
+      fetch a third release, switch the access point **off**, then
+      `update apply`. Ten minutes after the new image boots the board restarts
+      by itself and B is running again. Switch the WiFi back on: `update` says
+      `rolled back: no wifi...` and names the release it tried.
+- [ ] **⚠ The power pulled one minute in is the same ending.** The same
+      again, and the power pulled about a minute after the new image starts. At
+      power-up **the old image runs** — the bootloader did it, not the
+      application — and `update` says `rolled back` with *restarted during the
+      trial* and the reset's reason.
+- [ ] **⚠ A flash over USB still wins.** With the board running from the
+      second slot (that is, after a committed update), flash the plain `.bin` of
+      any release through the web flasher. After the flash the board restarts
+      once more by itself and **that release runs**; `update` then shows it as
+      the version it was switched to, from the one that was running.
+

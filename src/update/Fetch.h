@@ -8,8 +8,8 @@
 // ESP-IDF's own verdict). At the end the other slot holds a judged image, or holds nothing this
 // firmware will ever boot - a refused one has its first sector erased where it lies.
 //
-// **Nothing is switched here.** The running firmware and the boot choice are as they were; task 60
-// is what switches to a judged image and proves it on trial.
+// **Nothing is switched here.** The running firmware and the boot choice are as they were;
+// update/Trial.h is what switches to a judged image and proves it on trial (task p1.15-60).
 //
 // The four routes are meshmaster.dk's `docs/dev/unit-protocol.md` §4, and what matters of them:
 //

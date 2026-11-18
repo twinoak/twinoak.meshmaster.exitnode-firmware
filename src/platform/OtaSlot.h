@@ -13,8 +13,9 @@
 // (components/app_update/esp_ota_ops.c, ESP-IDF 4.4.7 as pinned), a guard that stays on with
 // CONFIG_SPI_FLASH_DANGEROUS_WRITE_ALLOWED set and that this file adds nothing to.
 //
-// What is **not** here: switching to the image, and the trial (task 60). The call that changes
-// which slot a board boots is in no file of this firmware, and the rail's own list says so.
+// What is **not** here: switching to the image, and the trial (task p1.15-60). The call that
+// changes which slot a board boots is in src/platform/BootChoice.cpp and in no other file of this
+// firmware, and the rail's own list says so.
 
 #pragma once
 

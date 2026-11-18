@@ -67,6 +67,7 @@ enum class Verb : unsigned char {
   Update,      // `update`: which partition table this board runs on, and its application slots (task p1.15-57)
   UpdateSlot,  // `update slot`: add the second application slot to this board's table
   UpdateFetch, // `update fetch <id>`: fetch release <id> into the other slot and judge it (task p1.15-59)
+  UpdateApply, // `update apply`: switch to the judged image and restart; it runs on trial (task p1.15-60)
 };
 
 struct Command {
@@ -90,9 +91,10 @@ ParseResult parseLine(const char* line);
 // The confirmation word `erase` needs, so the help text and the test say the same thing.
 constexpr const char* kEraseWord = "confirm";
 
-// The two words `update` takes, for the same reason.
+// The three words `update` takes, for the same reason.
 constexpr const char* kSlotWord = "slot";
 constexpr const char* kFetchWord = "fetch";
+constexpr const char* kApplyWord = "apply";
 
 // A release id is digits and nothing else, at most this many: it becomes a path on the wire
 // (src/update/Fetch.h, releaseIdIsSane, which the board applies again before it asks).

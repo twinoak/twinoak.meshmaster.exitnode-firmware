@@ -222,6 +222,9 @@ void Console::runLine() {
     case Verb::UpdateFetch:
       if (host_.updateFetch) host_.updateFetch(r.command.value, *io_);
       return;
+    case Verb::UpdateApply:
+      if (host_.updateApply) host_.updateApply(*io_);
+      return;
   }
 }
 
