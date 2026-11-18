@@ -42,6 +42,11 @@ struct ConsoleHost {
   // `discover.scopes` (task p1.8-33): the neighbour table as it stands, and a cycle of the scope
   // sweep started now. nullptr prints nothing.
   void (*discoverScopes)(Stream& out);
+  // `update` and `update slot` (task p1.15-57): which partition table this board runs on, and
+  // adding the second application slot to it. The second one erases and writes one sector of
+  // flash and is the only command here that does; nullptr prints nothing.
+  void (*update)(Stream& out);
+  void (*updateSlot)(Stream& out);
 };
 
 class Console {

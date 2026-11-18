@@ -93,6 +93,8 @@ void Console::help() {
   io_->println("  dump                the last 4 kB of the log, oldest first");
   io_->println("  wifi                scan for networks and show the link");
   io_->println("  reboot");
+  io_->println("  update              which partition table this board runs on, and its application slots");
+  io_->printf("  update %s         add the second application slot to this board's table, then reboot\r\n", kSlotWord);
   io_->printf("  erase %s       forget every setting; the identity stays\r\n", kEraseWord);
   io_->println("  get mqtt.presets    the broker presets an mqttN.preset can name");
   io_->println("  get mqtt.status     the observer's broker slots (two on either board): state, since, published, dropped, last error");
@@ -209,6 +211,12 @@ void Console::runLine() {
       return;
     case Verb::DiscoverScopes:
       if (host_.discoverScopes) host_.discoverScopes(*io_);
+      return;
+    case Verb::Update:
+      if (host_.update) host_.update(*io_);
+      return;
+    case Verb::UpdateSlot:
+      if (host_.updateSlot) host_.updateSlot(*io_);
       return;
   }
 }

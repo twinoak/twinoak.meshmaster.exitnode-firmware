@@ -4,7 +4,13 @@
 #                       artifact. heltec_v3 and heltec_v4 since task p1-06. Then -t mergebin and
 #                       tools/check-partitions.py against the merged image: the partition table
 #                       the environment names is the framework default's with NVS above the
-#                       application, and the image ends before NVS begins (task p1.2-11). Since
+#                       application, and the image ends before NVS begins (task p1.2-11), with the
+#                       second application slot where task p1.15-57 put it and the application
+#                       fitting the smaller of the two slots. Then tools/check-table-bytes.py: the
+#                       two tables the firmware carries as bytes are those files' bytes, and the
+#                       one it would write into a board's own table sector is the merged image's
+#                       at 0x8000, so a board told `update slot` and a board flashed over USB end
+#                       up with the same table. Since
 #                       task p1.9-36 the build compiles the ESP-IDF from source under the
 #                       committed sdkconfig.defaults (Arduino as a component), so the step after
 #                       it is tools/check-sdkconfig.py: that file is the Arduino core's own
@@ -157,6 +163,20 @@ jobs:
           pio run -e ${{ matrix.env }} -t mergebin
           python tools/check-partitions.py --self-test
           python tools/check-partitions.py --env ${{ matrix.env }} --merged ".pio/build/${{ matrix.env }}/firmware-merged.bin"
+
+      # And the bytes of it, because since task p1.15-57 the firmware carries both of this board's
+      # tables as arrays and writes one of them into a board's own table sector on `update slot`.
+      # Two things must hold or the two ways of getting the new table diverge: the table the
+      # firmware would write is the merged image's own bytes at 0x8000, and the table it
+      # recognises as `one` is what the ESP-IDF's gen_esp32part.py makes of the file that records
+      # what boards in the field hold. Both are read from the installed framework and the image
+      # just built, so an edited csv, a stale array or a changed framework is a red build.
+      # The self-test first: the planted differences it must refuse.
+      - name: The partition tables the firmware carries
+        run: |
+          set -euo pipefail
+          python tools/check-table-bytes.py --self-test
+          python tools/check-table-bytes.py --env ${{ matrix.env }} --merged ".pio/build/${{ matrix.env }}/firmware-merged.bin"
 
       # -Werror is on for src/ (platformio.ini's build_src_flags), so a warning of our own has
       # already failed the step above. This is the size of what was built, for the record.

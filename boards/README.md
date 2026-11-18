@@ -28,10 +28,17 @@ referenced.
 ## `partitions/` — the two tables, and why they exist
 
 `meshmaster_8MB.csv` (the V3) and `meshmaster_16MB.csv` (the V4) are the
-framework's `default_8MB.csv` and `default_16MB.csv` with **one change: `nvs`
-is above the application**, at the offset `app1` had. `platformio.ini` names
+framework's `default_8MB.csv` and `default_16MB.csv` with **two changes: `nvs`
+is above the application**, at the offset `app1` had, and **`app1` is back
+lower down**, in the region that move left unallocated. `platformio.ini` names
 them per environment (`board_build.partitions`); the board definitions above
 are not edited for it.
+
+Beside each of them is the table that board holds **today**:
+`meshmaster_8MB_one_slot.csv` and `meshmaster_16MB_one_slot.csv`, which are the
+same files without the `app1` line. Nothing is built with those; they are kept
+because the firmware has to recognise a board's own table by its bytes before
+it will write over it (*The second slot*, below).
 
 The reason is the merged image. A board out of the box is flashed with
 bootloader + partition table + application as one file from `0x0`, and
@@ -65,10 +72,14 @@ What **does not move**, and why it is held in CI rather than promised:
   it. **`coredump`** stays where it was.
 - **`nvs` keeps its label** and the default's size: `Preferences` opens the
   partition by that label (`src/settings/Store.cpp` changes nothing).
-- **`app1` is gone** — this firmware does no OTA, so the second slot was never
-  written — and the rest of its region is **left unallocated** rather than
-  given to `spiffs`, which would have moved `spiffs`. The gap at
-  `0x9000`–`0xDFFF` stays empty for the same reason.
+- **`app1` is not where the default has it**, because `nvs` is there now. It
+  lives further up, in the region that was left unallocated when it went:
+  `0x350000` size `0x320000` on the V3, `0x660000` size `0x630000` on the V4 —
+  on a 64 kB boundary, which an application partition must be, and ending
+  exactly where `spiffs` begins. The 44 kB between `nvs`'s end and that
+  boundary stays unallocated, and so does the gap at `0x9000`–`0xDFFF`.
+  `spiffs` was not given the region, then or now: that would have moved
+  `spiffs`.
 
 [`tools/check-partitions.py`](../tools/check-partitions.py) reads the csv each
 environment names and holds all of that against the framework default for the
@@ -85,3 +96,41 @@ What a board goes through on the day this table lands is in README.md's
 *Flashing it*: the application image keeps the old table and the old settings;
 the first merged flash gets the new table, keeps the identity, and needs WiFi
 and a new token once.
+
+## The second slot, and how a board in the field gets it
+
+`app1` was taken out in October — *this firmware does no OTA, so the second
+slot was never written* — and put back on 18 November, because an owner asked
+for an update they could start from meshmaster.dk and an update needs a slot to
+be fetched into (task p1.15-57). Everything above still holds: not one other
+line of either table moved by a byte.
+
+A board gets its table from a merged image, and the MeshCore web flasher erases
+the whole board before it writes one — the key, the token and the WiFi with it.
+So **no board in the field is asked to flash a merged image**. It takes a
+release as the plain `.bin`, which keeps everything and keeps the table it has,
+and **the firmware writes the one sector itself** when a person types
+`update slot` on the console. That is four kilobytes at `0x8000`, erased and
+written once, and nothing else on the board is touched.
+
+For that it has to know what it is writing over, so it carries both tables as
+bytes (`src/platform/TableBytes.cpp`, generated from the files here by
+`tools/check-table-bytes.py`) and calls what it finds one of three words
+(`src/platform/PartitionTable.h`):
+
+| Word | The sector holds | What `update slot` does |
+|---|---|---|
+| `two` | a table with an `app/ota_1` entry — the new table, or the framework's own default | nothing: it says the slot is there, and where |
+| `one` | this board's `meshmaster_<size>_one_slot.csv`, byte for byte, with `0xFF` above it | erases the sector, writes the new table, reads it back and compares |
+| `other` | anything else | nothing: it refuses in a sentence, and says to flash a merged image over USB |
+
+**A power cut in the moment of that write leaves a board that needs a merged
+image over USB** — `esptool` writes one without erasing anything outside what
+it writes, so the key, the token and the WiFi survive that too. It is the only
+moment in this work that can leave a board needing a cable.
+
+Three things hold it, all in CI: `tools/check-partitions.py` (where `app1` is,
+and that the application fits the **smaller** of the two slots, which is `app1`
+on both boards), `tools/check-table-bytes.py` (the firmware's bytes are these
+files' bytes, and the table it would write is the merged image's at `0x8000`)
+and the native suites `test/test_partition_table` and `test/test_flash_writes`.

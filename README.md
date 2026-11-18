@@ -220,6 +220,23 @@ identity in SPIFFS sits above that, at the same offset as in every table this
 firmware has ever had, which is why a repeater's ACL entry for this board holds
 through any reflash. CI holds both on every build (`tools/check-partitions.py`).
 
+**The merged image now carries two application slots**, and the plain `.bin`
+does not carry a table at all. Since this release the partition table has an
+`app1` again — the second slot an update is fetched into, in the region that
+was left unallocated when `app1` went in October — so a board flashed with the
+merged image has it from the first boot. **A board upgraded with the plain
+`.bin` keeps the table it already has**, because that image is the application
+and nothing else, and that is deliberate: the web flasher erases the whole
+board before it writes a merged image, which costs the key, the token and the
+WiFi, so no board in the field is asked for one. Such a board adds the slot
+itself when a person asks it to, on the console: `update` says which table it
+runs on (`one`, `two` or `other`) and `update slot` writes the new one, one
+sector of 4 kB, after which `reboot`. Nothing else changes — not the
+application, not NVS, not the identity — and a board that is already on `two`
+is told so and nothing is written. The one risk is a power cut in the second
+that sector is being written: that board then needs a merged image over USB
+(`esptool`, which erases nothing outside what it writes).
+
 **The one exception, once per board.** A board provisioned under `v0.1.1` or
 earlier carries the framework's default table, which keeps NVS at `0x9000` —
 inside the span `esptool`'s merge fills with `0xFF`. The **first merged flash**
@@ -665,6 +682,16 @@ reading.
   do.
 - **One send per command.** A `set` sent twice is a change made twice: single
   send, strictly increasing sender timestamps, the region loader's terminator.
+- **One place may erase or write raw flash.** Adding a board's second
+  application slot means writing the partition table's own sector, which the
+  ESP-IDF refuses and, as the Arduino core configures it, aborts the board
+  over — so that guard is off for the whole image
+  (`tools/check-sdkconfig.py` carries the key and the reason). What it used to
+  do is done by one file instead: `src/platform/TableFlash.cpp` holds the
+  address and the length as constants of its own and refuses every call
+  outside that one sector, and a native test walks `src/` and `lib/` for the
+  calls that erase or write flash and fails when a second file holds one
+  (`test/test_flash_writes`).
 - **It stays up, and says why when it did not.** A task watchdog on the loop
   that is also the network, a deliberate restart when the server has been
   unreachable against a live link for an hour and a half, and the last five

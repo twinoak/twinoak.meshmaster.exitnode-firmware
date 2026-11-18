@@ -194,7 +194,7 @@ TEST(Rails, TheTestsTheRailsLeanOnAreAllThere) {
   const fs::path root(PROJECT_DIR);
   const char* const suites[] = {"test_tls_policy",        "test_console_parser", "test_credentials",
                                 "test_contract_fixtures", "test_buffers",        "test_server_policy",
-                                "test_observer",          "test_connection"};
+                                "test_observer",          "test_connection",     "test_flash_writes"};
   for (const char* s : suites) {
     EXPECT_TRUE(fs::is_directory(root / "test" / s)) << "test/" << s << " is gone";
   }

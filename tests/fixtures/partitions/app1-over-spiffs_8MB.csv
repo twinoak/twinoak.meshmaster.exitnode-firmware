@@ -1,0 +1,12 @@
+# WRONG, on purpose: tests/fixtures/partitions/README.md. The second application slot of task
+# p1.15-57 given app0's size instead of the region's, so it runs 0x10000 bytes past where spiffs
+# begins. spiffs holds the identity, the one thing on a board that cannot be re-provisioned, so
+# the first update fetched into the slot would end the exit node. tools/check-partitions.py must
+# refuse it.
+# Name,   Type, SubType, Offset,  Size, Flags
+otadata,  data, ota,     0xe000,  0x2000,
+app0,     app,  ota_0,   0x10000, 0x330000,
+nvs,      data, nvs,     0x340000,0x5000,
+app1,     app,  ota_1,   0x350000,0x330000,
+spiffs,   data, spiffs,  0x670000,0x180000,
+coredump, data, coredump,0x7F0000,0x10000,

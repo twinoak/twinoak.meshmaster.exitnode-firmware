@@ -7,11 +7,18 @@
 # every merged flash erased a provisioned board's settings (bench, 4 October 2026). Here NVS
 # begins where app1 began, above anything a merged image can reach.
 #
-# app1 is gone: this firmware does no OTA, so the second application slot was never written.
-# The rest of app1's region (0x345000-0x66FFFF) is deliberately left unallocated - giving it to
-# spiffs would move spiffs's offset, and spiffs holds the identity, which is the one thing on a
-# board that cannot be re-provisioned. The gap 0x9000-0xDFFF stays empty for the same reason:
-# nothing of ours may live where a merged image writes.
+# app1 is back (task p1.15-57): a second application slot, so that a release can be fetched into
+# the slot the board is not running from and switched to. It is NOT where the framework's default
+# has it - NVS is there now - but in the region that was left unallocated when app1 went in
+# October: 0x350000 to 0x66FFFF, on a 64 kB boundary, ending where spiffs begins. 0x345000 to
+# 0x34FFFF (just above nvs) stays unallocated, because an application slot has to be aligned.
+# The slot is 0x320000 (3.125 MB), a little smaller than app0's 0x330000, so the application has
+# to fit the smaller of the two; tools/check-partitions.py holds that against the real image.
+# The gap 0x9000-0xDFFF stays empty: nothing of ours may live where a merged image writes.
+#
+# A board in the field does NOT get this table by being upgraded - the plain .bin keeps the
+# table it has - so meshmaster_8MB_one_slot.csv records the one it holds and `update slot` on
+# the console writes this one over it, one sector at 0x8000 (README.md, *Flashing it*).
 #
 # otadata, app0, spiffs and coredump are byte-identical to default_8MB.csv (offset and size).
 # tools/check-partitions.py holds all of that against the installed framework, in CI, every build.
@@ -20,5 +27,6 @@
 otadata,  data, ota,     0xe000,  0x2000,
 app0,     app,  ota_0,   0x10000, 0x330000,
 nvs,      data, nvs,     0x340000,0x5000,
+app1,     app,  ota_1,   0x350000,0x320000,
 spiffs,   data, spiffs,  0x670000,0x180000,
 coredump, data, coredump,0x7F0000,0x10000,

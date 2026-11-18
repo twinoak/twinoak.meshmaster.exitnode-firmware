@@ -1,0 +1,13 @@
+# WRONG, on purpose: tests/fixtures/partitions/README.md. The second application slot of task
+# p1.15-57 pushed down to just above nvs, to 0x34F000, which fits in the region and overlaps
+# nothing but is not on a 64 kB boundary. An application partition has to be: the ESP-IDF's own
+# gen_esp32part.py refuses it (ALIGNMENT for APP_TYPE), and the bootloader maps an image in
+# 64 kB pages. tools/check-partitions.py must refuse it too, before a build ever reaches that
+# script.
+# Name,   Type, SubType, Offset,  Size, Flags
+otadata,  data, ota,     0xe000,  0x2000,
+app0,     app,  ota_0,   0x10000, 0x330000,
+nvs,      data, nvs,     0x340000,0x5000,
+app1,     app,  ota_1,   0x34F000,0x320000,
+spiffs,   data, spiffs,  0x670000,0x180000,
+coredump, data, coredump,0x7F0000,0x10000,
