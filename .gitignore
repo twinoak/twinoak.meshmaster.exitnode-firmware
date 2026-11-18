@@ -30,3 +30,11 @@ cmake-build-*/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# The headers tools/pio/release_headers.py writes before every build (task p1.15-58): the trust
+# table from keys/release-keys.txt, and the descriptor the image carries about itself.
+src/update/generated/
+
+# Python bytecode, from the release tooling run by hand or by a build
+__pycache__/
+*.pyc

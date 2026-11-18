@@ -15,3 +15,9 @@ tests/fixtures/contracts/*.json -text
 # The fixtures that wait for a sync are bytes for the same reason (task p1.15-56): they are
 # compared with the copied files byte for byte when meshmaster.dk's side lands.
 tests/fixtures/contracts-ahead/*.json -text
+
+# The firmware-manifest fixtures, and the release this repository's own tooling writes for its
+# tests (task p1.15-58). A signature is over a file's bytes: one line ending changed by git on the
+# way in or out and every signature in both directories fails.
+tests/fixtures/firmware/* -text
+tests/fixtures/release/* -text

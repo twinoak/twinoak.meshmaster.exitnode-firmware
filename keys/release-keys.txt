@@ -1,0 +1,32 @@
+# The keys a release of this firmware may be signed with, and that a build of it trusts.
+#
+# Public halves only. The private half of the release key is the RELEASE_SIGNING_KEY secret of
+# .github/workflows/release.yml and is never in this repository, in a log, in an artifact or in a
+# report (docs/release.md, FIRMWARE-MANIFEST.md section 3).
+#
+# One key a line, # to end of line a comment, at most three - section 3's room for three, so that
+# a key can be replaced by shipping a release that trusts both the old and the new one, then one
+# that trusts only the new:
+#
+#   ed25519 <key id> <public hex>   # who made it, when
+#
+# <key id> is the first eight bytes of SHA-256 over the 32-byte public key, 16 lowercase hex
+# characters; tools/release/verify_release.py recomputes it and refuses a line where it is wrong,
+# and tools/gen-trust-table.py - which turns this file into the firmware's own table - reads it
+# through the same loader, so the release gate and the board cannot disagree about a key.
+#
+# ONE KEY, the release key Thomas made on 2026-10-20: the same one that signs
+# twinoak.meshcore.repeater-firmware's and twinoak.meshcore.walter-firmware's releases, and the
+# one MeshMaster's firmware catalogue already trusts. If this file ever names no key,
+#
+#   * a release is refused in .github/workflows/release.yml, at verify_release.py, before
+#     anything is published, with what to do about it;
+#   * the firmware trusts nobody and takes no update at all - which is the safe state (section 3,
+#     last bullet) and what `update` then says on the console.
+#
+# The specification's test key (tests/fixtures/firmware/TEST-KEY.txt) is never added here. It is
+# public on purpose, so a release build that trusted it would take anybody's firmware: a build
+# that trusts it is a test build, made by tools/gen-trust-table.py --test-key for [env:native]
+# alone, and the release tooling refuses to sign a release with it.
+
+ed25519 73efdd383a957596 dad705e5374be34b9c42528a3b1215cc30deb1d575d2ed19e7645defcae2f1fe

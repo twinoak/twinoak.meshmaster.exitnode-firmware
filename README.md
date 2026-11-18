@@ -197,7 +197,16 @@ esptool.py --chip esp32s3 --port COM5 --baud 921600 write_flash 0x10000 firmware
 
 A release publishes, per board, a **merged** image (bootloader + partition table
 + application, flashed at `0x0`) and the **application** image alone beside it,
-with `SHA256SUMS` and the one `esptool` line to use. **One press of a button
+with `SHA256SUMS` and the one `esptool` line to use — and, once per release,
+`manifest.json` and `manifest.json.sig`: what every file is, with its size and
+its SHA-256, and one Ed25519 signature over those bytes, made where the images
+are built. Nothing you flash by hand needs them; they are what meshmaster.dk
+imports a release by and what a board checks before it boots an update it
+fetched itself (`FIRMWARE-MANIFEST.md` §5, and
+[`docs/release.md`](docs/release.md) §5). Every image also carries **96 bytes
+inside itself** saying what it is — the role, the board, the band and the
+version — so a file that was renamed or mixed up is still known for what it is;
+`update` on the console prints them. **One press of a button
 makes one**: *Actions → release → Run workflow*, which publishes the version
 [`VERSION`](VERSION) names, from `master`'s head, with CI green on it, and with
 *What's new* compiled from the lines the tasks left in `release-notes/unreleased/`;
@@ -559,7 +568,16 @@ decision rather than an omission.
 |---|---|---|
 | [`ci.yml`](.github/workflows/ci.yml) | every pull request and every push to `master`: the board matrix, the native tests, the library, the fixtures | `ubuntu-latest` |
 | [`upstream.yml`](.github/workflows/upstream.yml) | the weekly MeshCore check | `ubuntu-latest` |
-| [`release.yml`](.github/workflows/release.yml) | *Run workflow*: the images people flash, the Release, and the pull request that moves the version on ([`docs/release.md`](docs/release.md)) | `ubuntu-latest` |
+| [`release.yml`](.github/workflows/release.yml) | *Run workflow*: the images people flash, the manifest and its signature, the Release, and the pull request that moves the version on ([`docs/release.md`](docs/release.md)) | `ubuntu-latest` |
+
+`release.yml` is the one workflow here with a secret: `RELEASE_SIGNING_KEY`, the
+private half of the key a release's manifest is signed with. It reaches the
+signing step through the environment and through nothing else — no argument,
+which would be in the process table, and no file, which would be one `git add`
+from being committed — and nothing prints it. A secret is never given to a
+workflow a fork's pull request can start, and none of these is one. A **dry
+run** needs no secret at all: it signs with the specification's public test key,
+which signs nothing that is published.
 
 Twinoak's other repositories — meshmaster.dk, the repeater firmware — moved
 their CI home in October 2026, to self-hosted runners on Thomas's Unraid box

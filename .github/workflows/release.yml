@@ -44,6 +44,15 @@
 #                                                flashed at 0x0 on a board out of the box or one
 #                                                coming from other firmware
 #   SHA256SUMS                                   for all of them, one file
+# And, once per release (task p1.15-58):
+#   manifest.json                                what every file above is - its size, its SHA-256,
+#                                                the board, the band and the load address - as
+#                                                MeshMaster's firmware catalogue and a board that
+#                                                updates itself read it
+#   manifest.json.sig                            one Ed25519 signature over its bytes, made here
+#                                                with the RELEASE_SIGNING_KEY secret. One
+#                                                signature covers the whole release, because the
+#                                                manifest carries every file's hash
 # Either image keeps a provisioned board's settings and its identity: this firmware's partition
 # table puts NVS above the application, where a merged image cannot reach it (boards/README.md,
 # task p1.2-11). The one exception is the first merged flash over a board provisioned under
@@ -275,6 +284,21 @@ jobs:
             [System.IO.File]::WriteAllText($out, "_Nothing is waiting in ``release-notes/unreleased/``; a real release would refuse. This is a dry run._`n")
           }
 
+      # The manifest, before the hashes and the notes, because it is read from the files
+      # themselves: every size and every SHA-256 comes off the four .bin files just downloaded,
+      # and the `ota` load address comes out of the partition table the environment names
+      # (task p1.15-58). It refuses before it writes: a file missing, a merged image that does not
+      # carry this very application, an image with no descriptor or two, a descriptor that
+      # disagrees with its entry, or an image carrying the specification's public test key.
+      - name: What this release is, as a board reads it
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+          SHA: ${{ needs.gate.outputs.sha }}
+        run: |
+          set -euo pipefail
+          python tools/release/build_release.py --version "$VERSION" --commit "$SHA" --dir out/release
+          cat out/release/manifest.json
+
       - name: SHA256SUMS and the notes
         env:
           VERSION: ${{ needs.gate.outputs.version }}
@@ -342,6 +366,19 @@ jobs:
             `-merged.bin` is the way back.
 
           `SHA256SUMS` lists every file.
+
+          ## What is signed
+
+          `manifest.json` names every image above with its size, its SHA-256, the board it is for
+          and the address it loads at, and `manifest.json.sig` is one Ed25519 signature over its
+          bytes. One signature covers the whole release, because the manifest carries every file's
+          hash. It is made where the images are built, so nothing in between — this site, a
+          network, a laptop — is trusted with more than delivering bytes.
+
+          Nothing you flash by hand needs it: the web flasher takes the `.bin` as it always has.
+          It is for **meshmaster.dk**, which imports a release only if the signature and every
+          hash check out, and for a board updating itself, which checks the signature, the
+          manifest, the file's hash and the 96 bytes inside the image before it will boot it.
 
           ## Setting it up
 
@@ -425,6 +462,46 @@ jobs:
           } > NOTES.md
           cat NOTES.md
 
+      # SIGNED WHERE IT IS BUILT (FIRMWARE-MANIFEST.md section 3, task p1.15-58). The private key
+      # is the RELEASE_SIGNING_KEY secret and reaches the script through the environment and
+      # through nothing else - no argument, which would be in the process table, and no file,
+      # which would be one `git add` from being committed. Nothing is echoed: what the step prints
+      # is the line it wrote, whose key id is published with every release anyway.
+      #
+      # A DRY RUN signs with the specification's public test key, which needs no secret and which
+      # sign_manifest.py refuses to put on a release's version or tag - so a rehearsal's artifacts
+      # can never be mistaken for a release, and a fork's dry run works with no secret at all.
+      - name: Sign the manifest
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          RELEASE: ${{ needs.gate.outputs.release }}
+        run: |
+          set -euo pipefail
+          if [ "$RELEASE" = "true" ]; then
+            python tools/release/sign_manifest.py out/release/manifest.json
+          else
+            unset RELEASE_SIGNING_KEY
+            python tools/release/sign_manifest.py --test-key out/release/manifest.json
+          fi
+          cat out/release/manifest.json.sig
+
+      # THE LAST GATE. Every check of section 5 that applies to this product, over the files that
+      # are about to be published, with the keys a firmware build would trust and nothing else: the
+      # signature, the manifest, an image for each board, each file's hash, and the one descriptor
+      # inside each file. A release that cannot pass this is not published, and a dry run runs the
+      # same gate against the test key - so it is rehearsed and never met for the first time on a
+      # release.
+      - name: The last gate before anything is published
+        env:
+          RELEASE: ${{ needs.gate.outputs.release }}
+        run: |
+          set -euo pipefail
+          if [ "$RELEASE" = "true" ]; then
+            python tools/release/verify_release.py out/release
+          else
+            python tools/release/verify_release.py --test-key out/release
+          fi
+
       # The tag is made here, on master's head, by the Release itself. Nothing was pushed by hand
       # and a tag pushed by hand starts nothing: this is the one way a release of this repository
       # is made. **Latest**, because it is.
@@ -442,7 +519,8 @@ jobs:
             --title "MeshMaster agent firmware $TAG" \
             --notes-file out/release/NOTES.md \
             --latest \
-            out/release/*.bin out/release/SHA256SUMS
+            out/release/*.bin out/release/SHA256SUMS \
+            out/release/manifest.json out/release/manifest.json.sig
           echo "Released **$TAG** from \`${SHA:0:7}\`, with ${{ needs.gate.outputs.lines }} line(s) of notes." >> "$GITHUB_STEP_SUMMARY"
 
       # AFTER the release is out and never before it: the lines it published move out of
