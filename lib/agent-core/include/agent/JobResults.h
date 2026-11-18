@@ -54,7 +54,15 @@ size_t writeStatusResult(const StatusReading& s, const ErrorCounter* errors, int
 
 size_t writeTelemetryResult(const LppReading* readings, int count, char* out, size_t cap);
 
-size_t writeNeighboursResult(const Neighbour* neighbours, int count, char* out, size_t cap);
+// `total` is **how many neighbours the repeater said it has** - the figure every page of the
+// reply carries (agent/ReplyCodec.h, `NeighboursPage::total`), as the last page that was read
+// gave it. It is written after the array, always, and it is what tells a whole list from one
+// that stopped: `count` entries and a larger `total` is a list the reading did not finish,
+// because a page went unanswered after an earlier one came back or because the list was cut at
+// `kMaxNeighbours`. Without it nine neighbours that are the whole list and nine that are where
+// the list stopped are the same bytes, and the server counts the missing eight as gone
+// (task p1.15-56; meshmaster.dk's task 239, which reads it). 0 beside an empty list.
+size_t writeNeighboursResult(const Neighbour* neighbours, int count, int total, char* out, size_t cap);
 
 // The hops of the outward trace, the repeater last; the SNR each hop measured goes with it.
 size_t writeTraceResult(const TraceHop* hops, int count, char* out, size_t cap);

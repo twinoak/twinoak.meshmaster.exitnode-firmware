@@ -315,6 +315,20 @@ class FakeMesh : public mm::IMesh {
   // November 2026. Not `silenceLine` (the line never ran) and not `replySlowly` (which counts
   // every reply, a login's included).
   void loseTheNextLineReplies(const std::string& line, int times) { lostLineReplies_[line] = times; }
+  // **The neighbours page at `page` and every page after it goes unanswered** (task p1.15-56):
+  // the list stops where a page was lost, which is what a repeater with more neighbours than one
+  // page does on a mesh that drops one. 1 is the first page. `beSilent` above cannot say it,
+  // because it counts every send and the login and the pages before this one were answered.
+  void silenceTheNeighboursPageFrom(int page) { silentNeighboursPage_ = page; }
+  // **The neighbours page at `page` comes home too short to be a page**: fewer than the four
+  // bytes of `total(i16)` and `returned(i16)`, which is what `parseNeighboursPage` refuses. A
+  // reply is only ever that short with the padding off (`setPadding`), which is how a test that
+  // wants a page the reader cannot make sense of asks for one.
+  void truncateTheNeighboursPage(int page) { shortNeighboursPage_ = page; }
+  // **What this repeater says its neighbour count is, from `page` on**: every page carries the
+  // count, and a repeater that heard a new neighbour between two pages says a larger one in the
+  // second. Without this the count is the length of the list the test set.
+  void sayTheNeighbourTotalFromPage(int page, int total) { pageTotals_[page] = total; }
   // **The next `times` replies to this line arrive after their own wait has ended** (task
   // p1.10-49): held, not lost, and delivered `waits` waits later - 1 is the wait after its own,
   // and 2 is the one after that, which for a line the library **retries** is the next line's
@@ -938,12 +952,24 @@ class FakeMesh : public mm::IMesh {
       if (len < 6 || data == nullptr || data[0] != 0) return {};
       const int want = data[1];
       const int offset = data[2] | (data[3] << 8);
+      // Which page this is, counting from one: the runner asks `want` at a time and moves the
+      // offset on by what came back, so the offset says it. The three faults above are keyed to
+      // it, and a page asked for a second time is the same page (task p1.15-56).
+      const int page = want > 0 ? offset / want + 1 : 1;
+      if (silentNeighboursPage_ > 0 && page >= silentNeighboursPage_) return {};
+      if (shortNeighboursPage_ == page) return {0, 0, 0};
       int prefixLen = data[5];
       if (prefixLen > static_cast<int>(mm::kPublicKeyLen)) prefixLen = static_cast<int>(mm::kPublicKeyLen);
       std::vector<uint8_t> entries;
       int returned = 0;
-      const int total = static_cast<int>(neighbours_.size());
-      for (int i = 0; i < want && i + offset < total; i++) {
+      // What the page **says** the repeater has, and what it can hand over, are two numbers: a
+      // scripted count is the repeater's own figure and never an index into this list.
+      const int held = static_cast<int>(neighbours_.size());
+      int total = held;
+      for (const auto& said : pageTotals_) {
+        if (page >= said.first) total = said.second;
+      }
+      for (int i = 0; i < want && i + offset < held; i++) {
         if (entries.size() + static_cast<size_t>(prefixLen) + 5 > kNeighbourResults) break;
         const NeighbourEntry& n = neighbours_[static_cast<size_t>(i + offset)];
         for (int b = 0; b < prefixLen; b++) {
@@ -1282,6 +1308,9 @@ class FakeMesh : public mm::IMesh {
 
   // the faults
   int silentSends_ = 0;
+  int silentNeighboursPage_ = 0;
+  int shortNeighboursPage_ = 0;
+  std::map<int, int> pageTotals_;  // from this page on, the repeater says this many neighbours
   bool silentAlways_ = false;
   int wrongTagSends_ = 0;
   int slowSends_ = 0;
