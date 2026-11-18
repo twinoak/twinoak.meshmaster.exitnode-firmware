@@ -11,9 +11,16 @@ the framework's defaults, in CI, on every build of every board (.github/workflow
     otadata is what boot_app0.bin fills at 0xE000.
   * ``nvs`` keeps its label (Preferences finds it by that name, src/settings/Store.cpp), keeps the
     default's size, and begins above app0's end - above anything a merged image can reach.
+  * ``app1`` is back (task p1.15-57), as the second application slot an update is fetched into. It
+    is where APP1 below says, which is inside the region that was left unallocated when app1 went
+    in October: on a 64 kB boundary, above nvs, ending exactly where spiffs begins, overlapping
+    nothing. The firmware carries that table as bytes and writes it into a board's own table sector
+    on ``update slot``; tools/check-table-bytes.py is the check that those bytes are these.
   * nothing lives in the gap 0x9000-0xDFFF, which ``esptool merge_bin`` fills with 0xFF.
   * the merged image (bootloader + partitions + application, one file from 0x0) ends before nvs
-    begins - so the day the application grows past its region, CI says so before a release does.
+    begins - so the day the application grows past its region, CI says so before a release does -
+    and the application inside it fits **the smaller of the two slots**, which is app1 on both
+    boards: an image that fits app0 and not app1 is one that can never be updated to.
 
 The framework defaults are embedded below, as read from the installed package on the day, and
 when that package is on disk the embedded copy is held against it too: a framework bump that moves
@@ -68,6 +75,18 @@ FRAMEWORK_DEFAULTS: dict[str, dict[str, tuple[int, int]]] = {
 
 # What must not move, and why (the message when it does).
 PINNED = ("spiffs", "coredump", "otadata", "app0")
+
+# Where the second application slot is, per flash size (task p1.15-57, boards/README.md). Not the
+# framework default's app1 - nvs is there now - but the region left unallocated when app1 went:
+# 64 kB aligned, above nvs, ending exactly where spiffs begins.
+APP1: dict[str, tuple[int, int]] = {
+    "8MB": (0x350000, 0x320000),
+    "16MB": (0x660000, 0x630000),
+}
+
+# An application slot has to begin on a 64 kB boundary (the ESP-IDF's own rule for an app
+# partition: components/partition_table/gen_esp32part.py, ALIGNMENT).
+APP_ALIGNMENT = 0x10000
 
 # The partition table itself is one sector at 0x8000; boot_app0 is at 0xE000. Between them is the
 # span a merged image fills with 0xFF, and nothing of ours may live there.
@@ -179,6 +198,42 @@ def check_table(parts: list[Partition], flash_size: str, merged_len: int | None)
         if spiffs is not None and nvs.end > spiffs.offset and nvs.offset < spiffs.end:
             problems.append(f"nvs (0x{nvs.offset:X}-0x{nvs.end - 1:X}) overlaps spiffs")
 
+    # app1: the second application slot, in what used to be unallocated (task p1.15-57).
+    spiffs = by_name.get("spiffs")
+    app1 = by_name.get("app1")
+    want_app1 = APP1[flash_size]
+    if app1 is None:
+        problems.append(
+            f"app1 is missing; this board's second application slot is 0x{want_app1[0]:X} size 0x{want_app1[1]:X}, "
+            f"and without it a release can never be fetched into the slot the board is not running from"
+        )
+    else:
+        if (app1.type, app1.subtype) != ("app", "ota_1"):
+            problems.append(f"app1 is {app1.type}/{app1.subtype}, not app/ota_1: the bootloader would not boot it")
+        if (app1.offset, app1.size) != want_app1:
+            problems.append(
+                f"app1 is at 0x{app1.offset:X} size 0x{app1.size:X}; this board's second slot is "
+                f"0x{want_app1[0]:X} size 0x{want_app1[1]:X} (boards/README.md) - and the firmware carries "
+                f"that table as bytes, so moving it here moves it on no board"
+            )
+        if app1.offset % APP_ALIGNMENT != 0:
+            problems.append(
+                f"app1 at 0x{app1.offset:X} is not on a 0x{APP_ALIGNMENT:X} boundary, which an application "
+                f"partition must be (gen_esp32part.py refuses it, and the bootloader maps in 64 kB pages)"
+            )
+        if nvs is not None and app1.offset < nvs.end and app1.end > nvs.offset:
+            problems.append(
+                f"app1 (0x{app1.offset:X}-0x{app1.end - 1:X}) overlaps nvs: an update written into the slot "
+                f"would take the WiFi, the server and the token with it"
+            )
+        if spiffs is not None and app1.offset < spiffs.end and app1.end > spiffs.offset:
+            problems.append(
+                f"app1 (0x{app1.offset:X}-0x{app1.end - 1:X}) overlaps spiffs: an update written into the slot "
+                f"would take the identity with it, and the identity cannot be re-provisioned"
+            )
+        if app0 is not None and app1.offset < app0.end and app1.end > app0.offset:
+            problems.append(f"app1 (0x{app1.offset:X}-0x{app1.end - 1:X}) overlaps app0, which is the running application")
+
     # The gap stays empty, and the table starts where a table may start.
     for p in parts:
         if p.offset < GAP_END and p.end > GAP_START:
@@ -201,6 +256,18 @@ def check_table(parts: list[Partition], flash_size: str, merged_len: int | None)
             problems.append(
                 f"the merged image is {merged_len} bytes (0x{merged_len:X}) and reaches nvs at 0x{nvs.offset:X}: "
                 f"flashing it would erase the settings"
+            )
+
+    # The application fits the smaller of the two slots, which is app1 on both boards. An image
+    # that fits app0 and not app1 is one no board can ever be updated *to* (task p1.15-57).
+    if merged_len is not None and app0 is not None and app1 is not None and merged_len > app0.offset:
+        app_len = merged_len - app0.offset
+        smaller = min(app0.size, app1.size)
+        which = "app1" if app1.size <= app0.size else "app0"
+        if app_len > smaller:
+            problems.append(
+                f"the application is {app_len} bytes (0x{app_len:X}) and the smaller slot, {which}, is "
+                f"0x{smaller:X}: it fits where it is built but could never be fetched into the other slot"
             )
     return problems
 
@@ -286,7 +353,9 @@ def run_check(csv: Path, flash_size: str, merged: Path | None, merged_len: int |
         nvs = next(p for p in parts if p.name == "nvs")
         if merged_len is not None:
             print(f"ok    the merged image ends 0x{nvs.offset - merged_len:X} ({nvs.offset - merged_len} bytes) before nvs at 0x{nvs.offset:X}")
+        app1 = next(p for p in parts if p.name == "app1")
         print(f"ok    {', '.join(PINNED)} are the {flash_size} default's; nvs at 0x{nvs.offset:X} is above app0; the gap at 0x{GAP_START:X} is empty")
+        print(f"ok    app1 at 0x{app1.offset:X} size 0x{app1.size:X}: above nvs, on a 0x{APP_ALIGNMENT:X} boundary, ending where spiffs begins")
     return 1 if problems else 0
 
 
@@ -303,7 +372,19 @@ def self_test() -> int:
         ("a table that moved spiffs is refused", fixtures / "spiffs-moved_8MB.csv", "8MB", 0x10000 + app_bytes, False, "spiffs"),
         ("the old default, nvs in the gap, is refused", fixtures / "nvs-in-the-gap_8MB.csv", "8MB", 0x10000 + app_bytes, False, "nvs"),
         ("a merged image that reaches nvs is refused", tables / "meshmaster_8MB.csv", "8MB", 0x340000 + 1, False, "merged image"),
-        ("a merged image that ends exactly at nvs is accepted", tables / "meshmaster_8MB.csv", "8MB", 0x340000, True, ""),
+        # 0x340000 is where nvs begins and 0x330000 is app1's size counted from app0's offset; the
+        # first of the two is the binding one on this board, so the accepted case uses it.
+        ("a merged image that ends exactly at nvs is accepted", tables / "meshmaster_8MB.csv", "8MB", 0x330000, True, ""),
+        # The second slot (task p1.15-57), one rule a fixture.
+        ("the table boards hold today, with no app1, is refused", tables / "meshmaster_8MB_one_slot.csv", "8MB", None, False, "app1 is missing"),
+        ("an app1 that overlaps nvs is refused", fixtures / "app1-over-nvs_8MB.csv", "8MB", None, False, "overlaps nvs"),
+        ("an app1 that overlaps spiffs is refused", fixtures / "app1-over-spiffs_8MB.csv", "8MB", None, False, "overlaps spiffs"),
+        ("an app1 off the 64 kB boundary is refused", fixtures / "app1-off-the-boundary_8MB.csv", "8MB", None, False, "boundary"),
+        ("an application one byte longer than the smaller slot is refused",
+         tables / "meshmaster_8MB.csv", "8MB", 0x10000 + APP1["8MB"][1] + 1, False, "smaller slot"),
+        ("an application that exactly fills the smaller slot is accepted",
+         tables / "meshmaster_8MB.csv", "8MB", 0x10000 + APP1["8MB"][1], True, ""),
+        ("and the same, on the 16 MB board", tables / "meshmaster_16MB.csv", "16MB", 0x10000 + APP1["16MB"][1] + 1, False, "smaller slot"),
     ]
     failures = 0
     for what, csv, size, merged_len, must_pass, word in cases:

@@ -348,3 +348,63 @@ with a USB cable.
   on a V4 is not 22 dBm at the socket, it is far more, and it is neither legal
   nor good for the amplifier. Leave `radio.tx` unset unless you know why you
   are changing it.
+
+### The second application slot, and the one command that writes flash
+
+Since the release of task p1.15-57 the partition table has a second
+application slot — `app1`, the place an update will be fetched into — and a
+board flashed with the **merged** image has it from the first boot. A board
+**upgraded with the plain `.bin` keeps the table it already has**, which is
+right: the web flasher erases the whole board before it writes a merged image,
+and that costs the key, the token and the WiFi. Such a board adds the slot
+itself, once, when you ask it to.
+
+```
+> update
+table     one
+app0      0x010000, 0x330000 bytes
+app1      none: this is the table boards were flashed with before the second slot existed
+          type `update slot` to add it, then `reboot`; the settings and the identity are untouched
+> update slot
+added: app1 at 0x350000, 0x320000 bytes. Type `reboot`; the table is read at the next boot
+> reboot
+```
+
+- `update` says one of three words and nothing else happens: **`two`** — the
+  slot is there, and the two offsets are printed; **`one`** — the table is the
+  one every merged image wrote before this release, and the slot can be added;
+  **`other`** — the table is not one this firmware recognises, and it will not
+  be written over. `other` is not a fault to fix at the window: flash the
+  release's merged image over USB with `esptool` (never the web flasher) and
+  the board has two slots at once.
+- `update slot` is **the only command on this console that erases or writes
+  flash**. It writes one sector of 4 kB at `0x8000`, reads it back and
+  compares; it touches nothing else, and it restarts nothing. Settings,
+  identity, token and WiFi are all outside it. **Do not pull the power while
+  it runs.** A board cut off in that second needs the merged image over USB
+  before it boots again — the only moment in this work that can leave a board
+  needing a cable.
+- On a board that is already `two`, `update slot` says so and writes nothing.
+
+### ⚠ Waiting for a board on the bench
+
+These cannot be checked without hardware, and they come **before any owner is
+told the firmware can be updated**. On a **V3** and on a **V4**, each
+provisioned and running the release before this one, then upgraded with this
+release's plain `.bin`:
+
+- [ ] **⚠ The word is `one`, and the identity is the same.** `update` says
+      `one`; `status` shows the same 64 hex characters it showed before the
+      upgrade.
+- [ ] **⚠ The slot is added and survives the reboot.** `update slot` says
+      *added* with `app1`'s offset, then `reboot`; after it, `update` says
+      `two` and prints both slots.
+- [ ] **⚠ Nothing else moved.** After that reboot: `status` shows the same 64
+      characters, the WiFi comes up by itself, and the exit node's page on
+      meshmaster.dk shows a heartbeat **with the token it already had** — no
+      re-provisioning, no new token.
+- [ ] **⚠ A merged flash is `two` at once.** A board flashed with this
+      release's merged image through `esptool` says `two` on its first
+      `update`, with no `update slot`.
+- [ ] **⚠ `update slot` on a `two` board writes nothing.** Typed a second
+      time, it says the slot is already there and names its offset.

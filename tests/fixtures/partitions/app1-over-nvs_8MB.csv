@@ -1,0 +1,11 @@
+# WRONG, on purpose: tests/fixtures/partitions/README.md. The second application slot of task
+# p1.15-57 put back where the framework's default has it - 0x340000 - which is where nvs went
+# when app1 was taken out. An update fetched into that slot would write over the WiFi, the server
+# and the agent token on its way in. tools/check-partitions.py must refuse it.
+# Name,   Type, SubType, Offset,  Size, Flags
+otadata,  data, ota,     0xe000,  0x2000,
+app0,     app,  ota_0,   0x10000, 0x330000,
+nvs,      data, nvs,     0x340000,0x5000,
+app1,     app,  ota_1,   0x340000,0x320000,
+spiffs,   data, spiffs,  0x670000,0x180000,
+coredump, data, coredump,0x7F0000,0x10000,

@@ -110,6 +110,13 @@ ParseResult parseLine(const char* line) {
     if (hasRest) return refuse("discover.scopes takes no argument");
     return accept(Verb::DiscoverScopes);
   }
+  if (std::strcmp(verb, "update") == 0) {
+    // Task p1.15-57: the word alone reads the table, `update slot` writes it. Nothing else, so
+    // that a typo cannot become a flash write.
+    if (!hasRest) return accept(Verb::Update);
+    if (std::strcmp(rest, kSlotWord) == 0) return accept(Verb::UpdateSlot);
+    return refuse("update takes no argument, or the word '%s': update %s", kSlotWord, kSlotWord);
+  }
   if (std::strcmp(verb, "erase") == 0) {
     if (!hasRest) return refuse("erase forgets every setting; to do it, type: erase %s", kEraseWord);
     if (std::strcmp(rest, kEraseWord) != 0) return refuse("erase: the word is '%s'", kEraseWord);

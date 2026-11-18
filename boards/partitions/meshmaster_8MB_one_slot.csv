@@ -1,0 +1,19 @@
+# MeshMaster agent firmware, 8 MB flash (Heltec V3): THE TABLE BOARDS IN THE FIELD HOLD TODAY, kept
+# here because the firmware has to know it by its bytes. Not built with: meshmaster_8MB.csv is.
+#
+# Every board flashed with a merged image of v0.2.0 to v0.7.1 carries exactly this, and
+# src/platform/PartitionTable.cpp calls that table `one`: one application slot, and the region
+# app1 used to have left unallocated. `update slot` on the console replaces this sector with the
+# bytes of meshmaster_8MB.csv, which is the same table with an app1 line added and nothing else
+# changed (task p1.15-57, boards/README.md).
+#
+# So: do not edit a byte of the five lines below. They are not a choice any more, they are a
+# record of what is on a board at a window, and tools/check-table-bytes.py holds the firmware's
+# copy of them against what gen_esp32part.py makes of this file, in CI, on every build.
+#
+# Name,   Type, SubType, Offset,  Size, Flags
+otadata,  data, ota,     0xe000,  0x2000,
+app0,     app,  ota_0,   0x10000, 0x330000,
+nvs,      data, nvs,     0x340000,0x5000,
+spiffs,   data, spiffs,  0x670000,0x180000,
+coredump, data, coredump,0x7F0000,0x10000,

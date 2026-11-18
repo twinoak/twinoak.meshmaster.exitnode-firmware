@@ -72,6 +72,12 @@ ALLOWED: dict[str, tuple[str | None, str | None, str]] = {
         "off, as MBEDTLS_DYNAMIC_FREE_PEER_CERT requires; nothing here reads the peer's certificate after the handshake (no fingerprint or DN check: src/ has no verify() call)"),
     "MBEDTLS_SSL_PROTO_DTLS": ("y", None,
         "MBEDTLS_DYNAMIC_BUFFER is not available with DTLS compiled in, and nothing here speaks TLS over UDP"),
+    # Task p1.15-57. One Kconfig choice, so two keys move together: the core takes the default
+    # (ABORTS) and this firmware takes ALLOWED. tasks/phase-1.15/57-a-second-slot.md asked for it.
+    "SPI_FLASH_DANGEROUS_WRITE_ABORTS": ("y", None,
+        "the guard that aborts a write landing in the bootloader, the partition table or the running app; the firmware adds a board's second application slot by writing the partition table's own sector, which it refuses"),
+    "SPI_FLASH_DANGEROUS_WRITE_ALLOWED": (None, "y",
+        "the other half of that one choice; what the guard used to do is done instead by src/platform/TableFlash.cpp, the only file of src/ and lib/ that may erase or write raw flash - it holds the address and the length as constants of its own and refuses anything outside that one sector, and test/test_flash_writes fails the build when a second file calls one of those functions"),
 }
 
 # Never set, whatever the core says: each is a way of not verifying a certificate. The first is

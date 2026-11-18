@@ -59,6 +59,8 @@
 #include "net/WifiLink.h"
 #include "observer/Observer.h"
 #include "platform/Esp32Platform.h"
+#include "platform/TableBytes.h"
+#include "platform/TableFlash.h"
 #include "platform/TlsHeap.h"
 #include "settings/Store.h"
 #include "ui/DisplayLines.h"
@@ -420,6 +422,50 @@ void printDiscoverScopes(Stream& out) {
   }
 }
 
+// `update`: which partition table this board runs on, and the application slots it has (task
+// p1.15-57). A board in the field upgraded with the plain `.bin` keeps the table it was flashed
+// with, so this is how a person at a window finds out whether this board can be updated from the
+// server yet, and `update slot` below is how it comes to be able to.
+void printUpdate(Stream& out) {
+  const mm::TablePair tables = mm::tablesForThisBoard();
+  const mm::TableReading r = mm::readTable(mm::partitionTableFlash(), tables.oneSlot);
+  if (!r.read) {
+    out.println("table     could not be read; nothing is claimed about this board's slots");
+    return;
+  }
+  out.printf("table     %s\r\n", mm::tableKindWord(r.kind));
+  if (r.app0.present) {
+    out.printf("app0      0x%06lX, 0x%06lX bytes\r\n", static_cast<unsigned long>(r.app0.offset),
+               static_cast<unsigned long>(r.app0.size));
+  }
+  switch (r.kind) {
+    case mm::TableKind::Two:
+      out.printf("app1      0x%06lX, 0x%06lX bytes\r\n", static_cast<unsigned long>(r.app1.offset),
+                 static_cast<unsigned long>(r.app1.size));
+      break;
+    case mm::TableKind::One:
+      out.println("app1      none: this is the table boards were flashed with before the second slot existed");
+      out.printf("          type `update %s` to add it, then `reboot`; the settings and the identity are untouched\r\n",
+                 mm::kSlotWord);
+      break;
+    case mm::TableKind::Other:
+      out.println("          this is not a table this firmware knows, so it will not be written over");
+      out.println("          flash the merged image of a release over USB to get one with two slots");
+      break;
+  }
+}
+
+// `update slot`: the one command of this console that erases and writes flash. One sector, at the
+// partition table's own address, and only when the table is the one boards were flashed with
+// (src/platform/PartitionTable.h). A power cut during it leaves a board that needs a merged image
+// over USB; it is the only moment of this pile that can.
+void printUpdateSlot(Stream& out) {
+  const mm::TablePair tables = mm::tablesForThisBoard();
+  const mm::AddSlotResult r = mm::addSecondSlot(mm::partitionTableFlash(), tables.oneSlot, tables.twoSlots);
+  out.printf("%s\r\n", r.line);
+  mm::logf(r.added ? mm::LogLevel::Warn : mm::LogLevel::Info, "update slot: %s", r.line);
+}
+
 // `mesh`: what the radio has heard. The names are printed here and in no log line - this is the
 // one place a person reads them, and they come from strangers, so they are the bounded, valid
 // UTF-8 the ring kept (agent/Observations.h).
@@ -744,7 +790,8 @@ void setup() {
   mm::ConsoleHost host = {&printStatus,  &printMesh,    &printServer, &printJobs,
                           &printSessions, &printErrors,  &printReboots, &printDump,
                           &printWifi,     &doReboot,     &onSettingChanged, &onErased,
-                          &printMqttStatus, &printKeyNote, &printDiscoverScopes};
+                          &printMqttStatus, &printKeyNote, &printDiscoverScopes,
+                          &printUpdate,   &printUpdateSlot};
   console.begin(Serial, settings, host);
   board.onBootComplete();
 }

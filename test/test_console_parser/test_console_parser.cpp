@@ -403,6 +403,27 @@ TEST(Lines, EraseNeedsItsConfirmationWord) {
   EXPECT_EQ(Verb::Erase, r.command.verb);
 }
 
+// `update` and `update slot` (task p1.15-57). The second erases and writes a sector of flash, so
+// the grammar is one word and one word only: anything else is a refusal that says what to type.
+TEST(Lines, UpdateTakesNothingOrTheWordSlot) {
+  ParseResult r = parseLine("update");
+  EXPECT_TRUE(r.ok);
+  EXPECT_EQ(Verb::Update, r.command.verb);
+  EXPECT_EQ(Verb::Update, parseLine("  update \r\n").command.verb);
+
+  r = parseLine("update slot");
+  EXPECT_TRUE(r.ok);
+  EXPECT_EQ(Verb::UpdateSlot, r.command.verb);
+  EXPECT_EQ(Verb::UpdateSlot, parseLine("update   slot  ").command.verb) << "the gap between the two words is trimmed";
+
+  for (const char* line : {"update now", "update slots", "update slot now", "update confirm", "update 1"}) {
+    const ParseResult x = parseLine(line);
+    EXPECT_FALSE(x.ok) << line;
+    EXPECT_STREQ("update takes no argument, or the word 'slot': update slot", x.error) << line;
+  }
+  EXPECT_FALSE(parseLine("Update").ok);
+}
+
 TEST(Lines, VerbsAreCaseSensitiveLikeTheKeys) {
   EXPECT_FALSE(parseLine("SET wifi.ssid x").ok);
   EXPECT_FALSE(parseLine("set Wifi.ssid x").ok);

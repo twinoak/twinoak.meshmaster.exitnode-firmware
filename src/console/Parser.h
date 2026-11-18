@@ -24,6 +24,8 @@
 //   get mqtt.presets         the broker presets a slot can take (task p1.7-26)
 //   get mqtt.status          one line per broker slot: state, since, published, dropped, last error (task p1.7-27)
 //   discover.scopes          the repeaters heard at zero hops, and one cycle of the scope sweep now (task p1.8-33)
+//   update                   which partition table this board runs on, and its application slots (task p1.15-57)
+//   update slot              add the second application slot to this board's table, and say to reboot
 //
 // Since task p1.7-26 the lines of the observer firmware's Danish guide are understood as well:
 // `set wifi.pwd ...` is `set wifi.pass ...` (Keys.cpp, findKey), and `set timezone ...` and
@@ -60,6 +62,8 @@ enum class Verb : unsigned char {
   Presets, // `get mqtt.presets`
   MqttStatus, // `get mqtt.status`
   DiscoverScopes,  // `discover.scopes`: the neighbour table, and one cycle of the scope sweep now (task p1.8-33)
+  Update,      // `update`: which partition table this board runs on, and its application slots (task p1.15-57)
+  UpdateSlot,  // `update slot`: add the second application slot to this board's table
 };
 
 struct Command {
@@ -82,5 +86,8 @@ ParseResult parseLine(const char* line);
 
 // The confirmation word `erase` needs, so the help text and the test say the same thing.
 constexpr const char* kEraseWord = "confirm";
+
+// The one word `update` takes, for the same reason.
+constexpr const char* kSlotWord = "slot";
 
 }  // namespace mm
