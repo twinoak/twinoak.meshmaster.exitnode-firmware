@@ -270,6 +270,15 @@ jobs:
           merge-multiple: true
           path: out/release
 
+      # The release tooling of task p1.15-58 is Python, and the standard library alone - no
+      # `cryptography`, no wheel to install: tools/release/ed25519ref.py is RFC 8032's own
+      # reference implementation, and what guards it is the RFC's first test vector and the
+      # specification's fixtures, both run in ci.yml. This step is only so that `python` is on the
+      # PATH and is the version the tooling is tested on.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       # This release's own lines, in the order the tasks merged, as the bullets they will be. A dry
       # run with nothing waiting says so instead of failing: a real release has already been
       # refused by the gate for that, and a rehearsal is allowed to be of a release with no lines.
