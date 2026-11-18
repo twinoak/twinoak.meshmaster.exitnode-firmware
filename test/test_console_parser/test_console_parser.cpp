@@ -403,9 +403,10 @@ TEST(Lines, EraseNeedsItsConfirmationWord) {
   EXPECT_EQ(Verb::Erase, r.command.verb);
 }
 
-// `update` and `update slot` (task p1.15-57). The second erases and writes a sector of flash, so
-// the grammar is one word and one word only: anything else is a refusal that says what to type.
-TEST(Lines, UpdateTakesNothingOrTheWordSlot) {
+// `update`, `update slot` and `update fetch <id>` (tasks p1.15-57 and p1.15-59). The second erases
+// and writes a sector of flash and the third fetches a release off the network, so the grammar is
+// exactly those three shapes: anything else is a refusal that says what to type.
+TEST(Lines, UpdateTakesNothingTheWordSlotOrFetchAndAnId) {
   ParseResult r = parseLine("update");
   EXPECT_TRUE(r.ok);
   EXPECT_EQ(Verb::Update, r.command.verb);
@@ -419,9 +420,34 @@ TEST(Lines, UpdateTakesNothingOrTheWordSlot) {
   for (const char* line : {"update now", "update slots", "update slot now", "update confirm", "update 1"}) {
     const ParseResult x = parseLine(line);
     EXPECT_FALSE(x.ok) << line;
-    EXPECT_STREQ("update takes no argument, or the word 'slot': update slot", x.error) << line;
+    EXPECT_STREQ("update takes no argument, the word 'slot', or 'fetch <release id>'", x.error) << line;
   }
   EXPECT_FALSE(parseLine("Update").ok);
+}
+
+TEST(Lines, UpdateFetchTakesOneReleaseIdAndNothingElse) {
+  ParseResult r = parseLine("update fetch 12");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(Verb::UpdateFetch, r.command.verb);
+  EXPECT_STREQ("12", r.command.value);
+
+  r = parseLine("update   fetch    7  ");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(Verb::UpdateFetch, r.command.verb);
+  EXPECT_STREQ("7", r.command.value) << "the gaps are trimmed, as they are for `update slot`";
+
+  EXPECT_STREQ("1234567890", parseLine("update fetch 1234567890").command.value);
+
+  // The id becomes a path this board asks the server for, so nothing but digits ever does.
+  for (const char* line : {"update fetch", "update fetch 12 34", "update fetch v0.8.0",
+                           "update fetch ../6", "update fetch 7/files", "update fetch -1",
+                           "update fetch 12345678901", "update fetch 0", "update fetch 007",
+                           "update fetch 7%2e", "update Fetch 7"}) {
+    const ParseResult x = parseLine(line);
+    EXPECT_FALSE(x.ok) << line;
+    EXPECT_NE('\0', x.error[0]) << line;
+  }
+  EXPECT_STREQ("update fetch takes one release id: update fetch 12", parseLine("update fetch").error);
 }
 
 TEST(Lines, VerbsAreCaseSensitiveLikeTheKeys) {

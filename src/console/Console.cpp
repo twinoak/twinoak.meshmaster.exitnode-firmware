@@ -95,6 +95,7 @@ void Console::help() {
   io_->println("  reboot");
   io_->println("  update              what this image is, the release keys it trusts, and this board's application slots");
   io_->printf("  update %s         add the second application slot to this board's table, then reboot\r\n", kSlotWord);
+  io_->printf("  update %s <id>   fetch release <id> from the server into the other slot and judge it\r\n", kFetchWord);
   io_->printf("  erase %s       forget every setting; the identity stays\r\n", kEraseWord);
   io_->println("  get mqtt.presets    the broker presets an mqttN.preset can name");
   io_->println("  get mqtt.status     the observer's broker slots (two on either board): state, since, published, dropped, last error");
@@ -217,6 +218,9 @@ void Console::runLine() {
       return;
     case Verb::UpdateSlot:
       if (host_.updateSlot) host_.updateSlot(*io_);
+      return;
+    case Verb::UpdateFetch:
+      if (host_.updateFetch) host_.updateFetch(r.command.value, *io_);
       return;
   }
 }

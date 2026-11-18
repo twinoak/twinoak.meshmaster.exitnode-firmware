@@ -24,8 +24,10 @@
 //   get mqtt.presets         the broker presets a slot can take (task p1.7-26)
 //   get mqtt.status          one line per broker slot: state, since, published, dropped, last error (task p1.7-27)
 //   discover.scopes          the repeaters heard at zero hops, and one cycle of the scope sweep now (task p1.8-33)
-//   update                   which partition table this board runs on, and its application slots (task p1.15-57)
+//   update                   which partition table this board runs on, its application slots, and
+//                            what the other slot holds (tasks p1.15-57 and p1.15-59)
 //   update slot              add the second application slot to this board's table, and say to reboot
+//   update fetch <id>        fetch release <id> from the server into the other slot and judge it
 //
 // Since task p1.7-26 the lines of the observer firmware's Danish guide are understood as well:
 // `set wifi.pwd ...` is `set wifi.pass ...` (Keys.cpp, findKey), and `set timezone ...` and
@@ -64,12 +66,13 @@ enum class Verb : unsigned char {
   DiscoverScopes,  // `discover.scopes`: the neighbour table, and one cycle of the scope sweep now (task p1.8-33)
   Update,      // `update`: which partition table this board runs on, and its application slots (task p1.15-57)
   UpdateSlot,  // `update slot`: add the second application slot to this board's table
+  UpdateFetch, // `update fetch <id>`: fetch release <id> into the other slot and judge it (task p1.15-59)
 };
 
 struct Command {
   Verb verb = Verb::Empty;
   const KeyDef* key = nullptr;    // Set and Get
-  char value[kMaxValueLen + 1] = {0};  // Set, after normalizeValue (Keys.h)
+  char value[kMaxValueLen + 1] = {0};  // Set, after normalizeValue (Keys.h); UpdateFetch: the id
   const char* note = nullptr;     // Note: the line to print
 };
 
@@ -87,7 +90,12 @@ ParseResult parseLine(const char* line);
 // The confirmation word `erase` needs, so the help text and the test say the same thing.
 constexpr const char* kEraseWord = "confirm";
 
-// The one word `update` takes, for the same reason.
+// The two words `update` takes, for the same reason.
 constexpr const char* kSlotWord = "slot";
+constexpr const char* kFetchWord = "fetch";
+
+// A release id is digits and nothing else, at most this many: it becomes a path on the wire
+// (src/update/Fetch.h, releaseIdIsSane, which the board applies again before it asks).
+constexpr size_t kMaxReleaseIdLen = 10;
 
 }  // namespace mm

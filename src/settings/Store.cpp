@@ -57,4 +57,23 @@ bool SettingsStore::eraseAll() {
   return prefs_.clear();
 }
 
+size_t SettingsStore::getRecord(const char* key, char* out, size_t cap) {
+  if (cap == 0) return 0;
+  out[0] = '\0';
+  if (!open_ || key == nullptr || !prefs_.isKey(key)) return 0;
+  prefs_.getString(key, out, cap);
+  out[cap - 1] = '\0';
+  return std::strlen(out);
+}
+
+bool SettingsStore::putRecord(const char* key, const char* value) {
+  if (!open_ || key == nullptr) return false;
+  if (value == nullptr || value[0] == '\0') {
+    // Forgetting one: a key that was never there is already forgotten, and that is not a failure.
+    if (!prefs_.isKey(key)) return true;
+    return prefs_.remove(key);
+  }
+  return prefs_.putString(key, value) > 0;
+}
+
 }  // namespace mm

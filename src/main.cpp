@@ -59,11 +59,15 @@
 #include "net/WifiLink.h"
 #include "observer/Observer.h"
 #include "platform/Esp32Platform.h"
+#include "platform/OtaSlot.h"
 #include "platform/TableBytes.h"
 #include "platform/TableFlash.h"
 #include "platform/TlsHeap.h"
 #include "settings/Store.h"
+#include "update/Fetch.h"
+#include "update/FetchSeams.h"
 #include "update/ImageDescriptor.h"
+#include "update/SlotRecord.h"
 #include "update/Trust.h"
 #include "ui/DisplayLines.h"
 #include "ui/Oled.h"
@@ -88,6 +92,15 @@ mm::Oled oled;
 mm::Observer observer;  // the observer dialect over this board's frames (task p1.7-26) and its two broker connections (27)
 mm::MqttClient mqttSlot1;  // the clients the observer's two slots run on: esp-mqtt, one task each, verified TLS
 mm::MqttClient mqttSlot2;
+// Fetching a release into the other application slot (task p1.15-59). The fetch is a step
+// machine driven from loop(), one request a pass, so that a file of 1.4 MB does not starve the
+// mesh, the console or the watchdog; `update fetch <id>` starts it and the steps go to the log,
+// which on this board is this same serial port and the 4 kB ring `dump` prints.
+mm::ServerRoutes releaseRoutes(server);
+mm::SettingsRecord slotRecordStore(settings);
+mm::update::Fetcher fetcher;
+bool fetcherReady = false;
+
 uint32_t uplinkMemoryFailuresSeen = 0;  // AgentClient::memoryFailures() as last handed to the observer
 uint32_t uplinkCallsSeen = 0;           // KeepAlive's call count as last handed to the observer's gate (task p1.8-31)
 
@@ -107,6 +120,30 @@ bool display_ok = false;
 char public_key_hex[2 * PUB_KEY_SIZE + 1] = {0};
 
 uint32_t clockForLog() { return agentClock.now(); }
+
+// Where the fetch's step lines go: the log, at info, so that the port shows them as they happen
+// and `dump` still has them afterwards. One line per step, never a header and never a token.
+class LogTextOut final : public mm::TextOut {
+ public:
+  void write(const char* text, size_t len) override {
+    for (size_t i = 0; i < len; i++) {
+      if (text[i] == '\r' || text[i] == '\n') continue;
+      if (held_ + 1 < sizeof(line_)) line_[held_++] = text[i];
+    }
+    // A println() ends the line; mm::TextOut always ends one with CR LF.
+    if (len >= 2 && text[len - 1] == '\n') {
+      line_[held_] = '\0';
+      if (held_ > 0) mm::logf(mm::LogLevel::Info, "%s", line_);
+      held_ = 0;
+    }
+  }
+
+ private:
+  char line_[256] = {0};
+  size_t held_ = 0;
+};
+
+LogTextOut fetchLog;
 
 // What the observer's connections read of this board (observer/Connection.h, Environment).
 uint32_t millisNow() { return millis(); }
@@ -475,6 +512,50 @@ void printUpdate(Stream& out) {
       out.println("          flash the merged image of a release over USB to get one with two slots");
       break;
   }
+
+  // What the other slot holds, from this task's own record (task p1.15-59, deliverable 3): a
+  // judged image survives a restart, and this is where a person sees that it did. Nothing of
+  // this is a secret: a version, a hash, a length and a path the server published.
+  char held[200];
+  mm::update::renderRecordLine(mm::update::loadRecord(slotRecordStore), held, sizeof(held));
+  out.printf("other     %s\r\n", held);
+  if (fetcher.running()) {
+    out.println("          a fetch is running now; its steps are in the log");
+  } else if (r.kind == mm::TableKind::Two) {
+    out.printf("          `update %s <release id>` fetches a release into it and judges it\r\n", mm::kFetchWord);
+  }
+}
+
+// `update fetch <id>`: fetch release `/agent/v1/firmware/<id>` into the other application slot
+// and judge what was written (task p1.15-59). It starts the fetch and returns - the file is
+// fetched in pieces from loop(), so there is nothing to wait for here - and every step, and the
+// ending, goes to the log and so to this same port. Nothing is switched: the running firmware and
+// the boot choice are as they were (task 60 is what switches).
+void printUpdateFetch(const char* id, Stream& out) {
+  if (!fetcherReady) {
+    out.println("fetch     not ready: this board has not finished starting up");
+    return;
+  }
+  if (fetcher.running()) {
+    out.println("fetch     one is already running; its steps are in the log");
+    return;
+  }
+  if (!server.configured()) {
+    out.println("fetch     the server is not configured: set meshmaster.token first");
+    return;
+  }
+  char base[mm::update::kMaxBaseLen + 1];
+  if (!mm::update::baseForRelease(id, base, sizeof(base))) {
+    out.printf("fetch     %.16s is not a release id this firmware will ask for\r\n", id);
+    return;
+  }
+  if (!fetcher.start(base, millis())) {
+    const mm::update::FetchResult& r = fetcher.result();
+    out.printf("%-9s %s\r\n", mm::update::endingWord(r.ending), r.why);
+    return;
+  }
+  out.printf("fetch     %s: the manifest and its signature first, then the image in pieces; the steps follow\r\n",
+             base);
 }
 
 // `update slot`: the one command of this console that erases and writes flash. One sector, at the
@@ -813,8 +894,18 @@ void setup() {
                           &printSessions, &printErrors,  &printReboots, &printDump,
                           &printWifi,     &doReboot,     &onSettingChanged, &onErased,
                           &printMqttStatus, &printKeyNote, &printDiscoverScopes,
-                          &printUpdate,   &printUpdateSlot};
+                          &printUpdate,   &printUpdateSlot,  &printUpdateFetch};
   console.begin(Serial, settings, host);
+  // The fetch's three seams (task p1.15-59): the server over the one TLS client every call goes
+  // through, the other application slot over the ESP-IDF's OTA writer, and the record in NVS.
+  fetcher.begin(releaseRoutes, mm::otherApplicationSlot(), slotRecordStore, mm::update::trustedKeys(),
+                mm::update::trustedKeyCount(), mm::boardName(), &fetchLog);
+  fetcherReady = true;
+  {
+    char held[200];
+    mm::update::renderRecordLine(mm::update::loadRecord(slotRecordStore), held, sizeof(held));
+    LOG_I("update: the other application slot %s", held);
+  }
   board.onBootComplete();
 }
 
@@ -844,4 +935,20 @@ void loop() {
 
   console.loop();
   oled.loop();
+
+  // One piece of a fetch a pass, and only when one is running: at most one request, so the mesh,
+  // the console, the observer and the watchdog above all had their turn before it and have it
+  // again straight after (task p1.15-59, deliverable 5).
+  if (fetcher.running()) {
+    fetcher.step(millis());
+    if (!fetcher.running()) {
+      const mm::update::FetchResult& r = fetcher.result();
+      const mm::AgentClient::HeapCost& cost = server.lastCost();
+      mm::logf(r.ending == mm::update::Ending::Fetched ? mm::LogLevel::Warn : mm::LogLevel::Error,
+               "update: %s%s: %s (%lu ms, %lu request(s); the last call left %lu bytes of heap, lowest %lu)",
+               mm::update::endingWord(r.ending), r.check != 0 ? " (see the number below)" : "", r.why,
+               static_cast<unsigned long>(r.elapsedMs), static_cast<unsigned long>(r.requests),
+               static_cast<unsigned long>(cost.freeAfter), static_cast<unsigned long>(cost.lowest));
+    }
+  }
 }

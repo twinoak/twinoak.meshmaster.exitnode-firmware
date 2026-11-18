@@ -8,6 +8,9 @@
 //   POST /agent/v1/jobs/{id}/result   one per job, once, with its client id
 //   POST /agent/v1/jobs/{id}/extend   a longer lease for a job that runs past its own (task p1.5-15;
 //   POST /agent/v1/jobs/{id}/progress   nothing on the Heltec calls these two yet)
+//   GET  /agent/v1/firmware/{id}/manifest.json       a release's manifest, as it was signed
+//   GET  /agent/v1/firmware/{id}/manifest.json.sig   its one signature line
+//   GET  /agent/v1/firmware/{id}/files/{sha256}      one file, in ranges, streamed (task p1.15-59)
 //
 // How the server's certificate is checked, for every task after task 01:
 //   1. The chain is verified - the client is never told to accept an unverified one, and
@@ -46,6 +49,7 @@
 #include "net/Clock.h"
 #include "net/WifiLink.h"
 #include "settings/Store.h"
+#include "update/Fetch.h"
 
 class WiFiClientSecure;
 class HTTPClient;
@@ -86,6 +90,31 @@ class AgentClient : public IUplink, private uplink::Transport {
   bool postJobResult(long long jobId, const char* body, size_t len) override;
   bool extendLease(long long jobId, int seconds, uint32_t& leaseUntil) override;
   bool postProgress(long long jobId, const char* body, size_t len) override;
+
+  // ---- the firmware routes (task p1.15-59) ---------------------------------------------------
+  //
+  // meshmaster.dk's docs/dev/unit-protocol.md §4: the manifest, its signature and a file, under
+  // /agent/v1/firmware. A file is 1.4 MB, so its body is **streamed** into the caller's sink
+  // instead of filling a buffer, and it is asked for one range at a time. Everything else is as
+  // every other call above - the kept connection, the verified chain, the Authorization header
+  // exchange() builds, X-Agent-Version, the rate-limit ceiling - which is why this is a method of
+  // this class and not a second client: there is one place in this firmware that puts the token
+  // on the wire. A 3xx is handed back as the status it is and never followed (§4: nothing on
+  // those routes is ever a redirect).
+  struct StreamedAnswer {
+    bool reachable = false;  // a status line came back at all
+    int status = 0;
+    uint32_t bodyLen = 0;
+    char etag[update::kMaxEtagLen + 1] = {0};  // the strong ETag: the quoted SHA-256 of the content
+    char contentRange[update::kMaxContentRangeLen + 1] = {0};  // `bytes a-b/length`, the value only
+    char error[128] = {0};
+  };
+
+  // `endpoint` is a path (`/agent/v1/firmware/7/manifest.json`); `rangeHeader` is the value of a
+  // Range header (`bytes=0-65535`) or nullptr; `ifRange` the ETag as it was seen, quotes and all,
+  // or nullptr.
+  bool getStreamed(const char* endpoint, const char* rangeHeader, const char* ifRange, StreamedAnswer& out,
+                   update::HttpBody& sink);
 
   bool hasConfig() const override { return hasConfig_; }
   const AgentConfig& config() const override { return config_; }
@@ -132,16 +161,35 @@ class AgentClient : public IUplink, private uplink::Transport {
     uint32_t retryAfterS = 0;
     int rateLimitRemaining = -1;
     char error[128] = {0};
+    // The firmware routes (getStreamed): a sink instead of a buffer, two request headers, and the
+    // two answer headers a range needs. `sink` is what tells exchange() which of the two it is.
+    update::HttpBody* sink = nullptr;
+    const char* rangeHeader = nullptr;
+    const char* ifRange = nullptr;
+    char etag[update::kMaxEtagLen + 1] = {0};
+    char contentRange[update::kMaxContentRangeLen + 1] = {0};
+  };
+
+  // What a firmware route adds to a call, in and out (task p1.15-59). nullptr for every other
+  // call, which is then exactly the call it was before: a buffer, no extra request header, and
+  // the two counters and the two "last" records of this class all written as before.
+  struct FirmwareExtras {
+    update::HttpBody* sink = nullptr;
+    const char* rangeHeader = nullptr;
+    const char* ifRange = nullptr;
+    char etag[update::kMaxEtagLen + 1] = {0};
+    char contentRange[update::kMaxContentRangeLen + 1] = {0};
   };
 
   // One request, under KeepAlive's rules. `method` is "GET" or "POST"; `requestBody` is nullptr
-  // for a GET. The reply's bytes land in `body` (bodyCap), NUL-terminated and cut if longer.
+  // for a GET. The reply's bytes land in `body` (bodyCap), NUL-terminated and cut if longer - or,
+  // with `extras->sink`, in that sink and in no buffer at all.
   int request(Root root, const char* method, const char* path, const char* requestBody, size_t requestLen,
-              char* body, size_t bodyCap, size_t& bodyLen, int& tlsError, Call& call);
+              char* body, size_t bodyCap, size_t& bodyLen, int& tlsError, Call& call, FirmwareExtras* extras);
 
   // request(), with the one retry against the other root that a verification failure earns.
   bool call(const char* method, const char* endpoint, const char* requestBody, size_t requestLen, char* body,
-            size_t bodyCap, size_t& bodyLen, Call& out);
+            size_t bodyCap, size_t& bodyLen, Call& out, FirmwareExtras* extras = nullptr);
 
   // A POST to /agent/v1/jobs/{id}/<action> whose reply is short: the result, the extend and the
   // progress. `what` names the call in the log. True when the server answered 200; the reply's

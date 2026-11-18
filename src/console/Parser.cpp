@@ -111,11 +111,33 @@ ParseResult parseLine(const char* line) {
     return accept(Verb::DiscoverScopes);
   }
   if (std::strcmp(verb, "update") == 0) {
-    // Task p1.15-57: the word alone reads the table, `update slot` writes it. Nothing else, so
-    // that a typo cannot become a flash write.
+    // Task p1.15-57: the word alone reads the table, `update slot` writes it. Task p1.15-59 adds
+    // `update fetch <id>`. Nothing else, so that a typo cannot become a flash write.
     if (!hasRest) return accept(Verb::Update);
     if (std::strcmp(rest, kSlotWord) == 0) return accept(Verb::UpdateSlot);
-    return refuse("update takes no argument, or the word '%s': update %s", kSlotWord, kSlotWord);
+    const size_t fetchLen = std::strlen(kFetchWord);
+    if (std::strncmp(rest, kFetchWord, fetchLen) == 0 && isSpace(rest[fetchLen])) {
+      const char* id = rest + fetchLen;
+      while (isSpace(*id)) id++;
+      if (*id == '\0') return refuse("update %s takes one release id: update %s 12", kFetchWord, kFetchWord);
+      // Digits, and at most ten of them: the id goes into a path this board asks the server for,
+      // so nothing else is ever built into one (src/update/Fetch.h, releaseIdIsSane).
+      size_t n = 0;
+      for (const char* p = id; *p != '\0'; p++, n++) {
+        if (*p < '0' || *p > '9') {
+          return refuse("update %s: a release id is digits, as the server's page shows it", kFetchWord);
+        }
+      }
+      if (n > kMaxReleaseIdLen) return refuse("update %s: a release id is at most ten digits", kFetchWord);
+      if (id[0] == '0') return refuse("update %s: a release id is a number from 1 up", kFetchWord);
+      ParseResult r = accept(Verb::UpdateFetch);
+      std::snprintf(r.command.value, sizeof r.command.value, "%s", id);
+      return r;
+    }
+    if (std::strcmp(rest, kFetchWord) == 0) {
+      return refuse("update %s takes one release id: update %s 12", kFetchWord, kFetchWord);
+    }
+    return refuse("update takes no argument, the word '%s', or '%s <release id>'", kSlotWord, kFetchWord);
   }
   if (std::strcmp(verb, "erase") == 0) {
     if (!hasRest) return refuse("erase forgets every setting; to do it, type: erase %s", kEraseWord);

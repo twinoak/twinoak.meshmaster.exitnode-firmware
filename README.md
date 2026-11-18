@@ -700,15 +700,19 @@ reading.
   do.
 - **One send per command.** A `set` sent twice is a change made twice: single
   send, strictly increasing sender timestamps, the region loader's terminator.
-- **One place may erase or write raw flash.** Adding a board's second
-  application slot means writing the partition table's own sector, which the
-  ESP-IDF refuses and, as the Arduino core configures it, aborts the board
-  over — so that guard is off for the whole image
+- **Every call that erases or writes flash is in the one file named for it.**
+  Adding a board's second application slot means writing the partition table's
+  own sector, which the ESP-IDF refuses and, as the Arduino core configures it,
+  aborts the board over — so that guard is off for the whole image
   (`tools/check-sdkconfig.py` carries the key and the reason). What it used to
-  do is done by one file instead: `src/platform/TableFlash.cpp` holds the
-  address and the length as constants of its own and refuses every call
-  outside that one sector, and a native test walks `src/` and `lib/` for the
-  calls that erase or write flash and fails when a second file holds one
+  do is done by two files instead, and by no third:
+  `src/platform/TableFlash.cpp` holds the raw-flash calls with the address and
+  the length as constants of its own and refuses every call outside that one
+  sector; `src/platform/OtaSlot.cpp` holds the framework's OTA writer, bounded
+  by the application partition that is **not** running. A native test walks
+  `src/` and `lib/` and fails when one of those calls is anywhere but the file
+  named for it — in the other of the two included — and when the call that
+  changes which slot a board boots is anywhere at all, which it is not yet
   (`test/test_flash_writes`).
 - **It stays up, and says why when it did not.** A task watchdog on the loop
   that is also the network, a deliberate restart when the server has been

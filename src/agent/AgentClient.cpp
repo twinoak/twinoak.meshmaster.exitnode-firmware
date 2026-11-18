@@ -58,10 +58,12 @@ bool failedForMemory(int tlsError) {
   }
 }
 
-// The two answer headers this firmware acts on. Retry-After is the wait a 429 names (API §1);
-// X-RateLimit-Remaining is what is left of the 120 a minute, and is only ever logged.
+// The answer headers this firmware acts on. Retry-After is the wait a 429 names (API §1);
+// X-RateLimit-Remaining is what is left of the 120 a minute, and is only ever logged. ETag and
+// Content-Range are the firmware routes' (task p1.15-59, unit-protocol.md §4): the strong tag a
+// resume sends back as If-Range, and the bytes a 206 really answered with.
 // Not `const char* const[]`: HTTPClient::collectHeaders takes `const char*[]`.
-const char* kWantedHeaders[] = {"Retry-After", "X-RateLimit-Remaining"};
+const char* kWantedHeaders[] = {"Retry-After", "X-RateLimit-Remaining", "ETag", "Content-Range"};
 
 // A Stream that writes into a fixed buffer and reads nothing: what HTTPClient::writeToStream()
 // is handed, so a reply lands in the caller's buffer and in no String.
@@ -88,6 +90,35 @@ class BodySink : public Stream {
   char* buf_;
   size_t cap_;
   size_t len_ = 0;
+};
+
+// A Stream that hands every byte straight to an update::HttpBody and keeps none: what
+// HTTPClient::writeToStream() is given for a firmware route, so that 64 kB of an image goes from
+// the socket into the other application slot without a buffer of its own anywhere between.
+// Returning 0 from write() is how writeToStream() is told to stop, which is what a sink that
+// refused the bytes means.
+class SinkStream : public Stream {
+ public:
+  explicit SinkStream(mm::update::HttpBody& body) : body_(body) {}
+  size_t write(uint8_t c) override { return write(&c, 1); }
+  size_t write(const uint8_t* data, size_t size) override {
+    if (refused_) return 0;
+    if (!body_.take(data, size)) {
+      refused_ = true;
+      return 0;
+    }
+    len_ += size;
+    return size;
+  }
+  int available() override { return 0; }
+  int read() override { return -1; }
+  int peek() override { return -1; }
+  uint32_t length() const { return len_; }
+
+ private:
+  mm::update::HttpBody& body_;
+  uint32_t len_ = 0;
+  bool refused_ = false;
 };
 
 void wipe(char* buf, size_t len) {
@@ -125,6 +156,9 @@ void AgentClient::begin(SettingsStore& settings, AgentClock& clock, WifiLink& wi
     http_->setConnectTimeout(10000);
     http_->setTimeout(15000);
     http_->setUserAgent(String("meshmaster-agent/") + version_);
+    // §4: nothing on the firmware routes is ever a redirect, and this firmware follows none on any
+    // route. It is the HTTPClient's default and it is said here so that it is not a default.
+    http_->setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
     http_->collectHeaders(kWantedHeaders, sizeof kWantedHeaders / sizeof kWantedHeaders[0]);
   }
   tlsheap::begin();
@@ -196,14 +230,43 @@ uplink::Attempt AgentClient::exchange(Root root) {
     wipe(bearer, sizeof bearer);
   }
   http_->addHeader("X-Agent-Version", version_);
-  http_->addHeader("Accept", "application/json");
+  http_->addHeader("Accept", p.sink != nullptr ? "*/*" : "application/json");
   if (p.requestBody != nullptr) http_->addHeader("Content-Type", "application/json");
+  // The firmware routes' two request headers (§4): one closed range, and the tag the first range
+  // came back with so that a file replaced under the same URL answers 200 and starts again.
+  if (p.rangeHeader != nullptr) http_->addHeader("Range", p.rangeHeader);
+  if (p.ifRange != nullptr) http_->addHeader("If-Range", p.ifRange);
 
   const bool post = std::strcmp(p.method, "POST") == 0;
   const int code = post ? http_->POST(reinterpret_cast<uint8_t*>(const_cast<char*>(p.requestBody)), p.requestLen)
                         : http_->GET();
   tlsheap::sample();  // the status line is in: the handshake, if there was one, is behind us
   if (code > 0) {
+    if (p.sink != nullptr) {
+      // A firmware route (§4): the two answer headers first, then the body straight into the
+      // caller's sink - the other application slot, one range at a time, nothing held in RAM.
+      // The sink is shown the status line before a byte of the body, because what a 206 means and
+      // what a 200 means to a range are different things (update/Fetch.h).
+      std::snprintf(p.etag, sizeof p.etag, "%s", http_->header("ETag").c_str());
+      std::snprintf(p.contentRange, sizeof p.contentRange, "%s", http_->header("Content-Range").c_str());
+      update::HttpAnswer head;
+      head.reachable = true;
+      head.status = code;
+      std::snprintf(head.etag, sizeof head.etag, "%s", p.etag);
+      std::snprintf(head.contentRange, sizeof head.contentRange, "%s", p.contentRange);
+      if (p.sink->begin(head)) {
+        SinkStream out(*p.sink);
+        http_->writeToStream(&out);
+        p.bodyLen = out.length();
+      }
+      tlsheap::sample();
+      p.retryAfterS = parseRetryAfter(http_->header("Retry-After"));
+      const String remainingForFile = http_->header("X-RateLimit-Remaining");
+      p.rateLimitRemaining = remainingForFile.length() == 0 ? -1 : remainingForFile.toInt();
+      http_->end();
+      a.code = code;
+      return a;
+    }
     // The body straight into the caller's buffer: writeToStream() reads a Content-Length or a
     // chunked body alike, and the sink below takes what fits in bodyCap and drops the rest, which
     // the parser then reports. No String is made of it - a claim carries a repeater's password,
@@ -235,7 +298,7 @@ uplink::Attempt AgentClient::exchange(Root root) {
 }
 
 int AgentClient::request(Root root, const char* method, const char* path, const char* requestBody, size_t requestLen,
-                         char* body, size_t bodyCap, size_t& bodyLen, int& tlsError, Call& out) {
+                         char* body, size_t bodyCap, size_t& bodyLen, int& tlsError, Call& out, FirmwareExtras* extras) {
   bodyLen = 0;
   tlsError = 0;
 
@@ -254,6 +317,11 @@ int AgentClient::request(Root root, const char* method, const char* path, const 
   pending_.requestLen = requestLen;
   pending_.body = body;
   pending_.bodyCap = bodyCap;
+  if (extras != nullptr) {
+    pending_.sink = extras->sink;
+    pending_.rangeHeader = extras->rangeHeader;
+    pending_.ifRange = extras->ifRange;
+  }
 
   const uplink::Attempt a = line_.call(*this, root, clock_->now());
   const uplink::Counters& c = line_.counters();
@@ -272,12 +340,16 @@ int AgentClient::request(Root root, const char* method, const char* path, const 
   tlsError = a.tlsError;
   out.retryAfterS = pending_.retryAfterS;
   out.rateLimitRemaining = pending_.rateLimitRemaining;
+  if (extras != nullptr) {
+    std::snprintf(extras->etag, sizeof extras->etag, "%s", pending_.etag);
+    std::snprintf(extras->contentRange, sizeof extras->contentRange, "%s", pending_.contentRange);
+  }
   if (pending_.error[0] != '\0') std::snprintf(out.error, sizeof out.error, "%s", pending_.error);
   return a.code;
 }
 
 bool AgentClient::call(const char* method, const char* endpoint, const char* requestBody, size_t requestLen,
-                       char* body, size_t bodyCap, size_t& bodyLen, Call& out) {
+                       char* body, size_t bodyCap, size_t& bodyLen, Call& out, FirmwareExtras* extras) {
   out = Call();
   out.atMillis = millis();
   out.atEpoch = clock_->now();
@@ -308,7 +380,7 @@ bool AgentClient::call(const char* method, const char* endpoint, const char* req
   tlsheap::watchBegin(cost.freeBefore);
 
   int tlsError = 0;
-  int code = request(root_, method, path, requestBody, requestLen, body, bodyCap, bodyLen, tlsError, out);
+  int code = request(root_, method, path, requestBody, requestLen, body, bodyCap, bodyLen, tlsError, out, extras);
   if (code <= 0 && tlsError == kMbedtlsCertVerifyFailed) {
     // The chain did not end at the root tried. Try the other one, once, and remember.
     const Root other = root_ == Root::IsrgRootX1 ? Root::CoreBundle : Root::IsrgRootX1;
@@ -317,7 +389,7 @@ bool AgentClient::call(const char* method, const char* endpoint, const char* req
     out.via = rootName(root_);
     out.error[0] = '\0';
     limiter_.took(millis());
-    code = request(root_, method, path, requestBody, requestLen, body, bodyCap, bodyLen, tlsError, out);
+    code = request(root_, method, path, requestBody, requestLen, body, bodyCap, bodyLen, tlsError, out, extras);
   }
   const uint32_t lowestSeen = tlsheap::watchEnd();
   cost.freeAfter = ESP.getFreeHeap();
@@ -336,8 +408,37 @@ bool AgentClient::call(const char* method, const char* endpoint, const char* req
     LOG_W("server: the call failed for want of memory (tls %d, largest free block %lu); %lu such failure(s)", tlsError,
           static_cast<unsigned long>(ESP.getMaxAllocHeap()), static_cast<unsigned long>(memoryFailures_));
   }
-  lastCall_ = out;
+  // A firmware route does **not** become "the server's last answer": `lastCall()` is what the
+  // agent loop reads of its own call a line later (agent/ServerPolicy.h decides whether to halt
+  // on it), and twenty-odd ranges of an image passing through would be answering a question
+  // nobody asked. The heap cost is kept, because it really is what the last call cost and the
+  // fetch's own line prints it (task p1.15-59, deliverable 5).
+  if (extras == nullptr) lastCall_ = out;
   return out.reachable;
+}
+
+bool AgentClient::getStreamed(const char* endpoint, const char* rangeHeader, const char* ifRange,
+                              StreamedAnswer& out, update::HttpBody& sink) {
+  out = StreamedAnswer();
+  FirmwareExtras extras;
+  extras.sink = &sink;
+  extras.rangeHeader = rangeHeader;
+  extras.ifRange = ifRange;
+
+  size_t bodyLen = 0;
+  Call c;
+  const bool reachable = call("GET", endpoint, nullptr, 0, nullptr, 0, bodyLen, c, &extras);
+  out.reachable = reachable;
+  out.status = c.httpStatus;
+  out.bodyLen = static_cast<uint32_t>(bodyLen);
+  std::snprintf(out.etag, sizeof out.etag, "%s", extras.etag);
+  std::snprintf(out.contentRange, sizeof out.contentRange, "%s", extras.contentRange);
+  std::snprintf(out.error, sizeof out.error, "%s", c.error);
+  // The path is logged and the headers are not: one of them carries the token, and no line of
+  // this firmware ever holds it (agent/Log.h).
+  LOG_D("server: GET %s%s -> http %d, %lu bytes", endpoint, rangeHeader != nullptr ? " (a range)" : "", out.status,
+        static_cast<unsigned long>(out.bodyLen));
+  return reachable;
 }
 
 bool AgentClient::fetchConfig() {

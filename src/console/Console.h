@@ -47,6 +47,11 @@ struct ConsoleHost {
   // flash and is the only command here that does; nullptr prints nothing.
   void (*update)(Stream& out);
   void (*updateSlot)(Stream& out);
+  // `update fetch <id>` (task p1.15-59): fetch release `<id>` from the configured server into the
+  // other application slot and judge it. The command starts the fetch and returns; the steps and
+  // the ending go to the log, which is this same port - a download of 1.4 MB is done in pieces
+  // from the loop and cannot be waited for here. `id` is digits, as the parser checked.
+  void (*updateFetch)(const char* id, Stream& out);
 };
 
 class Console {
