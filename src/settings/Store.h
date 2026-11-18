@@ -39,8 +39,22 @@ class SettingsStore {
 
   bool put(const KeyDef& key, const char* value);
 
-  // Forget every setting. The identity is not a setting and stays.
+  // Forget every setting. The identity is not a setting and stays; the records below go with the
+  // settings, which is right - a board whose settings are gone is about to be provisioned again,
+  // and what its other application slot holds is then nobody's.
   bool eraseAll();
+
+  // ---- records: what the firmware writes down for itself -------------------------------------
+  //
+  // Not settings. Nobody types one, `get` does not print one, `help` does not list one and
+  // Keys.h has no row for one: they are the firmware's own notes in the same namespace, keyed by
+  // a plain NVS key (15 characters at most, NVS's limit). Task p1.15-59's record of what the
+  // other application slot holds is the first and only user - its five keys and their meaning
+  // are src/update/SlotRecord.h, and nothing secret is among them.
+  size_t getRecord(const char* nvsKey, char* out, size_t cap);
+  // `value` under `nvsKey`; nullptr or "" forgets it, and forgetting one that is not there is not
+  // a failure.
+  bool putRecord(const char* nvsKey, const char* value);
 
  private:
   Preferences prefs_;

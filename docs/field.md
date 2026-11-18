@@ -386,6 +386,50 @@ added: app1 at 0x350000, 0x320000 bytes. Type `reboot`; the table is read at the
   needing a cable.
 - On a board that is already `two`, `update slot` says so and writes nothing.
 
+### Fetching a release into the second slot
+
+Since the release of task p1.15-59 a board with two slots can fetch a release
+off meshmaster.dk into the slot it is not running and check it there. **Nothing
+is switched by it**: the board goes on running the firmware it was running, and
+the fetched image sits in the other slot until a later release can switch to it.
+A person starts every fetch; nothing fetches a release because one exists.
+
+```
+> update fetch 12
+fetch     /agent/v1/firmware/12: the manifest and its signature first, then the image in pieces; the steps follow
+[12:03:11] I fetch: manifest.json: 1612 bytes
+[12:03:11] I fetch: manifest.json.sig: 108 bytes
+[12:03:12] I fetch: checks 1, 2 and 3 passed: twinoak-exitnode-firmware 0.8.0+1a2b3c4: the image exit-node.heltec_v3.868, 2 file(s)
+[12:03:12] I fetch: meshmaster-agent-heltec_v3-v0.8.0.bin: 1446640 bytes wanted, by its hash
+[12:03:13] I fetch: range 0-65535: http 206, 65536 bytes (65536 of 1446640 held)
+...
+[12:03:52] I fetch: checks 4 and 5 passed: ... the one descriptor at 0x1189C agrees with it
+[12:03:52] W update: fetched 0.8.0+1a2b3c4, 1446640 bytes, sha 4f2a91c0b7d2e5a8...
+> update
+other     holds 0.8.0+1a2b3c4, 1446640 bytes, sha 4f2a91c0b7d2e5a8..., fetched from /agent/v1/firmware/12
+```
+
+- **The release id** is the number meshmaster.dk shows for the release. Nothing
+  but digits is accepted, because the id goes into the path the board asks for.
+- **It does not block the board.** The file comes down in ranges of 64 kB, one a
+  pass of the main loop, so the radio keeps hearing, the heartbeat keeps going
+  out and this console keeps answering while it runs. It is seconds to a minute
+  on a good WiFi link.
+- **The ending is one of four words.** `fetched` — the slot holds a judged
+  image, and `update` says which. `check` with a number from 1 to 5 — the
+  release was had and refused: 1 the signature, 2 the manifest, 3 no image for
+  this board, 4 the size or the hash of what was written, 5 what the image says
+  inside itself. `fetch` — the release could not be had: no link, a 404, a
+  redirect, or three failures. `slot` — this board has no second application
+  slot; `update slot` adds one.
+- **Anything but `fetched` leaves the slot unbootable**, by erasing its first
+  sector. There is never half an image waiting to be switched to.
+- **A restart does not continue a fetch**; it begins again. The record of a
+  *judged* image does survive a restart, and `update` still shows it.
+- **Nothing here erases or writes anything the board needs.** The settings, the
+  identity, the token, the WiFi and the running application are all outside the
+  slot being written.
+
 ### ⚠ Waiting for a board on the bench
 
 These cannot be checked without hardware, and they come **before any owner is
@@ -416,3 +460,31 @@ release's plain `.bin`:
       may appear on a released image: the first would mean the build did not
       place the 96 bytes, the second that it trusts nobody and would take no
       update at all.
+
+**With a release of this firmware imported on meshmaster.dk and served to this
+board**, on a V3 and on a V4 that both say `two`:
+
+- [ ] **⚠ `update fetch <id>` ends *fetched*.** The ending line names the
+      release's version, its byte count and the first sixteen characters of its
+      hash, and the steps above it show the manifest, the signature, *checks 1,
+      2 and 3 passed*, the ranges and *checks 4 and 5 passed*. Note **how long
+      it took** and what the last call left of the heap — the ending line
+      carries both figures, and they are the ones no session can measure.
+- [ ] **⚠ `update` shows it in the other slot.** The `other` line names the
+      same version, byte count and hash the ending did.
+- [ ] **⚠ Nothing else changed while it ran.** `status` and `server` show
+      the heartbeat still going out on its interval during the fetch, `mesh`
+      shows adverts still being heard, and the console answered throughout.
+- [ ] **⚠ After `reboot` the old firmware runs and `update` still shows the
+      fetched one.** `status` shows the version it showed before the fetch, and
+      the `other` line is unchanged — nothing was switched.
+- [ ] **⚠ A release of the other board is refused with a number.** Fetch
+      the V4's release on the V3: the ending is `check` 3, naming the board.
+- [ ] **⚠ A release id that is not there is refused.** `update fetch 99999`
+      ends `fetch` with *there is no such resource*, and `update`'s `other` line
+      then says *holds nothing this firmware will boot* — a fetch clears the
+      record before it asks for anything, because the slot is about to be
+      written over.
+- [ ] **⚠ A board that says `one` refuses before it asks.** On a board that
+      has not had `update slot`, `update fetch 12` ends `slot` at once and the
+      exit node's page shows no download against it.
