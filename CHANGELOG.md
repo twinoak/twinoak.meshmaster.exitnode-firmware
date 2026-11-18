@@ -47,6 +47,11 @@ and only if you write that result yourself.
   `WakeState` or `IRetained` moved. Three reads were **added**:
   `AgentLoop::pendingBatchCount()` and `pendingBatchId()` — the batch that has
   gone out and is still waiting for an answer — and `ObservationRing::oldestSeq()`.
+  A fourth is added by p1.15-60: **`AgentLoop::postWhatWaits()`**, which gives the
+  results the buffer holds and one observation batch their one try before a
+  restart this firmware asks for on purpose, and returns an `AgentLoop::Posted`
+  saying what went out (`docs/library.md` §6). A consumer that calls none of
+  these is unaffected.
   **One free function of `agent/JobResults.h` did move**, and it is not one of the
   interfaces: `writeNeighboursResult(neighbours, count, out, cap)` is now
   `writeNeighboursResult(neighbours, count, total, out, cap)` (p1.15-56). The

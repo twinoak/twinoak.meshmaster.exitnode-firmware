@@ -412,6 +412,19 @@ class AgentLoop {
   // no batch, one blocking call inside a wait that was going to be spent waiting.
   void heartbeatIfOverdue();
 
+  // Before a restart this firmware asks for on purpose (task p1.15-60's switch to a new image,
+  // and anything later that restarts a working board): what waits in RAM for the server given
+  // **one try** each - the results the offline buffer holds, then one observation batch - and
+  // then the caller restarts. Whatever is left goes with the RAM, as it does at any restart; the
+  // one try is what makes a deliberate restart cost less than an accidental one. Nothing else of
+  // the loop runs here: no heartbeat, no config call, no claim. It returns what it posted, so a
+  // caller can say so in a journal.
+  struct Posted {
+    int results = 0;
+    size_t observations = 0;
+  };
+  Posted postWhatWaits();
+
   // A new link (WiFi associated, on the Heltec): the config call is due again, and the heartbeat
   // schedule starts over.
   void onLinkUp();

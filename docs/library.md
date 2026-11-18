@@ -947,6 +947,16 @@ would read *quiet* while the board was working perfectly. Call it from your
 its own heartbeat first and sets the schedule), and a wake short enough to
 matter never reaches it.
 
+**`postWhatWaits()`** is for a restart you are about to ask for on purpose.
+Since `0.7.2`. It gives what waits in RAM for the server **one try** each - the
+results the offline buffer holds, then one observation batch - and returns what
+went out (`AgentLoop::Posted`: `results`, `observations`). Nothing else of the
+loop runs in it: no heartbeat, no config call, no claim. A consumer that never
+restarts a working board on purpose never needs it; this firmware calls it
+before it switches to a new image, because a deliberate restart should cost less
+than an accidental one ([`field.md` §9](field.md#9-updating-a-board-that-is-already-in-the-field)).
+Whatever is left goes with the RAM, as it does at any restart.
+
 **The console reports** are optional and free: `agent.report(out)`,
 `agent.reportErrors(out)`, `jobs.report(out)`, `jobs.reportSessions(out)`, and
 `describe(buf, cap)` on either, where `out` is a `mm::TextOut` of yours (one

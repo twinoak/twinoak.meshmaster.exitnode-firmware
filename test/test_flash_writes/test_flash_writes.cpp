@@ -24,9 +24,13 @@
 //
 //   src/platform/TableFlash.cpp   the raw-flash calls, bounded to the partition table's sector
 //   src/platform/OtaSlot.cpp      the OTA writer, bounded to the partition that is not running
+//   src/platform/BootChoice.cpp   the boot choice and the two rollback marks (task p1.15-60)
 //
-// `esp_ota_set_boot_partition` is in the list and in **no** file: switching to a fetched image is
-// task 60's, and until it is written nothing here may change what the board boots.
+// **Since task p1.15-60 there is a third file**, and the call that changes which slot a board
+// boots is in it. `esp_ota_set_boot_partition` writes the `otadata` partition and so do the two
+// rollback marks, and between them they decide which of two firmwares a board comes back as -
+// which is why they belong in one file a person can read in a minute, beside the one that writes
+// the slot and the one that writes the table. `nvs_flash_erase` is still in no file at all.
 
 #include <gtest/gtest.h>
 
@@ -47,6 +51,7 @@ namespace fs = std::filesystem;
 // The two files that may hold one of these calls, as the walk reports them.
 const char* const kTheFlashFile = "src/platform/TableFlash.cpp";
 const char* const kTheSlotFile = "src/platform/OtaSlot.cpp";
+const char* const kTheBootFile = "src/platform/BootChoice.cpp";
 
 struct Forbidden {
   const char* call;
@@ -76,8 +81,11 @@ const std::vector<Forbidden>& forbidden() {
       // the OTA writer, which writes a whole application slot
       {"esp_ota_begin", kTheSlotFile},
       {"esp_ota_write", kTheSlotFile},
-      // and the one that switches to it, which is task 60's and is in no file yet
-      {"esp_ota_set_boot_partition", ""},
+      // and the three that decide which of the two slots a board comes back as: the boot choice,
+      // and the two marks that write the running image's verdict into otadata (task p1.15-60)
+      {"esp_ota_set_boot_partition", kTheBootFile},
+      {"esp_ota_mark_app_valid_cancel_rollback", kTheBootFile},
+      {"esp_ota_mark_app_invalid_rollback_and_reboot", kTheBootFile},
       // and NVS, which erases its partition
       {"nvs_flash_erase", ""},
   };
@@ -135,8 +143,8 @@ TEST(FlashWrites, EveryCallThatErasesOrWritesFlashIsInTheOneFileNamedForIt) {
          "in the running application or the bootloader, so each of these belongs in one file and nowhere else.";
 }
 
-TEST(FlashWrites, BothFilesReallyAreThereAndHoldTheirOwnCalls) {
-  for (const char* file : {kTheFlashFile, kTheSlotFile}) {
+TEST(FlashWrites, EveryOneOfTheThreeFilesIsThereAndHoldsItsOwnCalls) {
+  for (const char* file : {kTheFlashFile, kTheSlotFile, kTheBootFile}) {
     EXPECT_TRUE(fs::is_regular_file(fs::path(PROJECT_DIR) / file))
         << file << " is gone: the test above would then pass by finding nothing at all";
   }
@@ -151,20 +159,39 @@ TEST(FlashWrites, BothFilesReallyAreThereAndHoldTheirOwnCalls) {
   const std::string slotText((std::istreambuf_iterator<char>(b)), std::istreambuf_iterator<char>());
   EXPECT_NE(std::string::npos, slotText.find("esp_ota_write")) << kTheSlotFile;
   EXPECT_NE(std::string::npos, slotText.find("esp_partition_erase_range")) << kTheSlotFile;
+  std::ifstream c(fs::path(PROJECT_DIR) / kTheBootFile, std::ios::binary);
+  const std::string bootText((std::istreambuf_iterator<char>(c)), std::istreambuf_iterator<char>());
+  EXPECT_NE(std::string::npos, bootText.find("esp_ota_set_boot_partition")) << kTheBootFile;
+  EXPECT_NE(std::string::npos, bootText.find("esp_ota_mark_app_valid_cancel_rollback")) << kTheBootFile;
+  EXPECT_NE(std::string::npos, bootText.find("esp_ota_mark_app_invalid_rollback_and_reboot")) << kTheBootFile;
 }
 
-// Task 60's call, in no file of this firmware: nothing yet may change what the board boots.
-TEST(FlashWrites, NothingSwitchesTheBootPartitionYet) {
-  int scanned = 0;
-  const std::vector<std::string> hits = callsOutOfPlace(fs::path(PROJECT_DIR), {"src", "lib"}, scanned);
-  for (const std::string& note : hits) {
-    EXPECT_EQ(std::string::npos, note.find("esp_ota_set_boot_partition")) << note;
+// And the one thing that keeps the trial's verdict this firmware's rather than the Arduino core's
+// (task p1.15-60, deliverable 3). The core marks a pending image valid before `setup` runs unless
+// `verifyRollbackLater()` says otherwise (cores/esp32/esp32-hal-misc.c, `initArduino`, where it is
+// a weak symbol); the definition that says otherwise is in the one file above, and a second one
+// anywhere - or none at all - would mean the three conditions decide nothing.
+TEST(FlashWrites, OneFileTellsTheArduinoCoreToLeaveTheVerdictAlone) {
+  std::vector<std::string> definers;
+  for (const char* dir : {"src", "lib"}) {
+    const fs::path d = fs::path(PROJECT_DIR) / dir;
+    if (!fs::is_directory(d)) continue;
+    for (const auto& item : fs::recursive_directory_iterator(d)) {
+      if (!item.is_regular_file()) continue;
+      std::ifstream in(item.path(), std::ios::binary);
+      const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+      if (text.find("bool verifyRollbackLater()") == std::string::npos) continue;
+      definers.push_back(fs::relative(item.path(), fs::path(PROJECT_DIR)).generic_string());
+    }
   }
+  const std::vector<std::string> want = {kTheBootFile};
+  EXPECT_EQ(want, definers) << "the core marks a pending image valid before setup() runs unless exactly one file of "
+                               "this firmware defines verifyRollbackLater() true";
 }
 
-// The check's own test: six planted files, and the walk must report exactly the four that are
-// wrong - a second caller, a call in the wrong one of the two named files, and task 60's call
-// anywhere at all. A walk that reported fewer would let one into the tree unnoticed.
+// The check's own test: seven planted files, and the walk must report exactly the five that are
+// wrong - a second caller, and a call in the wrong one of the three named files, each way round.
+// A walk that reported fewer would let one into the tree unnoticed.
 TEST(FlashWrites, TheWalkFindsEveryCallThatIsInTheWrongFile) {
   const fs::path planted = fs::temp_directory_path() / "mm-flash-writes-selftest";
   fs::remove_all(planted);
@@ -185,6 +212,13 @@ TEST(FlashWrites, TheWalkFindsEveryCallThatIsInTheWrongFile) {
       << "bool spoil() { return esp_partition_erase_range(p, 0, 4096) == ESP_OK; }\n"
       << "// ... but not raw flash, and not the boot choice:\n"
       << "bool no() { return esp_ota_set_boot_partition(p) == ESP_OK; }\n";
+    std::ofstream g(planted / "src" / "platform" / "BootChoice.cpp");
+    g << "// the one file for the boot choice, and it may hold these\n"
+      << "bool boot() { return esp_ota_set_boot_partition(p) == ESP_OK; }\n"
+      << "bool ok() { return esp_ota_mark_app_valid_cancel_rollback() == ESP_OK; }\n"
+      << "bool no() { return esp_ota_mark_app_invalid_rollback_and_reboot() == ESP_OK; }\n"
+      << "// ... but not the slot's writer:\n"
+      << "bool oops() { return esp_ota_begin(p, 0, &h) == ESP_OK; }\n";
     std::ofstream c(planted / "src" / "Something.cpp");
     c << "void oops() { esp_partition_erase_range(p, 0, 4096); }\n";
     std::ofstream d(planted / "lib" / "agent-core" / "src" / "Else.cpp");
@@ -197,15 +231,16 @@ TEST(FlashWrites, TheWalkFindsEveryCallThatIsInTheWrongFile) {
 
   int scanned = 0;
   const std::vector<std::string> hits = callsOutOfPlace(planted, {"src", "lib"}, scanned);
-  EXPECT_EQ(6, scanned);
+  EXPECT_EQ(7, scanned);
   const std::vector<std::string> want = {
       "lib/agent-core/src/Else.cpp calls esp_ota_write (only src/platform/OtaSlot.cpp may)",
       "src/Something.cpp calls esp_partition_erase_range (only src/platform/OtaSlot.cpp may)",
-      "src/platform/OtaSlot.cpp calls esp_ota_set_boot_partition (no file of this firmware may)",
+      "src/platform/BootChoice.cpp calls esp_ota_begin (only src/platform/OtaSlot.cpp may)",
+      "src/platform/OtaSlot.cpp calls esp_ota_set_boot_partition (only src/platform/BootChoice.cpp may)",
       "src/platform/TableFlash.cpp calls esp_ota_write (only src/platform/OtaSlot.cpp may)",
   };
   EXPECT_EQ(want, hits) << "the walk must see every planted call that is in the wrong file, and leave the two "
-                           "readers and the two files' own calls alone";
+                           "readers and the three files' own calls alone";
 
   fs::remove_all(planted);
 }

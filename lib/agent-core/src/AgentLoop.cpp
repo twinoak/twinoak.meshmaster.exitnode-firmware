@@ -417,6 +417,32 @@ void AgentLoop::doPendingResults() {
   noteFailure(server_->lastCall());
 }
 
+AgentLoop::Posted AgentLoop::postWhatWaits() {
+  Posted posted;
+  if (halted_ || inHeartbeat_ || server_ == nullptr || !server_->configured()) return posted;
+  if (!server_->link().up) return posted;
+
+  // One try at the results the offline buffer holds, in the order they were made and with the
+  // timestamps they were made with (JobRunner::flushResults is what the loop's own pass calls).
+  const int before = jobs_->queueDepth();
+  if (before > 0) {
+    const int went = jobs_->flushResults();
+    if (went > 0) counters_.resultsPosted += static_cast<uint32_t>(went);
+    posted.results = went;
+    LOG_I("jobs: %d of %d result(s) that waited went through before the restart", went, before);
+  }
+  // And one batch of what the radio heard. `doObservations` is the loop's own call, so a batch
+  // that goes out is consumed and one that does not stays in the ring - where the restart takes
+  // it, which is what a restart has always cost (README.md, *It stays up*).
+  if (ring_.size() > 0) {
+    const size_t waiting = ring_.size();
+    if (doObservations()) posted.observations = waiting - ring_.size();
+    LOG_I("observations: %u of %u went through before the restart", static_cast<unsigned>(posted.observations),
+          static_cast<unsigned>(waiting));
+  }
+  return posted;
+}
+
 uint32_t AgentLoop::epochOf(uint32_t heardAtMillis, uint32_t nowMs) const {
   const uint32_t now = clock_->now();
   const uint32_t agoS = (nowMs - heardAtMillis + 500u) / 1000u;

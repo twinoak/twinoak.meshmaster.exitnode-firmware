@@ -76,8 +76,8 @@ class Esp32OtaSlot final : public update::SlotSink {
     if (!open_) return false;
     // esp_ota_end() is the framework's own verdict: it runs esp_image_verify() over the partition
     // and answers ESP_ERR_OTA_VALIDATE_FAILED for an image it would not load. It does **not**
-    // change the boot choice - the call that does is task 60's and is in no file of this
-    // firmware today (test/test_flash_writes keeps it that way).
+    // change the boot choice - the call that does is in src/platform/BootChoice.cpp and in no
+    // other file of this firmware (test/test_flash_writes keeps it that way).
     const esp_err_t err = esp_ota_end(handle_);
     open_ = false;
     held_ = 0;

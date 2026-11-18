@@ -77,7 +77,7 @@ ALLOWED: dict[str, tuple[str | None, str | None, str]] = {
     "SPI_FLASH_DANGEROUS_WRITE_ABORTS": ("y", None,
         "the guard that aborts a write landing in the bootloader, the partition table or the running app; the firmware adds a board's second application slot by writing the partition table's own sector, which it refuses"),
     "SPI_FLASH_DANGEROUS_WRITE_ALLOWED": (None, "y",
-        "the other half of that one choice; what the guard used to do is done instead by two files of src/ and lib/ and no third - src/platform/TableFlash.cpp, which holds the address and the length of the partition table's own sector as constants of its own and refuses anything outside it, and src/platform/OtaSlot.cpp, which holds the framework's OTA writer and is bounded by the application partition that is not running - and test/test_flash_writes fails the build when one of those calls is anywhere but the file named for it"),
+        "the other half of that one choice; what the guard used to do is done instead by three files of src/ and lib/ and no fourth - src/platform/TableFlash.cpp, which holds the address and the length of the partition table's own sector as constants of its own and refuses anything outside it, src/platform/OtaSlot.cpp, which holds the framework's OTA writer and is bounded by the application partition that is not running, and src/platform/BootChoice.cpp, which holds the boot choice and the two rollback marks (task p1.15-60) - and test/test_flash_writes fails the build when one of those calls is anywhere but the file named for it"),
 }
 
 # Never set, whatever the core says: each is a way of not verifying a certificate. The first is

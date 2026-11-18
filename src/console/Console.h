@@ -52,6 +52,10 @@ struct ConsoleHost {
   // the ending go to the log, which is this same port - a download of 1.4 MB is done in pieces
   // from the loop and cannot be waited for here. `id` is digits, as the parser checked.
   void (*updateFetch)(const char* id, Stream& out);
+  // `update apply` (task p1.15-60): switch to the image task 59 judged and restart, so that it
+  // runs on trial for ten minutes. It either does not return - the board restarts - or prints
+  // one sentence saying why nothing was switched; nullptr prints nothing.
+  void (*updateApply)(Stream& out);
 };
 
 class Console {

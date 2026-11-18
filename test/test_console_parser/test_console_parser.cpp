@@ -403,10 +403,11 @@ TEST(Lines, EraseNeedsItsConfirmationWord) {
   EXPECT_EQ(Verb::Erase, r.command.verb);
 }
 
-// `update`, `update slot` and `update fetch <id>` (tasks p1.15-57 and p1.15-59). The second erases
-// and writes a sector of flash and the third fetches a release off the network, so the grammar is
-// exactly those three shapes: anything else is a refusal that says what to type.
-TEST(Lines, UpdateTakesNothingTheWordSlotOrFetchAndAnId) {
+// `update`, `update slot`, `update fetch <id>` and `update apply` (tasks p1.15-57, p1.15-59 and
+// p1.15-60). The second erases and writes a sector of flash, the third fetches a release off the
+// network and the fourth restarts the board into another firmware, so the grammar is exactly
+// those four shapes: anything else is a refusal that says what to type.
+TEST(Lines, UpdateTakesNothingTheWordSlotTheWordApplyOrFetchAndAnId) {
   ParseResult r = parseLine("update");
   EXPECT_TRUE(r.ok);
   EXPECT_EQ(Verb::Update, r.command.verb);
@@ -417,10 +418,17 @@ TEST(Lines, UpdateTakesNothingTheWordSlotOrFetchAndAnId) {
   EXPECT_EQ(Verb::UpdateSlot, r.command.verb);
   EXPECT_EQ(Verb::UpdateSlot, parseLine("update   slot  ").command.verb) << "the gap between the two words is trimmed";
 
-  for (const char* line : {"update now", "update slots", "update slot now", "update confirm", "update 1"}) {
+  r = parseLine("update apply");
+  EXPECT_TRUE(r.ok);
+  EXPECT_EQ(Verb::UpdateApply, r.command.verb);
+  EXPECT_EQ(Verb::UpdateApply, parseLine("  update   apply \r\n").command.verb);
+
+  for (const char* line : {"update now", "update slots", "update slot now", "update confirm", "update 1",
+                           "update applied", "update apply now", "update Apply"}) {
     const ParseResult x = parseLine(line);
     EXPECT_FALSE(x.ok) << line;
-    EXPECT_STREQ("update takes no argument, the word 'slot', or 'fetch <release id>'", x.error) << line;
+    EXPECT_STREQ("update takes no argument, the word 'slot', the word 'apply', or 'fetch <release id>'", x.error)
+        << line;
   }
   EXPECT_FALSE(parseLine("Update").ok);
 }
