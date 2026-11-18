@@ -176,6 +176,25 @@ The order is not negotiable: there is one dialect, it is the .NET agent's, and a
 firmware that invents a second one is a bug however well it works. See
 [`tests/fixtures/contracts/README.md`](../tests/fixtures/contracts/README.md).
 
+### A fixture that waits
+
+*There first, here second* is the order and it does not bend. What does bend is
+the **waiting**: the two repositories' piles run at the same time, so a task here
+can be written against an envelope that meshmaster.dk has not put on its `master`
+yet. Such a task writes the file from the one line it carries, into
+[`tests/fixtures/contracts-ahead/`](../tests/fixtures/contracts-ahead/README.md)
+— a directory of its own, which `tools/sync-fixtures.ps1` does not touch and
+`MANIFEST.txt` does not list — and `tests/fixtures/contracts/` is not edited and
+no sync is run.
+
+**The sync's copy is the one that holds.** When the other side is on its trunk,
+`.\tools\sync-fixtures.ps1 -Commit master` brings the real file across and it
+**must be the same bytes** as the one that waited; then the tests are pointed at
+the copied tree and the waiting file is deleted. It is an item of the pile's
+`FOLLOWUPS.md` and it is not optional: a difference is a wire the two ends do not
+agree on, and the point of writing the line down twice is to find it before a
+release and not after.
+
 ## Reading the firmware you build against
 
 After a build, the pinned MeshCore is on disk:

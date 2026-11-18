@@ -109,7 +109,7 @@ size_t writeTelemetryResult(const LppReading* readings, int count, char* out, si
   return w.overflowed() ? 0 : w.length();
 }
 
-size_t writeNeighboursResult(const Neighbour* neighbours, int count, char* out, size_t cap) {
+size_t writeNeighboursResult(const Neighbour* neighbours, int count, int total, char* out, size_t cap) {
   JsonWriter w(out, cap);
   w.beginObject();
   w.key("neighbours");
@@ -126,6 +126,8 @@ size_t writeNeighboursResult(const Neighbour* neighbours, int count, char* out, 
     w.endObject();
   }
   w.endArray();
+  w.key("total");
+  w.integer(total);
   w.endObject();
   return w.overflowed() ? 0 : w.length();
 }

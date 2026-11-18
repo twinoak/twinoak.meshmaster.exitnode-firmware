@@ -1337,6 +1337,39 @@ watch (§10). If a fixture and a real server disagree, the server is the
 reference and the fix starts in `twinoak/meshmaster.dk` — never in a local
 edit here.
 
+### 9.1 A fixture that waits
+
+[`tests/fixtures/contracts-ahead/`](../tests/fixtures/contracts-ahead/README.md)
+is a **third** directory and it is not a copy. The two repositories' piles run at
+the same time, so a task here can need an envelope that meshmaster.dk has not put
+on its `master` yet; rather than wait, the task writes the file from the one line
+it carries, into that directory. The sync does not touch it, `MANIFEST.txt` does
+not list it, and a test holds it to those bytes exactly
+(`test_contract_fixtures`'s `WaitingFixtures`). When the other side lands,
+`tools/sync-fixtures.ps1 -Commit master` brings the real file, the two **must be
+the same bytes**, the tests are pointed at the copied tree and the waiting file
+goes. The copied tree is the contract; this one is a promissory note, and a
+difference between them is a wire the two ends do not agree on, found before a
+release rather than after.
+
+**The neighbours result is the first of them** (task p1.15-56, waiting on
+meshmaster.dk's task 239). A `neighbours` job reads the list nine to a page, and a
+page that goes unanswered after an earlier one came back ends the *reading* and
+not the job — the server gets what was heard. So the result carries `total`, the
+count the repeater gave in the last page that was read, after the array and
+always, 0 beside an empty list:
+
+```json
+{"neighbours":[{"prefix":"a1","lastHeardS":42,"snr":7.25}],"total":17}
+```
+
+`count` entries and a larger `total` is a list the reading did not finish — a
+page lost, or the list cut at `kMaxNeighbours` — and without it nine neighbours
+that are the whole list and nine that are where the list stopped are the same
+bytes, which cost the server the other eight as *lost* at every short listing.
+`mm::writeNeighboursResult` takes the count as its third argument; if you write
+that result yourself, this is the one call of this release that stops compiling.
+
 ## 10. Versioning, pinning, and watching this upstream
 
 **A tag `vX.Y.Z` of this repository is the library's version.** There is nothing

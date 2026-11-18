@@ -22,12 +22,16 @@
 #include <agent/Iso8601.h>
 #include <agent/JobEnvelopes.h>
 #include <agent/JobResults.h>
+#include <agent/JobRunner.h>
 
 #ifndef FIXTURES_DIR
 #error "FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
 #endif
 #ifndef COMPANION_DIR
 #error "COMPANION_DIR must be defined; platformio.ini's [env:native] does it"
+#endif
+#ifndef AHEAD_FIXTURES_DIR
+#error "AHEAD_FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
 #endif
 
 namespace {
@@ -37,6 +41,19 @@ namespace fs = std::filesystem;
 std::string fixture(const std::string& name) {
   std::ifstream in(fs::path(FIXTURES_DIR) / (name + ".json"), std::ios::binary);
   EXPECT_TRUE(in.good()) << "no such contract fixture: " << name;
+  std::ostringstream all;
+  all << in.rdbuf();
+  std::string text = all.str();
+  while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+  return text;
+}
+
+// A fixture meshmaster.dk has not put on its master yet, written here from the line of the task
+// that needs it (tests/fixtures/contracts-ahead/README.md, task p1.15-56). Read exactly as a
+// copied one is; the sync replaces it with the copied file, which must be the same bytes.
+std::string ahead(const std::string& name) {
+  std::ifstream in(fs::path(AHEAD_FIXTURES_DIR) / (name + ".json"), std::ios::binary);
+  EXPECT_TRUE(in.good()) << "no such waiting fixture: " << name;
   std::ostringstream all;
   all << in.rdbuf();
   std::string text = all.str();
@@ -144,7 +161,12 @@ TEST(TelemetryResult, TheSameInputMakesTheDotNetFixtureByteForByte) {
   EXPECT_EQ(std::string(out, len), fixture("TelemetryResult"));
 }
 
-TEST(NeighboursResult, TheSameInputMakesTheDotNetFixtureByteForByte) {
+// The two neighbours of `NeighboursResult.json` and a repeater that says it has seventeen:
+// `NeighboursResultTotal.json`, which is the same record with the count the firmware now writes
+// (task p1.15-56, meshmaster.dk's task 239 deliverable 1). It is a **waiting** fixture until the
+// sync brings the real one; `NeighboursResult.json` itself is untouched and is what a listing of
+// an exit node that does not write the count yet still looks like.
+TEST(NeighboursResult, TheSameInputAndTheRepeatersOwnCountMakeTheDotNetFixtureByteForByte) {
   mm::Neighbour n[2];
   std::snprintf(n[0].prefix, sizeof n[0].prefix, "a1");
   n[0].lastHeardS = 42;
@@ -154,9 +176,40 @@ TEST(NeighboursResult, TheSameInputMakesTheDotNetFixtureByteForByte) {
   n[1].snr = -2.5;
 
   char out[512];
-  const std::size_t len = mm::writeNeighboursResult(n, 2, out, sizeof out);
+  const std::size_t len = mm::writeNeighboursResult(n, 2, 17, out, sizeof out);
   ASSERT_GT(len, 0u);
-  EXPECT_EQ(std::string(out, len), fixture("NeighboursResult"));
+  EXPECT_EQ(std::string(out, len), ahead("NeighboursResultTotal"));
+  // The copied fixture is the same record without the count, and it is not edited here: the two
+  // neighbours and their order are the same bytes up to where it ends.
+  const std::string whole = fixture("NeighboursResult");
+  EXPECT_EQ(std::string(out, len).rfind(whole.substr(0, whole.size() - 1), 0), 0u);
+}
+
+// An empty list is `total` 0 beside it, and never a result with no count at all: *this repeater
+// has no neighbours* is a reading, and the server stores it as one.
+TEST(NeighboursResult, ARepeaterWithNoNeighboursIsAnEmptyListAndACountOfNought) {
+  char out[64];
+  const std::size_t len = mm::writeNeighboursResult(nullptr, 0, 0, out, sizeof out);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ(std::string(out, len), "{\"neighbours\":[],\"total\":0}");
+}
+
+// **Room** (task p1.15-56): the largest result this firmware can write - `kMaxNeighbours`
+// entries at the eight-byte prefix, each with the widest `lastHeardS` and SNR a page can carry,
+// and the repeater's own count after them - fits the runner's data buffer with room to spare.
+// The result goes into `JobRunner::kDataCap` and nowhere else, so that is the figure.
+TEST(NeighboursResult, AFullListAndTheCountFitTheResultBuffer) {
+  std::vector<mm::Neighbour> all(mm::kMaxNeighbours);
+  for (int i = 0; i < mm::kMaxNeighbours; i++) {
+    std::snprintf(all[static_cast<std::size_t>(i)].prefix, sizeof all[0].prefix, "%016x", 0xFFFFFF00u + i);
+    all[static_cast<std::size_t>(i)].lastHeardS = 2147483647;  // the widest an i32 heard-ago is
+    all[static_cast<std::size_t>(i)].snr = -32.0;              // the widest an i8 quarter-dB is
+  }
+  char out[mm::JobRunner::kDataCap];
+  const std::size_t len = mm::writeNeighboursResult(all.data(), mm::kMaxNeighbours, 60, out, sizeof out);
+  ASSERT_GT(len, 0u) << "a full neighbour list does not fit the result buffer";
+  EXPECT_LT(len, sizeof out);
+  EXPECT_NE(std::string(out, len).find("\"total\":60"), std::string::npos);
 }
 
 TEST(TraceResult, TheSameInputMakesTheDotNetFixtureByteForByte) {
@@ -205,13 +258,12 @@ TEST(JobResultReport, TheSameInputMakesTheDotNetFixtureByteForByte) {
 // `JobResultReport.json` never carries - which is why `JobResultReportAtGuest.json` is a file of
 // its own, the way `JobResultReportFailed.json` is for `failedAt`.
 TEST(JobResultReport, AReadAGuestLoginServedCarriesTheTierAndMakesTheFixtureByteForByte) {
-  mm::Neighbour n[1];
-  std::snprintf(n[0].prefix, sizeof n[0].prefix, "a1b2c3d4e5f60718");
-  n[0].lastHeardS = 342;
-  n[0].snr = 7.25;
-  char data[256];
-  const std::size_t dataLen = mm::writeNeighboursResult(n, 1, data, sizeof data);
-  ASSERT_GT(dataLen, 0u);
+  // The `data` of this fixture is a listing **as it was written before the repeater's own count
+  // was in it** (task p1.15-56): a `NeighboursResult` with no `total`, which is what
+  // meshmaster.dk calls an *unsaid* listing and what every exit node sent until this release. It
+  // is the fixture's bytes and not this firmware's writer, because what this test is for is the
+  // **envelope** - `loggedInAs` last, after the log - and the envelope has not moved.
+  const char* data = "{\"neighbours\":[{\"prefix\":\"a1b2c3d4e5f60718\",\"lastHeardS\":342,\"snr\":7.25}]}";
 
   const char* path[] = {"a1", "7f"};
   mm::JobReport r;
@@ -632,12 +684,14 @@ TEST(NeighboursResult, TheTranscribedPageMakesTheResultTheDotNetAgentMakes) {
   mm::NeighboursPage page;
   ASSERT_TRUE(mm::parseNeighboursPage(data.data(), data.size(), mm::kNeighbourPrefixLen, page));
 
+  EXPECT_EQ(page.total, 2) << "the reply's first two bytes are the repeater's own count";
+
   char out[512];
-  const std::size_t len = mm::writeNeighboursResult(page.entries, page.count, out, sizeof out);
+  const std::size_t len = mm::writeNeighboursResult(page.entries, page.count, page.total, out, sizeof out);
   ASSERT_GT(len, 0u);
   EXPECT_EQ(std::string(out, len),
             "{\"neighbours\":[{\"prefix\":\"7f8e9dacbbcad9e8\",\"lastHeardS\":60,\"snr\":7.5},"
-            "{\"prefix\":\"c0ffee0011223344\",\"lastHeardS\":3600,\"snr\":-2.25}]}");
+            "{\"prefix\":\"c0ffee0011223344\",\"lastHeardS\":3600,\"snr\":-2.25}],\"total\":2}");
 }
 
 // A trace is a **round trip** (task 24), and what the agent reports is all of it with its own

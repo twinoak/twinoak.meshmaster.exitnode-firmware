@@ -28,6 +28,9 @@
 #ifndef COMPANION_DIR
 #error "COMPANION_DIR must be defined; platformio.ini's [env:native] does it"
 #endif
+#ifndef AHEAD_FIXTURES_DIR
+#error "AHEAD_FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
+#endif
 
 namespace fake {
 
@@ -51,6 +54,17 @@ inline std::string readWholeFile(const fs::path& path) {
 // A contract fixture, without its trailing newline: the bytes ContractsJson wrote.
 inline std::string contract(const std::string& name) {
   std::string text = readWholeFile(fs::path(FIXTURES_DIR) / (name + ".json"));
+  while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+  return text;
+}
+
+// A fixture that is **waiting for a sync**, without its trailing newline: an envelope written
+// here from the line of the task that needs it, because meshmaster.dk has not put it on its
+// master yet (tests/fixtures/contracts-ahead/README.md, task p1.15-56). It is read exactly as a
+// copied fixture is, and the next sync replaces it with the copied one - which must be the same
+// bytes - and this reader with `contract` above.
+inline std::string contractAhead(const std::string& name) {
+  std::string text = readWholeFile(fs::path(AHEAD_FIXTURES_DIR) / (name + ".json"));
   while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
   return text;
 }

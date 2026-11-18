@@ -20,6 +20,9 @@
 #ifndef FIXTURES_DIR
 #error "FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
 #endif
+#ifndef AHEAD_FIXTURES_DIR
+#error "AHEAD_FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
+#endif
 
 namespace {
 
@@ -46,6 +49,7 @@ bool is_hex(const std::string& s, std::size_t len) {
 }
 
 fs::path fixtures_dir() { return fs::path(FIXTURES_DIR); }
+fs::path ahead_dir() { return fs::path(AHEAD_FIXTURES_DIR); }
 
 // "# source: <repo>/<path> at commit <sha>" and, for every file, "<sha256>  <bytes>  <name>".
 Manifest read_manifest() {
@@ -145,6 +149,47 @@ TEST(ContractFixtures, NothingInTheDirectoryIsMissingFromTheManifest) {
     }
     EXPECT_TRUE(listed) << name << " is in the directory but not in MANIFEST.txt - a fixture that "
                                    "was not copied by tools/sync-fixtures.ps1";
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The fixtures that wait (task p1.15-56)
+//
+// `tests/fixtures/contracts-ahead/` is **not** a copy: each file is an envelope written here from
+// the line of the task that needs it, because the two repositories' piles run at the same time
+// and meshmaster.dk had not put it on its master. `tools/sync-fixtures.ps1` does not touch the
+// directory and MANIFEST.txt does not list it. What this suite can hold it to is the bytes: they
+// are the task's line exactly, so that when the sync brings the real file the two can be
+// compared byte for byte and a wire the two ends do not agree on is found before any release.
+
+// The one line of task p1.15-56, which is meshmaster.dk's task 239 deliverable 1, and the one
+// trailing newline every fixture of the copied tree has.
+const char* const kNeighboursResultTotal =
+    "{\"neighbours\":[{\"prefix\":\"a1\",\"lastHeardS\":42,\"snr\":7.25},"
+    "{\"prefix\":\"7f\",\"lastHeardS\":3600,\"snr\":-2.5}],\"total\":17}\n";
+
+TEST(WaitingFixtures, TheyAreTheirTasksLineByteForByte) {
+  ASSERT_TRUE(fs::is_directory(ahead_dir())) << ahead_dir();
+  const fs::path file = ahead_dir() / "NeighboursResultTotal.json";
+  ASSERT_TRUE(fs::exists(file)) << file;
+  EXPECT_EQ(read_file(file), std::string(kNeighboursResultTotal))
+      << "a waiting fixture is the line its task carries, and nothing else: it is compared with "
+         "the copied file byte for byte when the sync brings it";
+}
+
+TEST(WaitingFixtures, NoneOfThemIsInTheCopiedTreeOrItsManifest) {
+  const Manifest m = read_manifest();
+  for (const auto& item : fs::directory_iterator(ahead_dir())) {
+    if (!item.is_regular_file() || item.path().extension() != ".json") continue;
+    const std::string name = item.path().filename().string();
+    EXPECT_TRUE(looks_like_json(read_file(item.path()))) << name << " is not a JSON document";
+    for (const Entry& e : m.entries) {
+      EXPECT_NE(e.name, name) << name << " is waiting and is also in MANIFEST.txt: the sync has "
+                                         "brought it, so point the tests at the copied tree and "
+                                         "delete the waiting one (the pile's FOLLOWUPS.md)";
+    }
+    EXPECT_FALSE(fs::exists(fixtures_dir() / name))
+        << name << " is in the copied tree now; the waiting one has had its day";
   }
 }
 

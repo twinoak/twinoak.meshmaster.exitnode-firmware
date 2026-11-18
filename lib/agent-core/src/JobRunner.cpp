@@ -1156,7 +1156,13 @@ Outcome JobRunner::runNeighbours(const ClaimedJob& job, Context& ctx, size_t& da
   }
   if (collected < total) g_log.add("%d of the repeater's %d neighbour(s) reported", collected, total);
 
-  dataLen = writeNeighboursResult(g_neighbours, collected, g_data, kDataCap);
+  // The repeater's own count goes into the result, and not into the log alone (task p1.15-56):
+  // the server reads a result and cannot read a log, so without it a list that stopped at a page
+  // is nine neighbours with nothing to tell it from a whole list of nine, and the eight that were
+  // not read are counted as gone and found again as new at the next listing. It is the figure the
+  // **last page that was read** gave - every page carries it - so a repeater that gained a
+  // neighbour between two pages is reported at its newer count.
+  dataLen = writeNeighboursResult(g_neighbours, collected, total, g_data, kDataCap);
   return dataLen > 0 ? Outcome::Ok : Outcome::Failed;
 }
 

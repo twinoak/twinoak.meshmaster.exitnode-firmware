@@ -33,26 +33,43 @@ disagree.
 
 ## v0.7.2
 
-Pile 1.13 (`tasks/phase-1.13/`). **`agent-core` 0.7.2** in the three manifests;
-the contract fixtures and the companion frame fixtures are unmoved, and so is
-MeshCore (**`companion-v1.18.0`, `81dbae59`**). **Nothing of yours stops
-compiling and nothing of yours has to change.** What moved is the kept image
-(`docs/library.md` §5.1), and it moved in the one direction that costs you
-nothing: **`kKeptImageVersion` is 2, and version 1 is still read.**
+Piles 1.13 and 1.15 (`tasks/phase-1.13/`, `tasks/phase-1.15/`). **`agent-core`
+0.7.2** in the three manifests; the contract fixtures and the companion frame
+fixtures are unmoved, and so is MeshCore (**`companion-v1.18.0`, `81dbae59`**).
+What moved is the kept image (`docs/library.md` §5.1), in the one direction that
+costs you nothing — **`kKeptImageVersion` is 2, and version 1 is still read** —
+and **the neighbours result, which now carries the repeater's own count**. That
+second one is the only thing in this release that can stop your tree compiling,
+and only if you write that result yourself.
 
 - **Did a method move?** **No.** Nothing of `IMesh`, `IUplink`, `IPlatform`,
   `IClock`, `IJobExtension`, `JobContext`, `ResultWriter`, `TextOut`, `Backoff`,
   `WakeState` or `IRetained` moved. Three reads were **added**:
   `AgentLoop::pendingBatchCount()` and `pendingBatchId()` — the batch that has
   gone out and is still waiting for an answer — and `ObservationRing::oldestSeq()`.
+  **One free function of `agent/JobResults.h` did move**, and it is not one of the
+  interfaces: `writeNeighboursResult(neighbours, count, out, cap)` is now
+  `writeNeighboursResult(neighbours, count, total, out, cap)` (p1.15-56). The
+  runner fills it in for you, so a consumer that runs `neighbours` through
+  `JobRunner` gets the new member for nothing; one that writes the result itself
+  passes the count the repeater gave in the last page it read.
 - **Did a `MeshReply` constant move?** **No.** `kMeshReplyDataCap` is 184 and
   `kMeshPathCap` is 64, at the same pin, and no airtime arithmetic moved.
-- **Did the fixtures' manifest commit move?** **No.** Nothing of the wire
-  changed: an observation batch is the bytes it always was, and the `clientId`
-  the server de-duplicates on is the one it always was. What changed is that a
-  **sleep no longer loses it** (p1.13-55): a batch that went out and was not
-  answered now goes out again under the id it was built with after a deep sleep,
-  which is what keeps the server from storing the same adverts at every wake.
+- **Did the fixtures' manifest commit move?** **No, and the wire grew a member
+  all the same.** An observation batch is the bytes it always was, and the
+  `clientId` the server de-duplicates on is the one it always was; what changed
+  is that a **sleep no longer loses it** (p1.13-55): a batch that went out and was
+  not answered now goes out again under the id it was built with after a deep
+  sleep, which is what keeps the server from storing the same adverts at every
+  wake. The **neighbours result carries `total`** (p1.15-56), the count the
+  repeater says it has, so that a listing which stopped at a lost page can be told
+  from a whole one — the server took the short one for all there were and counted
+  the rest as gone. The manifest commit is unmoved because meshmaster.dk's own
+  side of it (its task 239) may land after this release; the sample is
+  `tests/fixtures/contracts-ahead/NeighboursResultTotal.json` until the next sync
+  brings the real file, which must be the same bytes (`docs/library.md` §9.1).
+  `NeighboursResult.json` itself is untouched: a result with no `total` is what
+  every exit node sent before this release, and the server still reads it.
 - **The version, and the MeshCore pin.** `agent-core` **0.7.2** against MeshCore
   **`companion-v1.18.0`** (`81dbae59`).
 

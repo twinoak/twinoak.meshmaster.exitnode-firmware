@@ -11,3 +11,7 @@ tests/fixtures/contracts/*.json -text
 *.bin binary
 *.elf binary
 *.hex -text
+
+# The fixtures that wait for a sync are bytes for the same reason (task p1.15-56): they are
+# compared with the copied files byte for byte when meshmaster.dk's side lands.
+tests/fixtures/contracts-ahead/*.json -text

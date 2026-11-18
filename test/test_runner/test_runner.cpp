@@ -134,6 +134,19 @@ std::string memberOf(const std::string& json, const std::string& key) {
   return json.substr(at, end - at);
 }
 
+// A repeater with `count` neighbours: different keys, newest first, which is the order the
+// firmware answers in and all these tests read of them.
+std::vector<fake::NeighbourEntry> neighbourList(int count) {
+  std::vector<fake::NeighbourEntry> list;
+  for (int i = 0; i < count; i++) {
+    char prefix[17];
+    std::snprintf(prefix, sizeof prefix, "%016d", i);
+    list.push_back(fake::NeighbourEntry{std::string(prefix) + std::string(48, '1'),
+                                        60u * static_cast<uint32_t>(i + 1), 24});
+  }
+  return list;
+}
+
 // Two invented job types compiled in beside the thirteen: what a consumer of the library does
 // with `IJobExtension` (agent/IJobExtension.h).
 class FakeExtension : public mm::IJobExtension {
@@ -292,6 +305,13 @@ class RunnerTest : public ::testing::Test {
       at = end;
     }
     return out;
+  }
+
+  // The repeater's own neighbour count out of a neighbours result (task p1.15-56), or -1 when
+  // the result does not carry one - which after this task is only a job that wrote no result.
+  int totalOf(const std::string& data) const {
+    const std::string said = memberOf(data, "total");
+    return said.empty() ? -1 : std::atoi(said.c_str());
   }
 
   fake::FakePlatform platform;
@@ -673,13 +693,7 @@ TEST_F(RunnerTest, ATelemetryReadDecodesTheChannelsTheRepeaterSent) {
 
 TEST_F(RunnerTest, NeighboursAtGuestPagesByNine) {
   mesh.setGuestPassword("gu3st-pass");
-  std::vector<fake::NeighbourEntry> list;
-  for (int i = 0; i < 12; i++) {
-    char prefix[17];
-    std::snprintf(prefix, sizeof prefix, "%016d", i);
-    list.push_back(fake::NeighbourEntry{std::string(prefix) + std::string(48, '1'), 60u * (i + 1), 24});
-  }
-  mesh.setNeighbours(list);
+  mesh.setNeighbours(neighbourList(12));
 
   const std::string body = run(fake::Job(12347, "neighbours")
                                    .atClass("guest")
@@ -690,14 +704,122 @@ TEST_F(RunnerTest, NeighboursAtGuestPagesByNine) {
   EXPECT_EQ(mesh.requestsOf(mm::kReqTypeGetNeighbours), 2) << "nine a page, so twelve is two pages (§7)";
   EXPECT_EQ(transactionsOf(body), 3) << "the login and two pages";
   const std::string data = dataOf(body);
-  EXPECT_TRUE(fake::followsShapeOf(data, fake::contract("NeighboursResult")));
-  int reported = 0;
-  size_t at = 0;
-  while ((at = data.find("\"prefix\":", at)) != std::string::npos) {
-    reported++;
-    at += 9;
-  }
-  EXPECT_EQ(reported, 12);
+  EXPECT_TRUE(fake::followsShapeOf(data, fake::contractAhead("NeighboursResultTotal")));
+  EXPECT_EQ(prefixesOf(data).size(), 12u);
+  EXPECT_EQ(totalOf(data), 12) << "a whole list: as many entries as the repeater said it has";
+}
+
+// ------------------------------------------------------------- a listing says how many there were
+//
+// **The result carries the repeater's own count** (task p1.15-56). A list is read nine to a
+// page, and a page that goes unanswered after an earlier one came back ends the reading rather
+// than the job: the server gets what was heard rather than nothing at all. Until now it got
+// nothing to tell that from a whole list, so it took the nine for all there were, counted the
+// other eight as gone and found them again as new at the next listing. `total` is the figure
+// every page of the reply carries, as the last page that was read gave it; meshmaster.dk's task
+// 239 is what reads it. The pages asked for, the tries, the order, the log's lines and the
+// outcome of every case are what they were.
+
+TEST_F(RunnerTest, AWholeListIsAsManyEntriesAsTheRepeatersOwnCount) {
+  mesh.grant(self(), mm::kPermReadOnly);
+  mesh.setNeighbours(neighbourList(17));
+  const std::string body =
+      run(fake::Job(25601, "neighbours").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
+
+  EXPECT_EQ(outcomeOf(body), "ok");
+  EXPECT_EQ(mesh.requestsOf(mm::kReqTypeGetNeighbours), 2) << "nine a page: seventeen is two";
+  const std::string data = dataOf(body);
+  EXPECT_EQ(prefixesOf(data).size(), 17u);
+  EXPECT_EQ(totalOf(data), 17);
+  EXPECT_EQ(logOf(body).find("the list stops at"), std::string::npos) << "nothing stopped: " << body;
+}
+
+TEST_F(RunnerTest, AListThatStopsAtAPageSaysHowManyThereWereAndItsLogIsWhatItWas) {
+  mesh.grant(self(), mm::kPermReadOnly);
+  mesh.setNeighbours(neighbourList(17));
+  mesh.silenceTheNeighboursPageFrom(2);
+  const std::string body =
+      run(fake::Job(25602, "neighbours").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
+
+  EXPECT_EQ(outcomeOf(body), "ok") << "a page that never came back after one did is still a reading";
+  EXPECT_EQ(failedAtOf(body), "") << "the job did not fail";
+  const std::string data = dataOf(body);
+  EXPECT_EQ(prefixesOf(data).size(), 9u);
+  EXPECT_EQ(totalOf(data), 17) << "nine of seventeen, and the result says so: " << data;
+  // The log's two lines are the ones it wrote before this task, word for word.
+  EXPECT_NE(logOf(body).find("the list stops at 9 of 17"), std::string::npos) << body;
+  EXPECT_NE(logOf(body).find("9 of the repeater's 17 neighbour(s) reported"), std::string::npos) << body;
+}
+
+TEST_F(RunnerTest, APageThatDoesNotParseAfterOneThatDidStopsTheListAndKeepsTheCount) {
+  // A reply with fewer than the four bytes of `total(i16)`, `returned(i16)`, which is the only
+  // neighbours page `parseNeighboursPage` refuses. The repeater's padding is what makes a reply
+  // that short impossible on the air, so it goes off for this one (FakeMesh's own note).
+  mesh.setPadding(false);
+  mesh.grant(self(), mm::kPermReadOnly);
+  mesh.setNeighbours(neighbourList(17));
+  mesh.truncateTheNeighboursPage(2);
+  const std::string body =
+      run(fake::Job(25603, "neighbours").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
+
+  EXPECT_EQ(outcomeOf(body), "ok");
+  const std::string data = dataOf(body);
+  EXPECT_EQ(prefixesOf(data).size(), 9u);
+  EXPECT_EQ(totalOf(data), 17) << data;
+  EXPECT_NE(logOf(body).find("a neighbours page did not parse"), std::string::npos) << body;
+}
+
+TEST_F(RunnerTest, AListCutAtTheCapSaysTheRepeatersWholeCount) {
+  mesh.grant(self(), mm::kPermReadOnly);
+  mesh.setNeighbours(neighbourList(60));
+  const std::string body =
+      run(fake::Job(25604, "neighbours").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
+
+  EXPECT_EQ(outcomeOf(body), "ok");
+  EXPECT_EQ(mesh.requestsOf(mm::kReqTypeGetNeighbours), 6) << "six pages of nine is kMaxNeighbours";
+  const std::string data = dataOf(body);
+  EXPECT_EQ(prefixesOf(data).size(), static_cast<std::size_t>(mm::kMaxNeighbours));
+  EXPECT_EQ(totalOf(data), 60) << "fifty-four of sixty, and the result says which: " << data;
+  EXPECT_NE(logOf(body).find("54 of the repeater's 60 neighbour(s) reported"), std::string::npos) << body;
+}
+
+TEST_F(RunnerTest, ARepeaterWithNoNeighboursIsAnEmptyListAndACountOfNought) {
+  mesh.grant(self(), mm::kPermReadOnly);
+  mesh.setNeighbours({});
+  const std::string body =
+      run(fake::Job(25605, "neighbours").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
+
+  EXPECT_EQ(outcomeOf(body), "ok");
+  EXPECT_EQ(dataOf(body), "{\"neighbours\":[],\"total\":0}") << body;
+}
+
+TEST_F(RunnerTest, TheCountIsTheOneTheLastPageReadGave) {
+  // A neighbour heard between the two pages: the repeater says seventeen on the first page and
+  // eighteen on every page after it, and the newer figure is the one the result carries.
+  mesh.grant(self(), mm::kPermReadOnly);
+  mesh.setNeighbours(neighbourList(17));
+  mesh.sayTheNeighbourTotalFromPage(2, 18);
+  const std::string body =
+      run(fake::Job(25606, "neighbours").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
+
+  EXPECT_EQ(outcomeOf(body), "ok");
+  const std::string data = dataOf(body);
+  EXPECT_EQ(prefixesOf(data).size(), 17u);
+  EXPECT_EQ(totalOf(data), 18) << data;
+}
+
+TEST_F(RunnerTest, AFirstPageThatNeverComesBackIsTheJobItAlwaysWasAndCarriesNoResult) {
+  mesh.grant(self(), mm::kPermReadOnly);
+  mesh.setNeighbours(neighbourList(17));
+  mesh.silenceTheNeighboursPageFrom(1);
+  const std::string body =
+      run(fake::Job(25607, "neighbours").atClass("acl").leasedUntil(kLease).withAclLevel(mm::kPermReadOnly));
+
+  EXPECT_EQ(outcomeOf(body), "unreachable") << body;
+  EXPECT_EQ(failedAtOf(body), "request") << body;
+  EXPECT_EQ(dataOf(body), "") << "nothing was heard, so there is no reading to report: " << body;
+  EXPECT_EQ(mesh.requestsOf(mm::kReqTypeGetNeighbours), 2) << "the two tries every request has";
+  EXPECT_EQ(logOf(body).find("the list stops at"), std::string::npos) << body;
 }
 
 TEST_F(RunnerTest, ATraceReportsTheRoundTripAndThisBoardsOwnHopLast) {
@@ -1956,8 +2078,9 @@ TEST_F(RunnerTest, TheNeighbourReadAnAclLoginAnsweredAtGuestRunsAndSaysWhatItRan
   // p4.37-210), and the data is the reading a `neighbours` job always answers.
   EXPECT_TRUE(followsBothFixtures(body)) << body;
   const std::string data = dataOf(body);
-  EXPECT_TRUE(fake::followsShapeOf(data, fake::contract("NeighboursResult"))) << data;
+  EXPECT_TRUE(fake::followsShapeOf(data, fake::contractAhead("NeighboursResultTotal"))) << data;
   EXPECT_NE(data.find("\"prefix\":\"" + repeater().substr(0, 16) + "\""), std::string::npos) << data;
+  EXPECT_EQ(totalOf(data), 1) << "one neighbour, and the repeater says it has one: " << data;
   EXPECT_NE(logOf(body).find("logged in as guest, below the read-only this job asked for"), std::string::npos) << body;
   EXPECT_NE(logOf(body).find("the ACL entry of this exit node's key is gone or demoted"), std::string::npos) << body;
 }
@@ -2174,7 +2297,7 @@ TEST_F(RunnerTest, AnEmptyNeighbourPageArrivingLateIsDroppedByItsTagAndNotReadAs
   EXPECT_NE(logOf(body).find("the late reply to a request this job sent arrived instead"), std::string::npos) << body;
   EXPECT_NE(logOf(body).find("logged in as read-only"), std::string::npos) << body;
   EXPECT_EQ(logOf(body).find("logged in as guest"), std::string::npos) << body;
-  EXPECT_EQ(dataOf(body), "{\"neighbours\":[]}") << "and the page itself is the reading: " << body;
+  EXPECT_EQ(dataOf(body), "{\"neighbours\":[],\"total\":0}") << "and the page itself is the reading: " << body;
 }
 
 // The rotation probe's blank login (task p1.3-13): a late reply reaching it must not make it
