@@ -5,7 +5,7 @@
 
 .DESCRIPTION
   The firmware keeps the .NET agent's contract to the byte, and the fixtures are how that is
-  checked. There are two sets, each a directory of its own with a MANIFEST.txt of its own:
+  checked. There are three sets, each a directory of its own with a MANIFEST.txt of its own:
 
     contracts   tests/fixtures/contracts, *.json - the envelopes of the agent protocol, written
                 by MeshMaster.Contracts' round-trip tests so they cannot drift from the records
@@ -13,14 +13,22 @@
                 protocol, each with the firmware function its bytes were read from in its header.
                 The board is the companion, so what it parses is the body of these frames; a
                 difference is a bug in the firmware, not a second dialect (task p1-03)
+    firmware    tests/fixtures/firmware - the firmware manifest's own fixtures (task p1.15-58):
+                FIRMWARE-MANIFEST.md, the test key, two products' manifests and signatures, the
+                stand-in images with one, two and a broken descriptor, and index.json, which the
+                tests read their expectations from. meshmaster.dk copies them from the hardware
+                repository; this is the copy of the copy, and **the bytes are copied exactly** -
+                a signature is over a file's bytes, so a line ending changed on the way in would
+                make every signature fail. Its MANIFEST.txt and README.md are not copied: those
+                two are each repository's own
 
-  This script is the only way either directory changes here. It writes MANIFEST.txt beside the
-  fixtures: the meshmaster.dk commit the copy came from, and the SHA-256 and size of every file.
+  This script is the only way any of those directories changes here. It writes MANIFEST.txt beside
+  the fixtures: the meshmaster.dk commit the copy came from, and the SHA-256 and size of every file.
 
     .\tools\sync-fixtures.ps1                      # fetch again from the commit in MANIFEST.txt
     .\tools\sync-fixtures.ps1 -Commit <sha|master> # fetch from another commit and record it
     .\tools\sync-fixtures.ps1 -Verify              # no network: do the files still match MANIFEST.txt?
-    .\tools\sync-fixtures.ps1 -Set companion       # one set only; the default is both
+    .\tools\sync-fixtures.ps1 -Set companion       # one set only; the default is all three
 
   -Verify is what CI runs (.github/workflows/ci.yml) and what fails when somebody edits a fixture
   here instead of in meshmaster.dk. `pio test -e native` checks the same sets from the other side -
@@ -35,7 +43,7 @@
   the commit is what gets recorded.
 
 .PARAMETER Set
-  Which fixture set to act on: `contracts`, `companion`, or `all` (the default).
+  Which fixture set to act on: `contracts`, `companion`, `firmware`, or `all` (the default).
 
 .PARAMETER AllowEmpty
   Do not fail when the source directory does not exist at that commit.
@@ -44,7 +52,7 @@
 param(
     [string]$Commit = '',
     [string]$Repo = 'twinoak/meshmaster.dk',
-    [ValidateSet('contracts', 'companion', 'all')]
+    [ValidateSet('contracts', 'companion', 'firmware', 'all')]
     [string]$Set = 'all',
     [switch]$Verify,
     [switch]$AllowEmpty
@@ -59,11 +67,21 @@ $ErrorActionPreference = 'Continue'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 
 # One row per set: where it comes from, where it lands, which files are its, and what to call it.
+# Patterns is a list, so that a set may take more than one extension; Exclude is for the two names
+# every fixture directory has and that are each repository's own. Binary says the bytes are copied
+# as they are rather than normalised to UTF-8 with LF - a signature is over a file's bytes.
 $sets = @(
-    [pscustomobject]@{ Name = 'contracts'; SourcePath = 'tests/fixtures/contracts'; Dir = (Join-Path $root 'tests\fixtures\contracts'); Pattern = '*.json'; What = 'contract fixtures of the .NET agent' },
-    [pscustomobject]@{ Name = 'companion'; SourcePath = 'tests/fixtures/companion'; Dir = (Join-Path $root 'tests\fixtures\companion'); Pattern = '*.hex'; What = 'transcribed companion frames' }
+    [pscustomobject]@{ Name = 'contracts'; SourcePath = 'tests/fixtures/contracts'; Dir = (Join-Path $root 'tests\fixtures\contracts'); Patterns = @('*.json'); Exclude = @(); Binary = $false; What = 'contract fixtures of the .NET agent' },
+    [pscustomobject]@{ Name = 'companion'; SourcePath = 'tests/fixtures/companion'; Dir = (Join-Path $root 'tests\fixtures\companion'); Patterns = @('*.hex'); Exclude = @(); Binary = $false; What = 'transcribed companion frames' },
+    [pscustomobject]@{ Name = 'firmware'; SourcePath = 'tests/fixtures/firmware'; Dir = (Join-Path $root 'tests\fixtures\firmware'); Patterns = @('*.json', '*.sig', '*.bin', '*.hex', '*.txt', '*.md'); Exclude = @('MANIFEST.txt', 'README.md'); Binary = $true; What = 'firmware-manifest fixtures of the specification' }
 )
 if ($Set -ne 'all') { $sets = @($sets | Where-Object { $_.Name -eq $Set }) }
+
+function Test-Wanted($name, $s) {
+    if ($s.Exclude -contains $name) { return $false }
+    foreach ($p in $s.Patterns) { if ($name -like $p) { return $true } }
+    return $false
+}
 
 function Read-Manifest($manifestPath) {
     if (-not (Test-Path $manifestPath)) { return $null }
@@ -100,7 +118,8 @@ if ($Verify) {
             if ($sha -ne $e.Sha256) { $problems += "$($e.Name): SHA-256 $sha, MANIFEST.txt says $($e.Sha256)" }
         }
         $listed = @($manifest.Entries | ForEach-Object { $_.Name })
-        foreach ($file in Get-ChildItem $s.Dir -Filter $s.Pattern -File -ErrorAction SilentlyContinue) {
+        foreach ($file in Get-ChildItem $s.Dir -File -ErrorAction SilentlyContinue) {
+            if (-not (Test-Wanted $file.Name $s)) { continue }
             if ($listed -notcontains $file.Name) { $problems += "$($file.Name): on disk, not in MANIFEST.txt" }
         }
         if ($problems.Count -gt 0) {
@@ -153,7 +172,7 @@ foreach ($s in $sets) {
         # line on its own in PowerShell 5.1.
         # Only the fixtures: this directory's own README.md is ours, and meshmaster.dk has one of
         # its own in the same place. Sub-directories (the field captures) are not copied either.
-        $files = @((($listing -join "`n") | ConvertFrom-Json) | Where-Object { $_.type -eq 'file' -and $_.name -like $s.Pattern })
+        $files = @((($listing -join "`n") | ConvertFrom-Json) | Where-Object { $_.type -eq 'file' -and (Test-Wanted $_.name $s) })
     }
 
     New-Item -ItemType Directory -Force -Path $s.Dir | Out-Null
@@ -173,11 +192,22 @@ foreach ($s in $sets) {
         # file is written as UTF-8 without a BOM, LF, one trailing newline - a redirection on
         # Windows would add a BOM and CRLF, and then no two machines would agree on a SHA-256.
         $target = Join-Path $s.Dir $f.name
-        $body = & gh api "repos/$Repo/contents/$($s.SourcePath)/$($f.name)`?ref=$sha" -H 'Accept: application/vnd.github.raw'
-        if ($LASTEXITCODE -ne 0) { throw "could not fetch $($f.name)" }
-        $text = ($body -join "`n")
-        if (-not $text.EndsWith("`n")) { $text += "`n" }
-        [IO.File]::WriteAllText($target, $text, (New-Object Text.UTF8Encoding($false)))
+        if ($s.Binary) {
+            # The bytes as they are. The contents API's own base64 is the only way through gh that
+            # a byte is not touched: `Accept: raw` comes back through PowerShell as decoded text,
+            # which would corrupt an image and change the line endings of a signed manifest.
+            $b64 = & gh api "repos/$Repo/contents/$($s.SourcePath)/$($f.name)`?ref=$sha" --jq '.content'
+            if ($LASTEXITCODE -ne 0) { throw "could not fetch $($f.name)" }
+            $joined = (($b64 -join '') -replace '\s', '')
+            [IO.File]::WriteAllBytes($target, [Convert]::FromBase64String($joined))
+        }
+        else {
+            $body = & gh api "repos/$Repo/contents/$($s.SourcePath)/$($f.name)`?ref=$sha" -H 'Accept: application/vnd.github.raw'
+            if ($LASTEXITCODE -ne 0) { throw "could not fetch $($f.name)" }
+            $text = ($body -join "`n")
+            if (-not $text.EndsWith("`n")) { $text += "`n" }
+            [IO.File]::WriteAllText($target, $text, (New-Object Text.UTF8Encoding($false)))
+        }
         $entries += [pscustomobject]@{
             Sha256 = Get-Sha256 $target
             Size   = (Get-Item -LiteralPath $target).Length

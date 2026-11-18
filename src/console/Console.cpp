@@ -93,7 +93,7 @@ void Console::help() {
   io_->println("  dump                the last 4 kB of the log, oldest first");
   io_->println("  wifi                scan for networks and show the link");
   io_->println("  reboot");
-  io_->println("  update              which partition table this board runs on, and its application slots");
+  io_->println("  update              what this image is, the release keys it trusts, and this board's application slots");
   io_->printf("  update %s         add the second application slot to this board's table, then reboot\r\n", kSlotWord);
   io_->printf("  erase %s       forget every setting; the identity stays\r\n", kEraseWord);
   io_->println("  get mqtt.presets    the broker presets an mqttN.preset can name");

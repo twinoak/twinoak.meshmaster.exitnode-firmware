@@ -63,6 +63,8 @@
 #include "platform/TableFlash.h"
 #include "platform/TlsHeap.h"
 #include "settings/Store.h"
+#include "update/ImageDescriptor.h"
+#include "update/Trust.h"
 #include "ui/DisplayLines.h"
 #include "ui/Oled.h"
 #include "version.h"
@@ -427,6 +429,26 @@ void printDiscoverScopes(Stream& out) {
 // with, so this is how a person at a window finds out whether this board can be updated from the
 // server yet, and `update slot` below is how it comes to be able to.
 void printUpdate(Stream& out) {
+  // What this image says it is (task p1.15-58): the 96 bytes the build placed inside it, read
+  // back from the image that is running. It is the one line that proves on a bench what
+  // tools/check-descriptor.py proves in CI, and reading it here is also what keeps the linker
+  // from collecting a descriptor nothing refers to.
+  mm::update::Descriptor self;
+  if (mm::update::thisImageDescriptor(self)) {
+    char role[16];
+    out.printf("image     %s %s, band %s, version %s\r\n",
+               mm::update::roleName(self.role, role, sizeof(role)), self.board, self.band,
+               self.version);
+  } else {
+    out.println("image     carries no descriptor this firmware can read");
+  }
+  // And the keys it would check a release's signature with. No key is the safe state and the
+  // whole answer: nothing can be signed in a way this build believes, so no update is taken.
+  char keys[192];
+  mm::update::renderKeysLine(mm::update::trustedKeys(), mm::update::trustedKeyCount(),
+                             mm::update::trustsTestKey(), keys, sizeof(keys));
+  out.printf("keys      %s\r\n", keys);
+
   const mm::TablePair tables = mm::tablesForThisBoard();
   const mm::TableReading r = mm::readTable(mm::partitionTableFlash(), tables.oneSlot);
   if (!r.read) {

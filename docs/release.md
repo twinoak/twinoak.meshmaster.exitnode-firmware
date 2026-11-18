@@ -107,7 +107,8 @@ unknown**, waited for with the same twenty minutes as before.
 ## 4. What it publishes
 
 Per board, the application image and the merged image, with `SHA256SUMS` — see
-[`README.md`](../README.md)'s *Which of the two*. The notes are two halves:
+[`README.md`](../README.md)'s *Which of the two* — and, once per release,
+`manifest.json` and `manifest.json.sig` (§5). The notes are two halves:
 
 - ***What's new in vX.Y.Z*** — the waiting lines, as bullets, **in the order the
   tasks merged**. That order is read off git: the commit that added each file
@@ -120,7 +121,71 @@ Per board, the application image and the merged image, with `SHA256SUMS` — see
 
 The release is created with its tag on `master`'s head, as **Latest**.
 
-## 5. Afterwards: one pull request, opened by the workflow and merged by you
+## 5. Signed where it is built
+
+A person flashing a board reads a file's name. A board that fetches its own
+firmware has no person reading names, and neither has MeshMaster's firmware
+catalogue — so a release carries three things more, all of them the hardware
+repository's `FIRMWARE-MANIFEST.md`, schema 1, which
+[`tests/fixtures/firmware/`](../tests/fixtures/firmware) holds a copy of
+(task p1.15-58):
+
+| | |
+|---|---|
+| `manifest.json` | what every published file is: its size, its SHA-256, the board, the band, the address it loads at. Written by [`tools/release/build_release.py`](../tools/release/build_release.py) **from the files themselves** — no size and no hash is ever typed |
+| `manifest.json.sig` | one line, `ed25519 <key id> <base64>`: one Ed25519 signature over the manifest's bytes. One signature covers the whole release, because the manifest carries every file's hash |
+| the descriptor | 96 bytes **inside** each image saying what it is — the role `exit-node`, the board, the band, the version. Placed by the build and held by `tools/check-descriptor.py` on every CI build of every board |
+
+### The key, and the secret
+
+The private half lives in **one place**: the `RELEASE_SIGNING_KEY` secret of the
+release workflow. It is never in this repository, in a log, in an artifact or in
+a report. The public half is the one line of
+[`keys/release-keys.txt`](../keys/release-keys.txt), which is also what a build
+of the firmware trusts: `tools/gen-trust-table.py` turns that file into the
+table compiled into every image, so the gate below and a board in the field read
+the same file by the same rules. There is room for three keys, so that a key can
+be replaced by shipping a release that trusts both the old and the new one and
+then one that trusts only the new.
+
+**Until the secret is set, a release is refused** — with the sentence that says
+how to make a key (`python tools/release/manifest.py keygen`) and where its two
+halves go. That is the safe state and not a fault: a board whose build trusts no
+key takes no update at all, and `update` on the console says *no release key in
+this build*.
+
+The specification's test key (`tests/fixtures/firmware/TEST-KEY.txt`) is public
+on purpose. It signs a **dry run** and the fixture release the tests read, and
+nothing else: the signing tool refuses to put it on a release's version or tag,
+the trust-table generator refuses to compile it into a board build, and
+`build_release.py` refuses to publish an image whose bytes carry it.
+
+### The last gate, before anything is published
+
+```
+python tools/release/verify_release.py out/release
+```
+
+Every check of `FIRMWARE-MANIFEST.md` §5 that applies to this product, over the
+files that are about to be published, with the keys a firmware build would trust
+and nothing else:
+
+1. the signature names a trusted key and verifies over `manifest.json`'s bytes;
+2. the manifest validates and its product is this firmware's;
+3. there is an image for each board, `exit-node.<board>.868`;
+4. every file's size and SHA-256 are the manifest's — and `SHA256SUMS` agrees;
+5. every file holds **exactly one** descriptor and it agrees with its entry.
+
+A release that cannot pass it is not published. **A dry run runs the same gate**
+against the test key, so the gate is rehearsed and never met for the first time
+on a release; its `manifest.json` and `manifest.json.sig` are among the run's
+artifacts and nothing is published.
+
+The firmware makes the same five checks on an image it has fetched
+(`src/update/Release.h`), and every refusal carries its check's number — so what
+meshmaster.dk is told and what the console prints are the same five words.
+
+## 6. Afterwards: one pull request, opened by the workflow and merged by you
 
 With the release out, the run opens `release/vX.Y.Z`:
 
@@ -172,7 +237,7 @@ says first, is decided in one place with a test: `tools/release.ps1 -Action
 outcome` (pushed or not, opened or not, merged or not, in; the exit code and the
 summary's first line, out).
 
-## 6. The changelog at the tag
+## 7. The changelog at the tag
 
 `CHANGELOG.md`'s top section is headed with the version `VERSION` names, so that
 the file **reads right at the tag**: at `v0.7.1` the first heading says `v0.7.1`.
@@ -190,7 +255,7 @@ Two things read that file by machine, and both keep working:
 `CHANGELOG.md`: it reads `[meshcore].pin` out of `platformio.ini` and the tag it
 is given. Nothing there changed either.
 
-## 7. The script, and its self-test
+## 8. The script, and its self-test
 
 Every decision above is in [`tools/release.ps1`](../tools/release.ps1) and not in
 shell inside the workflow, so that it can be run twice and tested:

@@ -38,9 +38,9 @@
 #                       build of p1.9-36 takes the library through PlatformIO's own dependency
 #                       finder, not as a component - and the Walter firmware's phase 4 is where
 #                       it first compiles
-#   fixtures            tools/sync-fixtures.ps1 -Verify - the contract fixtures and the
-#                       transcribed companion frames are still meshmaster.dk's bytes and nobody
-#                       edited one here
+#   fixtures            tools/sync-fixtures.ps1 -Verify - the contract fixtures, the transcribed
+#                       companion frames and, since task p1.15-58, the firmware-manifest fixtures
+#                       are still meshmaster.dk's bytes and nobody edited one here
 #   the runners         tools/check-runners.py - no job of any workflow in this directory runs on a
 #                       self-hosted runner, because this repository is public and a fork's pull
 #                       request would otherwise run a stranger's code on the Unraid host (task
@@ -178,6 +178,21 @@ jobs:
           python tools/check-table-bytes.py --self-test
           python tools/check-table-bytes.py --env ${{ matrix.env }} --merged ".pio/build/${{ matrix.env }}/firmware-merged.bin"
 
+      # And the 96 bytes the image says it is (task p1.15-58): exactly one descriptor in the
+      # application image and exactly one in the merged image, with the exit node's role byte,
+      # this board's name, the band and the version this build was given. None would mean a
+      # release nothing can identify; two would mean one nothing can believe - and a linker that
+      # collected the array, or a `pre:` script that did not run, is exactly how either happens.
+      # The self-test first: an image with none, one with two and one whose descriptor fails its
+      # crc, which are the specification's own fixtures.
+      - name: The descriptor inside the image
+        run: |
+          set -euo pipefail
+          python tools/check-descriptor.py --self-test
+          python tools/check-descriptor.py --env ${{ matrix.env }} \
+            --image ".pio/build/${{ matrix.env }}/firmware.bin" \
+            --merged ".pio/build/${{ matrix.env }}/firmware-merged.bin"
+
       # -Werror is on for src/ (platformio.ini's build_src_flags), so a warning of our own has
       # already failed the step above. This is the size of what was built, for the record.
       - name: What was built
@@ -235,6 +250,17 @@ jobs:
         run: |
           ./tools/release.ps1 -Action check
           ./tools/release.ps1 -SelfTest
+
+      # And the half of a release that is signed (task p1.15-58): the specification's own fixtures
+      # re-derived with tools/release/manifest.py - every signature, every descriptor and every
+      # canonical form that tests/fixtures/firmware/index.json records - RFC 8032's first test
+      # vector, and every sentence the release path refuses with: the trust table's, the signing
+      # rule's, the manifest builder's and the last gate's. It ends by writing
+      # tests/fixtures/release again from the tooling and refusing a byte that differs, which is
+      # what proves nobody edited that fixture by hand instead of changing the tooling. Standard
+      # library only, so it runs here before PlatformIO is installed.
+      - name: The release is signed, and the gate says no when it must
+        run: python tools/release/test_release.py
 
       - name: Cache PlatformIO
         uses: actions/cache@v4

@@ -408,3 +408,11 @@ release's plain `.bin`:
       `update`, with no `update slot`.
 - [ ] **⚠ `update slot` on a `two` board writes nothing.** Typed a second
       time, it says the slot is already there and names its offset.
+- [ ] **⚠ The image says what it is, and the keys are there.** `update`'s
+      first two lines: `image  exit-node heltec_v3, band 868, version X.Y.Z+<sha7>`
+      — the board's own name, and the version `status` prints — and
+      `keys  1 release key trusted: 73efdd383a957596`. Neither *carries no
+      descriptor this firmware can read* nor *no release key in this build*
+      may appear on a released image: the first would mean the build did not
+      place the 96 bytes, the second that it trusts nobody and would take no
+      update at all.

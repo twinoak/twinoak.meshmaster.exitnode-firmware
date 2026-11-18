@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "product": "twinoak-exitnode-firmware",
+  "version": "0.0.0-test+1a2b3c4",
+  "tag": "v0.0.0-test",
+  "commit": "1a2b3c4000000000000000000000000000000000",
+  "built_at": "2026-11-18T12:00:00Z",
+  "link": {
+    "major": 0,
+    "minor": 0
+  },
+  "upstream": {
+    "name": "MeshCore",
+    "tag": "companion-v1.18.0",
+    "commit": "81dbae592ffad40b4212bc0b37e82b38da08f4bc"
+  },
+  "images": [
+    {
+      "id": "exit-node.heltec_v3.868",
+      "role": "exit-node",
+      "board": "heltec_v3",
+      "band": "868",
+      "mcu": "esp32s3",
+      "files": [
+        {
+          "use": "ota",
+          "name": "meshmaster-agent-heltec_v3-v0.0.0-test.bin",
+          "format": "bin",
+          "size": 4096,
+          "sha256": "ee87c41ff6ab7cf45f3d5d16341ec179f04dd0fb57c61430446c1c41a3ea8244",
+          "load_address": "0x00010000"
+        },
+        {
+          "use": "factory",
+          "name": "meshmaster-agent-heltec_v3-v0.0.0-test-merged.bin",
+          "format": "bin",
+          "size": 69632,
+          "sha256": "c06fa342e41ac1b4d973eeed42dc5e98470d57139bd621ddee4e4be8c04239ca",
+          "load_address": "0x00000000"
+        }
+      ]
+    },
+    {
+      "id": "exit-node.heltec_v4.868",
+      "role": "exit-node",
+      "board": "heltec_v4",
+      "band": "868",
+      "mcu": "esp32s3",
+      "files": [
+        {
+          "use": "ota",
+          "name": "meshmaster-agent-heltec_v4-v0.0.0-test.bin",
+          "format": "bin",
+          "size": 4096,
+          "sha256": "653f5c6b36b507d9da48ea0b8a22144f065a18651246a9f8e34969a4577eb484",
+          "load_address": "0x00010000"
+        },
+        {
+          "use": "factory",
+          "name": "meshmaster-agent-heltec_v4-v0.0.0-test-merged.bin",
+          "format": "bin",
+          "size": 69632,
+          "sha256": "8669341462c2cf373ea64f03fc926bf1396e9cef2d38b1e33a47ab0c3a71dfde",
+          "load_address": "0x00000000"
+        }
+      ]
+    }
+  ]
+}
