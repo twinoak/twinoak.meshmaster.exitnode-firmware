@@ -30,9 +30,6 @@
 #ifndef COMPANION_DIR
 #error "COMPANION_DIR must be defined; platformio.ini's [env:native] does it"
 #endif
-#ifndef AHEAD_FIXTURES_DIR
-#error "AHEAD_FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
-#endif
 
 namespace {
 
@@ -41,19 +38,6 @@ namespace fs = std::filesystem;
 std::string fixture(const std::string& name) {
   std::ifstream in(fs::path(FIXTURES_DIR) / (name + ".json"), std::ios::binary);
   EXPECT_TRUE(in.good()) << "no such contract fixture: " << name;
-  std::ostringstream all;
-  all << in.rdbuf();
-  std::string text = all.str();
-  while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
-  return text;
-}
-
-// A fixture meshmaster.dk has not put on its master yet, written here from the line of the task
-// that needs it (tests/fixtures/contracts-ahead/README.md, task p1.15-56). Read exactly as a
-// copied one is; the sync replaces it with the copied file, which must be the same bytes.
-std::string ahead(const std::string& name) {
-  std::ifstream in(fs::path(AHEAD_FIXTURES_DIR) / (name + ".json"), std::ios::binary);
-  EXPECT_TRUE(in.good()) << "no such waiting fixture: " << name;
   std::ostringstream all;
   all << in.rdbuf();
   std::string text = all.str();
@@ -163,9 +147,9 @@ TEST(TelemetryResult, TheSameInputMakesTheDotNetFixtureByteForByte) {
 
 // The two neighbours of `NeighboursResult.json` and a repeater that says it has seventeen:
 // `NeighboursResultTotal.json`, which is the same record with the count the firmware now writes
-// (task p1.15-56, meshmaster.dk's task 239 deliverable 1). It is a **waiting** fixture until the
-// sync brings the real one; `NeighboursResult.json` itself is untouched and is what a listing of
-// an exit node that does not write the count yet still looks like.
+// (task p1.15-56, meshmaster.dk's task 239 deliverable 1). `NeighboursResult.json` itself is
+// untouched and is what a listing of an exit node that does not write the count yet still looks
+// like.
 TEST(NeighboursResult, TheSameInputAndTheRepeatersOwnCountMakeTheDotNetFixtureByteForByte) {
   mm::Neighbour n[2];
   std::snprintf(n[0].prefix, sizeof n[0].prefix, "a1");
@@ -178,7 +162,7 @@ TEST(NeighboursResult, TheSameInputAndTheRepeatersOwnCountMakeTheDotNetFixtureBy
   char out[512];
   const std::size_t len = mm::writeNeighboursResult(n, 2, 17, out, sizeof out);
   ASSERT_GT(len, 0u);
-  EXPECT_EQ(std::string(out, len), ahead("NeighboursResultTotal"));
+  EXPECT_EQ(std::string(out, len), fixture("NeighboursResultTotal"));
   // The copied fixture is the same record without the count, and it is not edited here: the two
   // neighbours and their order are the same bytes up to where it ends.
   const std::string whole = fixture("NeighboursResult");
