@@ -29,6 +29,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include <agent/AgentLoop.h>
 #include <agent/Envelopes.h>
@@ -38,17 +39,28 @@
 #ifndef FIXTURES_DIR
 #error "FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
 #endif
+#ifndef AHEAD_FIXTURES_DIR
+#error "AHEAD_FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
+#endif
 
 namespace {
 
-std::string readFixture(const char* name) {
-  std::ifstream in(std::string(FIXTURES_DIR) + "/" + name, std::ios::binary);
+std::string readOne(const std::string& dir, const char* name) {
+  std::ifstream in(dir + "/" + name, std::ios::binary);
   std::ostringstream all;
   all << in.rdbuf();
   std::string text = all.str();
   while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
   return text;
 }
+
+std::string readFixture(const char* name) { return readOne(FIXTURES_DIR, name); }
+
+// A fixture that is **waiting for a sync**: an envelope written here from the line of the task
+// that needs it, because meshmaster.dk has not put it on its master yet
+// (tests/fixtures/contracts-ahead/README.md). Read exactly as a copied one is; when the sync
+// brings the real file the two must be the same bytes and this reader goes.
+std::string readAhead(const char* name) { return readOne(AHEAD_FIXTURES_DIR, name); }
 
 // The thirteen types of API §3, in the order MeshMaster.Contracts' JobTypes.All gives them -
 // which is the order the fixture carries. Since task 05 that is the firmware's own list,
@@ -622,6 +634,213 @@ TEST(Observations, ANameFromAStrangerIsEscapedAndNeverBreaksTheBody) {
   ASSERT_GT(n, 0u);
   EXPECT_NE(std::string::npos,
             std::string(out, n).find("\"name\":\"he said \\\"hi\\\" \\\\ back\""));
+}
+
+// ---- the update (task p1.15-61; meshmaster.dk's task p4.42-244) -------------------------------
+
+// The member's own line, as the task carries it: the table word, and the ask in hand with the
+// newest step of its journal.
+TEST(Update, TheSameInputMakesTheWaitingFixtureByteForByte) {
+  const std::string fixture = readAhead("AgentHeartbeatUpdate.json");
+  ASSERT_FALSE(fixture.empty()) << "tests/fixtures/contracts-ahead/AgentHeartbeatUpdate.json is missing";
+  const std::string member = readAhead("HeartbeatUpdate.json");
+  ASSERT_FALSE(member.empty());
+
+  mm::HeartbeatUpdate update;
+  update.table = "one";
+  update.hasAsk = true;
+  update.id = 17;
+  update.step = "proving";
+
+  const mm::ErrorCounter errors[] = {{"uplink", 0}};
+  mm::Heartbeat hb = theFixturesSample(errors, 1);
+  hb.hasNextCheckInS = true;
+  hb.nextCheckInS = 3600;
+  hb.hasMaxTransactionsThisWake = true;
+  hb.maxTransactionsThisWake = 12;
+  hb.update = &update;
+
+  EXPECT_EQ(fixture, heartbeatJson(hb));
+
+  // And the two files are one sample, as the observer's pair are: the update file is
+  // AgentHeartbeat.json with the member appended, and the member on its own is a file of its own
+  // that the heartbeat holds verbatim.
+  const std::string withWake = readFixture("AgentHeartbeat.json");
+  ASSERT_FALSE(withWake.empty());
+  EXPECT_EQ(withWake.substr(0, withWake.size() - 1), fixture.substr(0, withWake.size() - 1))
+      << "AgentHeartbeatUpdate.json is no longer AgentHeartbeat.json plus the update";
+  EXPECT_NE(std::string::npos, fixture.find(member)) << "the heartbeat does not hold HeartbeatUpdate.json";
+}
+
+// The one that matters for every consumer that cannot be updated from the server - the Walter,
+// and this firmware built with no release key: **no provider, no member, and the body does not
+// move by a byte**.
+TEST(Update, AnAgentWithNoUpdateWritesTheHeartbeatItWroteBefore) {
+  const std::string noWake = readFixture("AgentHeartbeatNoWake.json");
+  ASSERT_FALSE(noWake.empty());
+  const mm::ErrorCounter errors[] = {{"uplink", 0}};
+  const mm::Heartbeat hb = theFixturesSample(errors, 1);
+  EXPECT_EQ(nullptr, hb.update) << "the default is to carry no update";
+  const std::string json = heartbeatJson(hb);
+  EXPECT_EQ(noWake, json);
+  EXPECT_EQ(std::string::npos, json.find("update"));
+}
+
+// No ask in hand is the usual state of a board that can be updated: the table word alone, and
+// neither `id` nor `step`.
+TEST(Update, WithNoAskInHandTheMemberIsTheTableWordAlone) {
+  mm::HeartbeatUpdate update;
+  update.table = "two";
+  const mm::ErrorCounter errors[] = {{"uplink", 0}};
+  mm::Heartbeat hb = theFixturesSample(errors, 1);
+  hb.update = &update;
+  const std::string json = heartbeatJson(hb);
+  EXPECT_NE(std::string::npos, json.find("\"update\":{\"table\":\"two\"}}")) << json;
+  EXPECT_EQ(std::string::npos, json.find("\"id\""));
+  EXPECT_EQ(std::string::npos, json.find("\"step\""));
+}
+
+// The member is the heartbeat's **last**, after the observer and the flood scope: a board that is
+// an observer with a scope and an update in hand writes all three, in the record's order.
+TEST(Update, TheMemberIsTheLastOfTheHeartbeat) {
+  const std::array<mm::HeartbeatObserverSlot, 2> slots = theFixturesSlots();
+  mm::HeartbeatObserver observer;
+  observer.iata = "AAR";
+  observer.hasSlots = true;
+  observer.slots = slots.data();
+  observer.slotCount = static_cast<int>(slots.size());
+  mm::HeartbeatFlood flood;
+  flood.scope = "dk";
+  mm::HeartbeatUpdate update;
+  update.table = "two";
+  update.hasAsk = true;
+  update.id = 42;
+  update.step = "fetching";
+
+  const mm::ErrorCounter errors[] = {{"uplink", 0}};
+  mm::Heartbeat hb = theFixturesSample(errors, 1);
+  hb.observer = &observer;
+  hb.flood = &flood;
+  hb.update = &update;
+  const std::string json = heartbeatJson(hb);
+  const size_t at_observer = json.find("\"observer\":");
+  const size_t at_flood = json.find("\"flood\":");
+  const size_t at_update = json.find("\"update\":");
+  ASSERT_NE(std::string::npos, at_observer);
+  ASSERT_NE(std::string::npos, at_flood);
+  ASSERT_NE(std::string::npos, at_update);
+  EXPECT_LT(at_observer, at_flood);
+  EXPECT_LT(at_flood, at_update);
+  EXPECT_NE(std::string::npos, json.find("\"update\":{\"table\":\"two\",\"id\":42,\"step\":\"fetching\"}}")) << json;
+}
+
+// ---- the result (task p1.15-61) --------------------------------------------------------------
+
+// The journal as the writer reads one: a vector, because a test keeps its entries as values and
+// the board keeps them as one text (src/update/Ask.h).
+class Entries final : public mm::UpdateJournal {
+ public:
+  struct Line {
+    uint32_t at;
+    std::string step;
+    std::string note;
+  };
+  std::vector<Line> lines;
+  int count() const override { return static_cast<int>(lines.size()); }
+  bool at(int i, uint32_t& when, const char*& step, const char*& note) const override {
+    if (i < 0 || static_cast<size_t>(i) >= lines.size()) return false;
+    when = lines[static_cast<size_t>(i)].at;
+    step = lines[static_cast<size_t>(i)].step.c_str();
+    note = lines[static_cast<size_t>(i)].note.empty() ? nullptr : lines[static_cast<size_t>(i)].note.c_str();
+    return true;
+  }
+};
+
+// The sample of the task's own line: every field the shape has, so that a parser meets each.
+TEST(UpdateResultBytes, TheSameInputMakesTheWaitingFixtureByteForByte) {
+  const std::string fixture = readAhead("UpdateResult.json");
+  ASSERT_FALSE(fixture.empty()) << "tests/fixtures/contracts-ahead/UpdateResult.json is missing";
+
+  Entries journal;
+  journal.lines.push_back({1795165200u, "check", "table one, 0.7.2 running"});          // 09:00:00
+  journal.lines.push_back({1795165201u, "adding-slot", ""});                            // 09:00:01
+  journal.lines.push_back({1795165240u, "fetching", "0.8.0, 1432000 bytes"});           // 09:00:40
+  journal.lines.push_back({1795165270u, "switching", ""});                              // 09:01:10
+  journal.lines.push_back({1795165290u, "proving", "mesh up, wifi up"});                // 09:01:30
+  journal.lines.push_back({1795165890u, "rolling-back", "no heartbeat answered in 10 min"});
+  journal.lines.push_back({1795165910u, "restored", "0.7.2 running"});
+
+  mm::UpdateResult result;
+  result.outcome = "rolledBack";
+  result.fromVersion = "0.7.2";
+  result.toVersion = "0.7.2";
+  result.refusal = "check";
+  result.hasCheck = true;
+  result.check = 4;
+  result.journal = &journal;
+
+  char out[2048];
+  const size_t n = mm::writeUpdateResult(result, out, sizeof out);
+  ASSERT_GT(n, 0u);
+  EXPECT_EQ(n, std::strlen(out));
+  EXPECT_EQ(fixture, std::string(out, n));
+
+  // And each of its journal entries is `FirmwareJournalEntry`'s shape, which is a file of its
+  // own: the one of the fixture tree carries an `at`, a `step` and a `note`, and this writer's
+  // entries are the same three members in the same order.
+  const std::string entry = readFixture("FirmwareJournalEntry.json");
+  ASSERT_FALSE(entry.empty());
+  EXPECT_EQ(0u, entry.find("{\"at\":"));
+  EXPECT_NE(std::string::npos, std::string(out, n).find("{\"at\":\"2026-11-20T09:01:30Z\",\"step\":\"proving\",\"note\":\"mesh up, wifi up\"}"));
+}
+
+// A commit says nothing about a refusal, and an empty journal is an empty array and not an absent
+// member: the record's list is not nullable.
+TEST(UpdateResultBytes, ACommitLeavesTheRefusalAndTheCheckOutAndKeepsAnEmptyArray) {
+  mm::UpdateResult result;
+  result.outcome = "committed";
+  result.fromVersion = "0.7.2+4a4e791";
+  result.toVersion = "0.8.0+1a2b3c4";
+  char out[512];
+  const size_t n = mm::writeUpdateResult(result, out, sizeof out);
+  ASSERT_GT(n, 0u);
+  EXPECT_EQ(std::string("{\"outcome\":\"committed\",\"fromVersion\":\"0.7.2+4a4e791\","
+                        "\"toVersion\":\"0.8.0+1a2b3c4\",\"journal\":[]}"),
+            std::string(out, n));
+}
+
+// A note that is there and one that is not: an empty note is left out of the object, which is
+// what `{"at":...,"step":"adding-slot"}` is in the sample.
+TEST(UpdateResultBytes, AnEmptyNoteIsLeftOutOfTheEntry) {
+  Entries journal;
+  journal.lines.push_back({1795165201u, "adding-slot", ""});
+  mm::UpdateResult result;
+  result.outcome = "stuck";
+  result.fromVersion = "a";
+  result.toVersion = "a";
+  result.journal = &journal;
+  char out[512];
+  const size_t n = mm::writeUpdateResult(result, out, sizeof out);
+  ASSERT_GT(n, 0u);
+  EXPECT_NE(std::string::npos,
+            std::string(out, n).find("\"journal\":[{\"at\":\"2026-11-20T09:00:01Z\",\"step\":\"adding-slot\"}]"))
+      << std::string(out, n);
+}
+
+// A body that does not fit is 0 and not a half-written one, which is the rule every writer here
+// lives by: the caller drops the oldest entries and asks again (src/update/Ask.h).
+TEST(UpdateResultBytes, ABodyThatDoesNotFitIsZero) {
+  Entries journal;
+  for (int i = 0; i < 40; i++) journal.lines.push_back({1795165200u, "proving", std::string(90, 'x')});
+  mm::UpdateResult result;
+  result.outcome = "rolledBack";
+  result.fromVersion = "0.7.2";
+  result.toVersion = "0.7.2";
+  result.journal = &journal;
+  char out[256];
+  EXPECT_EQ(0u, mm::writeUpdateResult(result, out, sizeof out));
+  char room[8192];
+  EXPECT_GT(mm::writeUpdateResult(result, room, sizeof room), 0u);
 }
 
 // ---- what a name is allowed to be ---------------------------------------------------------------

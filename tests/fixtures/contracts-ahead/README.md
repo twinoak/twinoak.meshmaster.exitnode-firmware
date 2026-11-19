@@ -23,6 +23,17 @@ first item of the pile's `FOLLOWUPS.md`.
 | File | Written for | From meshmaster.dk's |
 |---|---|---|
 | `NeighboursResultTotal.json` | task p1.15-56 | task 239, deliverable 1 |
+| `HeartbeatUpdate.json` | task p1.15-61 | task 244, the contract's shape 1 |
+| `AgentHeartbeatUpdate.json` | task p1.15-61 | task 244, the contract's shape 1 |
+| `UpdateAsk.json` | task p1.15-61 | task 244, the contract's shape 2 |
+| `HeartbeatReplyUpdate.json` | task p1.15-61 | task 244, the contract's shape 2 |
+| `UpdateResult.json` | task p1.15-61 | task 244, the contract's shape 3 |
+
+The two pairs **nest**, as the copied tree's pairs do:
+`AgentHeartbeatUpdate.json` is the copied `AgentHeartbeat.json` with
+`HeartbeatUpdate.json` appended as its last member, and
+`HeartbeatReplyUpdate.json` holds `UpdateAsk.json` verbatim.
+`test/test_contract_fixtures` holds all three relations.
 
 [`docs/upstream.md`](../../../docs/upstream.md) is the page: there first, here
 second, and the sync's copy is the one that holds.

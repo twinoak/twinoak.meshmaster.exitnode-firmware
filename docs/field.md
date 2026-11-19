@@ -177,6 +177,34 @@ last five newest first: when, uptime at the time, why
   fifty lines, the same bytes the port printed when nobody was watching. That
   is where the reason usually is.
 
+**The page's Firmware tab says *handed over*, and then nothing for a while.**
+That is the update running, and it is normal: since the release of task p1.15-61
+a press of *Update* goes out in the reply to this board's next heartbeat — within
+two minutes — and the board then does the steps itself, restarting once or twice.
+The tab shows the step the board's own heartbeat last carried, which is all the
+server hears until the end:
+
+| the step | what the board is doing |
+|---|---|
+| `check` | deciding whether it can take this release at all |
+| `adding-slot` | writing the one sector of its partition table; the restart follows |
+| `fetching` | downloading the release into the slot that is not running |
+| `switching` | the boot choice is set and the restart follows |
+| `proving` | the new firmware is running and has ten minutes to prove itself |
+
+and then one of four endings, which is what the tab finally says:
+
+| the ending | what it means, and what to do |
+|---|---|
+| *updated to X* (`committed`) | the new firmware runs and has proved itself. Nothing to do |
+| *rolled back* | it ran, did not prove itself, and the old one runs again. **Nothing to do at the window**: the exit node is itself again. The journal says what was missing — no wifi, no server, or *restarted during the trial* — so fix that and press *Update* again |
+| *refused* | nothing was switched, and the word says why: `inProgress` (an update was already in hand), `table` (this board's table is one the firmware will not write — `update` at the console says so), `current` (the release asked for is the one it runs), `fetch` (the release could not be downloaded) or `check` with a number 1 to 5 (the signature, the manifest, the image for this board, the file's hash, the descriptor) |
+| *stuck* | the board cannot say what happened. Walk to it: `update` on the console prints the ask, the step it reached and the journal |
+
+A board whose `update` says `one` or `other` on the console is a board the server
+will **refuse** with `table`; `update slot` is what makes a `one` board ready, and
+from the release of p1.15-61 the firmware does that itself at the first ask.
+
 **The page says *online* but the jobs come back `unreachable`.** That is the
 radio, not the network: `mesh` to see whether the repeater is heard at all, and
 a `discover` from its page to find a path. Moving the board a metre is often
@@ -495,6 +523,39 @@ last      committed: 0.8.0+1a2b3c4, from 0.7.2+4a4e791, switched at 2026-11-20T1
   the open job as it always did, and the version it shows is simply the version
   that is running. The trial is on the console and in the log.
 
+### Started from meshmaster.dk instead
+
+Since the release of task p1.15-61 everything above can be done by one press on
+the exit node's Firmware tab, and the board does the steps by itself. It is the
+same machine: the same table, the same fetch, the same switch, the same ten
+minutes.
+
+- **The press reaches the board in the reply to its next heartbeat**, which is
+  thirty seconds to two minutes away. There is no job for it — a job belongs to a
+  repeater — and nothing is pushed to the board: it asks, as it always does.
+- **The board adds the slot itself.** A board that still says `one` does not need
+  `update slot` typed: the first ask writes the sector and restarts, and the ask
+  goes on after that restart without being asked again. A power cut in that one
+  moment leaves a board that needs a merged image over USB, and it is the only
+  moment that can.
+- **No job is claimed while it runs**, and a job that was already running is
+  finished and its result posted first. The adverts the radio heard still go to
+  the server throughout.
+- **One result, at the end**, posted until the server takes it — a restart in the
+  middle does not lose it. `update` on the console prints the same thing: the ask,
+  its step, and how it ended.
+- **An ask is taken once.** The same press again while it runs changes nothing;
+  the same press after it ended has the same result posted once more, and nothing
+  is done twice.
+- **Nothing starts an update but a person.** A release existing starts nothing.
+
+```
+> update
+...
+asked     update 17 in hand at `fetching`: release 9, 0.8.0+1a2b3c4, 1446640 bytes
+          no job is claimed until it has ended; 0.7.2+4a4e791 is what was running
+```
+
 ### ⚠ Waiting for a board on the bench
 
 These cannot be checked without hardware, and they come **before any owner is
@@ -581,4 +642,33 @@ running and release B fetched:
       any release through the web flasher. After the flash the board restarts
       once more by itself and **that release runs**; `update` then shows it as
       the version it was switched to, from the one that was running.
+
+**With meshmaster.dk's pile 4.42 deployed**, release A on a board that has
+**never had a second slot** and release B released or canary for it, on a **V3**
+and on a **V4**:
+
+- [ ] **⚠ *Update to B* commits, from a board that says `one`.** Press *Update*
+      on the exit node's Firmware tab: within two minutes the page says
+      *handed over*; the board restarts **twice** (once for the slot, once into
+      B); the page ends *updated to B* with a journal of `check`, `adding-slot`,
+      `fetching`, `switching`, `proving` and the commit. `update` at the console
+      says `asked     update <id> ended committed` and `two`, and `status` shows
+      the same 64 hex characters it showed before.
+- [ ] **⚠ The same press again refuses.** The page says *the version is the one
+      it runs* — the refusal `current` — and nothing is fetched: the download
+      count against the release does not move.
+- [ ] **⚠ A job queued for a repeater of that exit node while the update runs is
+      carried after it, and not lost.** Queue a `status` for one of its repeaters
+      from the moment the page says *handed over*; it is claimed and run once the
+      update has ended, and its result is on the job's page.
+- [ ] **⚠ A job that was already running is finished first.** Start a
+      `config.read` (eleven minutes at two transactions a minute), press
+      *Update* while it runs: the job finishes and its result is posted, and only
+      then does the board begin the update's steps.
+- [ ] **⚠ The result survives a restart.** With the WiFi off, let an update be
+      refused (`update fetch` cannot reach the server), then `reboot`, then put
+      the WiFi back: within one heartbeat the page shows the result.
+- [ ] **⚠ A board on an `other` table is refused and nothing is written.** On a
+      board whose `update` says `other`, the press ends *refused* with `table`
+      and the console's `update` shows the same table it showed before.
 

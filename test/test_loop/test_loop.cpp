@@ -963,6 +963,257 @@ TEST_F(LoopTest, AProviderThatSaysNoLeavesTheMemberOutAndMovesNothingElse) {
   EXPECT_EQ(members, fake::keysOf(without));
 }
 
+// ---------------------------------------------------------------------------------------------
+// The update in the heartbeat, the ask in its reply, and the result's post (task p1.15-61;
+// meshmaster.dk's task p4.42-244)
+//
+// The loop knows nothing about slots, releases, signatures or trials: a consumer that can be
+// updated from the server hands it an `IUpdateProvider`, and the loop carries three things
+// between it and the server - the member it writes, the ask it reads, and the one result it
+// posts - and decides none of them. These tests are the seam, not the machine: the machine is
+// test/test_update_ask's and the bytes are test/test_envelopes'.
+
+// A provider as thin as the interface allows: it answers what the test told it to and writes down
+// everything the loop handed it.
+class FakeUpdateProvider : public mm::IUpdateProvider {
+ public:
+  bool describeUpdate(mm::HeartbeatUpdate& out) override {
+    asked++;
+    if (!canBeUpdated) return false;
+    out.table = table;
+    out.hasAsk = hasAsk;
+    out.id = id;
+    out.step = step;
+    return true;
+  }
+
+  void onUpdateAsk(const mm::UpdateAsk& ask) override { asks.push_back(ask); }
+
+  void onHeartbeatAnswered(const mm::HeartbeatUpdate& posted) override {
+    answered++;
+    lastAnsweredStep = posted.step == nullptr ? "" : posted.step;
+    lastAnsweredId = posted.hasAsk ? posted.id : 0;
+  }
+
+  bool resultToPost(long long& outId, const char*& body, size_t& len) override {
+    if (!resultWaits) return false;
+    outId = id;
+    body = result.c_str();
+    len = result.size();
+    return true;
+  }
+
+  void onResultPosted(long long postedId, bool taken, bool notFound) override {
+    posted.push_back({postedId, taken, notFound});
+    if (taken || notFound) resultWaits = false;
+  }
+
+  bool holdsJobs() const override { return holds; }
+
+  struct Posted {
+    long long id;
+    bool taken;
+    bool notFound;
+  };
+
+  bool canBeUpdated = true;
+  const char* table = "two";
+  bool hasAsk = false;
+  long long id = 17;
+  const char* step = nullptr;
+  bool holds = false;
+  bool resultWaits = false;
+  std::string result = R"({"outcome":"committed","fromVersion":"0.7.2","toVersion":"0.8.0","journal":[]})";
+
+  int asked = 0;
+  int answered = 0;
+  std::string lastAnsweredStep;
+  long long lastAnsweredId = 0;
+  std::vector<mm::UpdateAsk> asks;
+  std::vector<Posted> posted;
+};
+
+TEST_F(LoopTest, AHeartbeatWithNoUpdateProviderIsTheHeartbeatItAlwaysWas) {
+  linkUp();
+  ASSERT_TRUE(untilACall());  // config
+  ASSERT_TRUE(untilACall());  // heartbeat
+  ASSERT_EQ(server.heartbeats().size(), 1u);
+  const std::string hb = server.heartbeats()[0];
+  EXPECT_EQ(hb.find("update"), std::string::npos) << hb;
+  EXPECT_TRUE(fake::followsShapeOf(hb, fake::contract("AgentHeartbeatNoWake"))) << hb;
+
+  // And a reply that carries an ask is read by nobody and breaks nothing: a consumer that cannot
+  // be updated takes the rest of the reply as it always did.
+  server.askForAnUpdate(17, 9);
+  while (server.heartbeats().size() < 2 && untilACall()) {
+  }
+  ASSERT_EQ(server.heartbeats().size(), 2u);
+  EXPECT_TRUE(server.updateResults().empty());
+}
+
+TEST_F(LoopTest, AProvidersMemberGoesIntoTheHeartbeatAndTheAskInTheReplyGoesToTheProvider) {
+  FakeUpdateProvider provider;
+  provider.table = "one";
+  loop.setUpdateProvider(&provider);
+  server.askForAnUpdate(17, 9);
+
+  linkUp();
+  ASSERT_TRUE(untilACall());  // config
+  ASSERT_TRUE(untilACall());  // heartbeat
+  ASSERT_EQ(server.heartbeats().size(), 1u);
+  const std::string hb = server.heartbeats()[0];
+  EXPECT_EQ(provider.asked, 1) << "asked once per heartbeat, and only at a heartbeat";
+  EXPECT_NE(hb.find("\"update\":{\"table\":\"one\"}"), std::string::npos) << hb;
+
+  // The ask arrives as it came, and the loop decided nothing about it.
+  ASSERT_EQ(provider.asks.size(), 1u);
+  EXPECT_EQ(provider.asks[0].id, 17);
+  EXPECT_EQ(provider.asks[0].releaseId, 9);
+  EXPECT_STREQ(provider.asks[0].product, "twinoak-exitnode-firmware");
+  EXPECT_STREQ(provider.asks[0].version, "0.8.0");
+  EXPECT_STREQ(provider.asks[0].base, "/agent/v1/firmware/9");
+  EXPECT_EQ(provider.asks[0].size, 1432000u);
+
+  // And the member the loop wrote is handed back when that heartbeat was answered, which is how a
+  // trial's third condition can be *a heartbeat that said `proving`* without this library knowing
+  // there is a trial.
+  EXPECT_EQ(provider.answered, 1);
+  EXPECT_EQ(provider.lastAnsweredId, 0) << "nothing was in hand at that heartbeat";
+
+  // The next heartbeat asks again and takes the answer as it is then.
+  provider.table = "two";
+  provider.hasAsk = true;
+  provider.step = "proving";
+  while (server.heartbeats().size() < 2 && untilACall()) {
+  }
+  ASSERT_EQ(server.heartbeats().size(), 2u);
+  const std::string again = server.heartbeats()[1];
+  EXPECT_NE(again.find("\"update\":{\"table\":\"two\",\"id\":17,\"step\":\"proving\"}"), std::string::npos)
+      << again;
+  EXPECT_EQ(provider.answered, 2);
+  EXPECT_EQ(provider.lastAnsweredStep, "proving");
+  EXPECT_EQ(provider.lastAnsweredId, 17);
+  // The same ask came again, and the loop handed it over again: what is new is the provider's to
+  // decide, because only it knows what it has in hand.
+  EXPECT_EQ(provider.asks.size(), 2u);
+}
+
+// A provider that answers false is a build with no release key: the member is left out exactly as
+// it is for a consumer that never had one, and nothing else of the body moves with it.
+TEST_F(LoopTest, AnUpdateProviderThatSaysNoLeavesTheMemberOutAndMovesNothingElse) {
+  FakeUpdateProvider provider;
+  loop.setUpdateProvider(&provider);
+  linkUp();
+  ASSERT_TRUE(untilACall());  // config
+  ASSERT_TRUE(untilACall());  // heartbeat
+  ASSERT_EQ(server.heartbeats().size(), 1u);
+  const std::string with = server.heartbeats()[0];
+  EXPECT_NE(with.find("\"update\""), std::string::npos) << with;
+
+  provider.canBeUpdated = false;
+  while (server.heartbeats().size() < 2 && untilACall()) {
+  }
+  ASSERT_EQ(server.heartbeats().size(), 2u);
+  const std::string without = server.heartbeats()[1];
+  EXPECT_EQ(without.find("update"), std::string::npos) << without;
+  EXPECT_EQ(provider.answered, 1) << "a heartbeat that carried no member is not handed back";
+
+  std::vector<std::string> members = fake::keysOf(with);
+  ASSERT_FALSE(members.empty());
+  EXPECT_EQ(members.back(), "update") << "the update is the record's last member";
+  members.pop_back();
+  EXPECT_EQ(members, fake::keysOf(without));
+}
+
+// Deliverable 6: the result goes out at each heartbeat's turn until the server takes it.
+TEST_F(LoopTest, TheResultIsPostedAtEachHeartbeatsTurnUntilItIsTaken) {
+  FakeUpdateProvider provider;
+  provider.resultWaits = true;
+  loop.setUpdateProvider(&provider);
+  server.failUpdateResults(fake::FakeUplink::Fault::Unreachable, 2);
+
+  linkUp();
+  ASSERT_TRUE(untilACall());  // config
+  while (server.updateResults().size() < 3 && untilACall()) {
+  }
+  ASSERT_EQ(server.updateResults().size(), 3u);
+  EXPECT_EQ(server.updateResults()[0].first, 17);
+  EXPECT_EQ(server.updateResults()[0].second, provider.result) << "the bytes the provider gave, unchanged";
+  ASSERT_EQ(provider.posted.size(), 3u);
+  EXPECT_FALSE(provider.posted[0].taken);
+  EXPECT_FALSE(provider.posted[0].notFound);
+  EXPECT_TRUE(provider.posted[2].taken);
+
+  // And then no more: the result was taken and the provider stopped offering it.
+  const size_t taken = server.updateResults().size();
+  for (int i = 0; i < 20 && untilACall(); i++) {
+  }
+  EXPECT_EQ(server.updateResults().size(), taken);
+
+  // The post goes **after** the heartbeat that armed it and before any claim, which is the order
+  // of one pass: nothing is said about an update that the heartbeat has not already carried.
+  const std::vector<std::string>& calls = server.calls();
+  const auto heartbeat = std::find(calls.begin(), calls.end(), "heartbeat");
+  const auto result = std::find(calls.begin(), calls.end(), "update-result");
+  ASSERT_NE(heartbeat, calls.end());
+  ASSERT_NE(result, calls.end());
+  EXPECT_LT(heartbeat - calls.begin(), result - calls.begin());
+}
+
+// The one 404 stops it, and it is not a failure: the loop does not back off over it.
+TEST_F(LoopTest, AResultAnsweredWithTheOneFourOhFourIsNotPostedAgain) {
+  FakeUpdateProvider provider;
+  provider.resultWaits = true;
+  loop.setUpdateProvider(&provider);
+  server.failUpdateResults(fake::FakeUplink::Fault::NotFound, 1);
+
+  linkUp();
+  ASSERT_TRUE(untilACall());  // config
+  while (server.updateResults().empty() && untilACall()) {
+  }
+  ASSERT_EQ(server.updateResults().size(), 1u);
+  ASSERT_EQ(provider.posted.size(), 1u);
+  EXPECT_FALSE(provider.posted[0].taken);
+  EXPECT_TRUE(provider.posted[0].notFound);
+  EXPECT_EQ(loop.counters().httpFailures, 0u) << "the one 404 is an answer, not a failure to count";
+  EXPECT_EQ(loop.retrySeconds(), 0u) << "and it earns no backoff";
+
+  for (int i = 0; i < 20 && untilACall(); i++) {
+  }
+  EXPECT_EQ(server.updateResults().size(), 1u);
+}
+
+// Deliverable 7: no claim while the provider holds the jobs, and the claim the server asked for is
+// made once it lets go. The observation batch still goes out meanwhile.
+TEST_F(LoopTest, NoClaimIsMadeWhileTheProviderHoldsTheJobsAndTheOneAskedForFollowsAfter) {
+  FakeUpdateProvider provider;
+  provider.holds = true;
+  loop.setUpdateProvider(&provider);
+  server.askForAnUpdate(17, 9, /*jobsWaiting=*/true);
+  server.queue(fake::Job(16001, "status").leasedUntil(kLease).json());
+
+  linkUp();
+  ASSERT_TRUE(untilACall());  // config
+  ASSERT_TRUE(untilACall());  // heartbeat
+  ASSERT_EQ(server.heartbeats().size(), 1u);
+
+  // The adverts the radio heard still go out while an update is in hand: this board is still an
+  // exit node and what it heard is not the update's business.
+  for (uint8_t i = 0; i < mm::kObservationBatchSize; i++) loop.ring().push(advert(i, platform.millis()));
+  for (int i = 0; i < 30 && untilACall(); i++) {
+  }
+  EXPECT_EQ(server.claimCalls(), 0) << "no job is claimed while an update is in hand";
+  EXPECT_FALSE(server.observations().empty()) << "and the observation batch still goes out";
+
+  // The update ends. The claim the heartbeat asked for is made now, without the server having to
+  // say so again.
+  provider.holds = false;
+  while (server.claimCalls() == 0 && untilACall()) {
+  }
+  EXPECT_EQ(server.claimCalls(), 1);
+  EXPECT_EQ(server.queuedJobs(), 0u);
+}
+
 TEST_F(LoopTest, AWakeAsksForNoMoreJobsThanItsCapCanRunAndLeavesTheRestOnTheServer) {
   // Three traces waiting and a cap of two transactions: a trace is one transaction and no login
   // (EXIT-NODES §7), but the claim is sized before any type is known, so the cap buys one job at

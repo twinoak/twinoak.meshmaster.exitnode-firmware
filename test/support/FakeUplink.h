@@ -48,7 +48,7 @@ struct PostedResult {
 class FakeUplink : public mm::IUplink {
  public:
   // What the server answered, where it was not 200.
-  enum class Fault : uint8_t { None, Unreachable, Unauthorized, RateLimited, ServerError, Discard };
+  enum class Fault : uint8_t { None, Unreachable, Unauthorized, RateLimited, ServerError, Discard, NotFound };
 
   explicit FakeUplink(FakePlatform& platform) : platform_(platform) {
     configJson_ = contract("AgentConfig");
@@ -97,6 +97,34 @@ class FakeUplink : public mm::IUplink {
 
   void setServerTime(uint32_t epoch) { serverEpoch_ = epoch; }
 
+  // A reply that carries an **ask for an update** (task p1.15-61): the members of the waiting
+  // fixture `tests/fixtures/contracts-ahead/HeartbeatReplyUpdate.json`, with this fake's own
+  // server time so that nothing of the clock moves, and `jobsWaiting` as a test wants it - the
+  // real server sends an exit node no job while an ask is out, and the board's own hold is what
+  // these tests are for.
+  void askForAnUpdate(long long id, long long releaseId, bool jobsWaiting = false) {
+    char iso[32];
+    mm::formatUtc(serverEpoch_ != 0 ? serverEpoch_ : platform_.clock().now(), iso, sizeof iso);
+    char json[640];
+    std::snprintf(json, sizeof json,
+                  "{\"serverTime\":\"%s\",\"budget\":{\"maxTransactionsPerMinute\":60,"
+                  "\"minGapSeconds\":1},\"pollIntervalS\":30,\"jobsWaiting\":%s,"
+                  "\"update\":{\"id\":%lld,\"releaseId\":%lld,"
+                  "\"product\":\"twinoak-exitnode-firmware\",\"version\":\"0.8.0\","
+                  "\"base\":\"/agent/v1/firmware/%lld\",\"expectedSha256\":"
+                  "\"3b1f0c4e5d6a79880817a6b5c4d3e2f1a0b9c8d7e6f5041322314051607f8e9d\","
+                  "\"size\":1432000}}",
+                  iso, jobsWaiting ? "true" : "false", id, releaseId, releaseId);
+    heartbeatReplyJson_ = json;
+  }
+
+  // The next `calls` posts of an update's result answer this instead of 200. `Fault::NotFound` is
+  // the one 404 - an id that is not this exit node's - which is an answer and not a failure.
+  void failUpdateResults(Fault fault, int calls) {
+    updateFault_ = fault;
+    updateFaultCalls_ = calls;
+  }
+
   // Every batch id this fake has been handed, whether its answer reached the board or not: a
   // post under an id that is in here is answered *had it already*, as the server answers one.
   const std::set<std::string>& seenBatches() const { return seenBatches_; }
@@ -141,8 +169,11 @@ class FakeUplink : public mm::IUplink {
   const std::vector<std::string>& observations() const { return observations_; }
   const std::vector<std::pair<long long, std::string>>& extends() const { return extends_; }
   const std::vector<std::pair<long long, std::string>>& progress() const { return progress_; }
+  // Every result of an update this fake was handed, whatever it answered (task p1.15-61).
+  const std::vector<std::pair<long long, std::string>>& updateResults() const { return updateResults_; }
   // The order of the calls, as words: "config", "heartbeat", "result", "claim", "observations",
-  // "extend", "progress". What EXIT-NODES §5's order inside one pass is asserted against.
+  // "extend", "progress", "update-result". What EXIT-NODES §5's order inside one pass is
+  // asserted against.
   const std::vector<std::string>& calls() const { return calls_; }
   int configCalls() const { return configCalls_; }
   int claimCalls() const { return claimCalls_; }
@@ -270,6 +301,16 @@ class FakeUplink : public mm::IUplink {
     return true;
   }
 
+  bool postUpdateResult(long long updateId, const char* body, size_t len, bool& notFound) override {
+    updateResults_.emplace_back(updateId, std::string(body, len));
+    notFound = false;
+    if (!begin("update-result")) {
+      notFound = call_.httpStatus == 404;
+      return false;
+    }
+    return true;
+  }
+
   bool postProgress(long long jobId, const char* body, size_t len) override {
     progress_.emplace_back(jobId, std::string(body, len));
     if (!begin("progress")) return false;
@@ -307,6 +348,9 @@ class FakeUplink : public mm::IUplink {
     if (std::strcmp(what, "result") == 0 && resultFaultCalls_ != 0) {
       fault = resultFault_;
       if (resultFaultCalls_ > 0) resultFaultCalls_--;
+    } else if (std::strcmp(what, "update-result") == 0 && updateFaultCalls_ != 0) {
+      fault = updateFault_;
+      if (updateFaultCalls_ > 0) updateFaultCalls_--;
     } else if (std::strcmp(what, "observations") == 0 && obsAnswerLost_ != 0) {
       fault = Fault::Unreachable;
       if (obsAnswerLost_ > 0) obsAnswerLost_--;
@@ -339,6 +383,11 @@ class FakeUplink : public mm::IUplink {
         call_.reachable = true;
         call_.httpStatus = 422;
         std::snprintf(call_.error, sizeof call_.error, "http 422");
+        return false;
+      case Fault::NotFound:
+        call_.reachable = true;
+        call_.httpStatus = 404;
+        std::snprintf(call_.error, sizeof call_.error, "http 404");
         return false;
       case Fault::None:
       default:
@@ -383,6 +432,8 @@ class FakeUplink : public mm::IUplink {
   Fault resultFault_ = Fault::None;
   int obsAnswerLost_ = 0;
   int resultFaultCalls_ = 0;
+  Fault updateFault_ = Fault::None;
+  int updateFaultCalls_ = 0;
   uint32_t retryAfterS_ = 0;
   uint32_t callMs_ = 120;
   uint32_t slowCallMs_ = 0;
@@ -394,6 +445,7 @@ class FakeUplink : public mm::IUplink {
   std::set<std::string> seenBatches_;
   std::vector<std::pair<long long, std::string>> extends_;
   std::vector<std::pair<long long, std::string>> progress_;
+  std::vector<std::pair<long long, std::string>> updateResults_;
   int configCalls_ = 0;
   int claimCalls_ = 0;
   std::vector<int> claimMaxes_;

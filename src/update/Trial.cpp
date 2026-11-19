@@ -15,10 +15,11 @@
 namespace mm {
 namespace update {
 
-namespace {
-
 const char kStepSwitching[] = "switching";
 const char kStepProving[] = "proving";
+
+namespace {
+
 const char kStepCommitting[] = "committing";
 const char kStepRollingBack[] = "rolling-back";
 const char kStepRestored[] = "restored";

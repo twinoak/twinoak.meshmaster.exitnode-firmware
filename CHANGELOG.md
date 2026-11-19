@@ -44,14 +44,25 @@ and only if you write that result yourself.
 
 - **Did a method move?** **No.** Nothing of `IMesh`, `IUplink`, `IPlatform`,
   `IClock`, `IJobExtension`, `JobContext`, `ResultWriter`, `TextOut`, `Backoff`,
-  `WakeState` or `IRetained` moved. Three reads were **added**:
+  `WakeState` or `IRetained` moved. **One method was added to `IUplink`, with a
+  body** (p1.15-61): `postUpdateResult(updateId, body, len, notFound&)`, which is
+  `POST /agent/v1/updates/{id}/result`. It has a default that answers false, so
+  **nothing of yours stops compiling** and the loop only ever calls it for a
+  consumer that gave it an `IUpdateProvider` — the one way a call can be added to
+  that seam without breaking every tree that pins it (`docs/library.md` §10).
+  Three reads were **added**:
   `AgentLoop::pendingBatchCount()` and `pendingBatchId()` — the batch that has
   gone out and is still waiting for an answer — and `ObservationRing::oldestSeq()`.
   A fourth is added by p1.15-60: **`AgentLoop::postWhatWaits()`**, which gives the
   results the buffer holds and one observation batch their one try before a
   restart this firmware asks for on purpose, and returns an `AgentLoop::Posted`
-  saying what went out (`docs/library.md` §6). A consumer that calls none of
-  these is unaffected.
+  saying what went out (`docs/library.md` §6). A fifth is added by p1.15-61:
+  **`AgentLoop::setUpdateProvider()`**, beside `setHeartbeatObserver()` — a
+  consumer that can be updated from the server hands the loop an
+  **`mm::IUpdateProvider`** and the loop carries three things between it and the
+  server: the heartbeat's new optional `update` member, the ask a reply may carry,
+  and the one result it posts until it is taken (`docs/library.md` §6.5). A
+  consumer that calls none of these is unaffected.
   **One free function of `agent/JobResults.h` did move**, and it is not one of the
   interfaces: `writeNeighboursResult(neighbours, count, out, cap)` is now
   `writeNeighboursResult(neighbours, count, total, out, cap)` (p1.15-56). The
@@ -75,6 +86,16 @@ and only if you write that result yourself.
   brings the real file, which must be the same bytes (`docs/library.md` §9.1).
   `NeighboursResult.json` itself is untouched: a result with no `total` is what
   every exit node sent before this release, and the server still reads it.
+  **The heartbeat grew its second optional member and the protocol grew a route**
+  (p1.15-61): `update`, last of all, written only for a consumer that gave the
+  loop an `IUpdateProvider`, and `POST /agent/v1/updates/{id}/result` with the
+  bytes `mm::writeUpdateResult` makes. A consumer that gives no provider sends the
+  heartbeat it sent before, **byte for byte**, reads no ask and makes no call.
+  Two more structs and one more small interface came with it —
+  `mm::HeartbeatUpdate`, `mm::UpdateAsk` on `HeartbeatReply`, `mm::UpdateResult`
+  and `mm::UpdateJournal` — all additive. The five samples are
+  `tests/fixtures/contracts-ahead/` until the next sync brings the real files
+  (`docs/library.md` §9.1).
 - **The version, and the MeshCore pin.** `agent-core` **0.7.2** against MeshCore
   **`companion-v1.18.0`** (`81dbae59`).
 

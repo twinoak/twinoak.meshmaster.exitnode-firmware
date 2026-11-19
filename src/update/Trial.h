@@ -77,6 +77,13 @@ namespace update {
 // before anybody notices. tasks/phase-1.15/FOLLOWUPS.md carries it as a constant to settle.
 static const uint32_t kTrialMs = 10u * 60u * 1000u;
 
+// Two of the five step words this task's record writes into its journal, by name, because task 61
+// reads them back: the heartbeat's `step` is the newest entry of the journal and a heartbeat that
+// said `proving` and was answered is the third condition of the trial. The other three -
+// `committing`, `rolling-back` and `restored` - are written here and read by nobody.
+extern const char kStepSwitching[];
+extern const char kStepProving[];
+
 // The three, in the order they are reported.
 enum class Condition : uint8_t { Mesh = 0, Link = 1, Server = 2 };
 static const size_t kConditions = 3;

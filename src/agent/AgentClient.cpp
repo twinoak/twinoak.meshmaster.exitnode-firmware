@@ -674,6 +674,31 @@ bool AgentClient::postProgress(long long jobId, const char* requestBody, size_t 
   return true;
 }
 
+bool AgentClient::postUpdateResult(long long updateId, const char* requestBody, size_t len, bool& notFound) {
+  notFound = false;
+  // Not a job's route: an update belongs to the exit node itself, so this is the one POST of this
+  // firmware that is not under /agent/v1/jobs (task p1.15-61).
+  char endpoint[64];
+  std::snprintf(endpoint, sizeof endpoint, "/agent/v1/updates/%lld/result", updateId);
+  size_t bodyLen = 0;
+  Call c;
+  if (!call("POST", endpoint, requestBody, len, g_jobReply, sizeof g_jobReply, bodyLen, c)) {
+    LOG_W("server: the result of update %lld: no reply: %s", updateId, c.error);
+    return false;
+  }
+  if (!c.ok) {
+    // The one 404 is an answer and not a glitch: the id is not this exit node's, or is no ask at
+    // all, and the result stops being posted (API section 4's rule for every firmware route).
+    notFound = c.httpStatus == 404;
+    LOG_W("server: the result of update %lld: http %d%s", updateId, c.httpStatus,
+          notFound ? " - the server does not know this update" : "");
+    if (bodyLen > 0) LOG_D("server: body (%u bytes): %.200s", static_cast<unsigned>(bodyLen), g_jobReply);
+    return false;
+  }
+  LOG_I("server: the result of update %lld was taken", updateId);
+  return true;
+}
+
 void AgentClient::describe(char* out, size_t cap) const {
   if (!configured()) {
     std::snprintf(out, cap, "not configured (%s%s%s)", url_[0] == '\0' ? "meshmaster.url unset" : "",
