@@ -129,16 +129,20 @@ class ScriptedTable final : public mm::update::AskTable {
   std::string wordNow = "two";
   std::string wordAfterAdd = "two";
   bool addWorks = true;
+  // Which of the two endings a write that did not add the slot had (task p1.16-63): the table the
+  // board came with is back in the sector, or the sector holds neither table.
+  bool sectorHoldsATable = true;
   std::string addLine = "added     app1 at 0x350000, 0x320000 bytes; reboot for it to take effect";
   int adds = 0;
   std::vector<std::string>* order = nullptr;
 
   const char* word() const override { return wordNow.c_str(); }
 
-  bool addSecondSlot(char* line, size_t cap) override {
+  bool addSecondSlot(char* line, size_t cap, bool* theSectorHoldsATable) override {
     adds++;
     if (order != nullptr) order->push_back("add-slot");
     std::snprintf(line, cap, "%s", addLine.c_str());
+    if (theSectorHoldsATable != nullptr) *theSectorHoldsATable = addWorks || sectorHoldsATable;
     if (addWorks) wordNow = wordAfterAdd;
     return addWorks;
   }
@@ -579,6 +583,66 @@ TEST(TheWholeWay, ASectorThatCannotBeWrittenEndsTheAskStuckBeforeAnyRestart) {
   EXPECT_EQ(AskOutcome::Stuck, b.record().outcome);
   EXPECT_EQ(0, b.restart.restarts);
   EXPECT_EQ(0, b.fetch.starts);
+}
+
+// Nobody is at the console to read the sentence, so the journal says which of the two endings a
+// write that did not add the slot had (task p1.16-63, deliverable 5). Nothing of the contract
+// changes: the outcome is `stuck`, which it was already.
+TEST(ASlotThatWasNotAdded, TheTableTheBoardHadIsSaidSoInTheJournalAndNothingRestarts) {
+  Board b;
+  b.table.wordNow = "one";
+  b.table.addWorks = false;
+  b.table.sectorHoldsATable = true;
+  b.table.addLine =
+      "the slot was NOT added: the new table would not hold in 3 tries and the old one is back in the sector after 1, "
+      "so the board is as it was";
+  b.boot(kOld);
+  b.hearTheAsk(17);
+  b.asked.step();
+
+  const AskRecord rec = b.record();
+  EXPECT_EQ(AskStep::Ended, rec.step);
+  EXPECT_EQ(AskOutcome::Stuck, rec.outcome);
+  EXPECT_EQ(AskRefusal::None, rec.refusal);
+  EXPECT_EQ(1, b.table.adds);
+  EXPECT_EQ(0, b.restart.restarts) << "a board is restarted only when the slot was added";
+  EXPECT_EQ(0, b.fetch.starts);
+
+  std::string body;
+  EXPECT_TRUE(b.postTheResult(true, false, &body));
+  EXPECT_NE(std::string::npos, body.find("\"outcome\":\"stuck\"")) << body;
+  EXPECT_NE(std::string::npos, body.find("the table is the one the board had")) << body;
+  EXPECT_EQ(std::string::npos, body.find("holds no partition table")) << body;
+
+  // And the next ask is taken: this board is as it was, and nothing of it is in hand.
+  b.hearTheAsk(18);
+  b.asked.step();
+  EXPECT_EQ(18, b.record().id);
+  EXPECT_EQ(2, b.table.adds) << "the table is still `one`, so it is tried again";
+}
+
+TEST(ASlotThatWasNotAdded, ASectorThatHoldsNoTableIsSaidSoInTheJournalAndNothingRestarts) {
+  Board b;
+  b.table.wordNow = "one";
+  b.table.addWorks = false;
+  b.table.sectorHoldsATable = false;
+  b.table.addLine =
+      "the slot was NOT added and the sector holds NO table: do NOT cut the power - the old table is put back once a "
+      "minute from now";
+  b.boot(kOld);
+  b.hearTheAsk(17);
+  b.asked.step();
+
+  const AskRecord rec = b.record();
+  EXPECT_EQ(AskStep::Ended, rec.step);
+  EXPECT_EQ(AskOutcome::Stuck, rec.outcome);
+  EXPECT_EQ(0, b.restart.restarts) << "a restart is exactly what this board would not survive";
+  EXPECT_EQ(0, b.fetch.starts);
+
+  std::string body;
+  EXPECT_TRUE(b.postTheResult(true, false, &body));
+  EXPECT_NE(std::string::npos, body.find("\"outcome\":\"stuck\"")) << body;
+  EXPECT_NE(std::string::npos, body.find("the sector holds no partition table")) << body;
 }
 
 // ---- the five refusals, each alone -----------------------------------------------------------

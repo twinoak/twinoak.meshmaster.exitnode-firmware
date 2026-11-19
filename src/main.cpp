@@ -160,6 +160,26 @@ class LogTextOut final : public mm::TextOut {
 
 LogTextOut fetchLog;
 
+// The sector that holds no table, and what is done about it (task p1.16-63). `addSecondSlot` tries
+// the new table three times and then puts the old one back three times, and only when neither
+// holds does this start: the old table once a minute, for as long as this firmware runs, because a
+// board that reboots before one holds needs a merged image over USB and loses its key, its token
+// and its WiFi with it. `update` and `status` say so in their first lines while it is so.
+mm::TableKeeper tableKeeper;
+
+// The one call of `addSecondSlot` in this firmware: the console's `update slot` and the server's
+// own ask both come here, so that whichever asked, the keeper is told how it ended.
+mm::AddSlotResult addTheSecondSlot() {
+  const mm::TablePair tables = mm::tablesForThisBoard();
+  const mm::AddSlotResult r = mm::addSecondSlot(mm::partitionTableFlash(), tables.oneSlot, tables.twoSlots);
+  tableKeeper.note(r.ending, millis());
+  mm::logf(r.ending == mm::AddSlotEnding::Added ? mm::LogLevel::Warn
+                                                : (r.ending == mm::AddSlotEnding::NoTable ? mm::LogLevel::Error
+                                                                                          : mm::LogLevel::Info),
+           "update slot: %s", r.line);
+  return r;
+}
+
 // The trial's three conditions (task p1.15-60, deliverable 2), each a plain reading of something
 // this file already has: the mesh started, the WiFi joined and the clock came off the network,
 // and a heartbeat was answered 2xx. Nothing is measured here that is not measured anyway.
@@ -223,11 +243,10 @@ class AskTableNow final : public mm::update::AskTable {
     return word_;
   }
 
-  bool addSecondSlot(char* line, size_t cap) override {
-    const mm::TablePair tables = mm::tablesForThisBoard();
-    const mm::AddSlotResult r = mm::addSecondSlot(mm::partitionTableFlash(), tables.oneSlot, tables.twoSlots);
+  bool addSecondSlot(char* line, size_t cap, bool* theSectorHoldsATable) override {
+    const mm::AddSlotResult r = addTheSecondSlot();
     std::snprintf(line, cap, "%s", r.line);
-    mm::logf(r.added ? mm::LogLevel::Warn : mm::LogLevel::Info, "update slot: %s", r.line);
+    if (theSectorHoldsATable != nullptr) *theSectorHoldsATable = r.ending != mm::AddSlotEnding::NoTable;
     word_ = nullptr;
     return r.added;
   }
@@ -397,6 +416,10 @@ void formatUptime(char* out, size_t cap) {
 }
 
 void printStatus(Stream& out) {
+  // Before anything else, and for as long as it is true: this board's table sector holds no table,
+  // so a restart now is a board that needs a cable (task p1.16-63, deliverable 4).
+  if (tableKeeper.theSectorHoldsNoTable()) out.printf("!!        %s\r\n", tableKeeper.line());
+
   char line[320];
   char key[80];
   char uptime[32];
@@ -587,6 +610,10 @@ void printDiscoverScopes(Stream& out) {
 // with, so this is how a person at a window finds out whether this board can be updated from the
 // server yet, and `update slot` below is how it comes to be able to.
 void printUpdate(Stream& out) {
+  // The same first line as `status` has, and for the same reason: whichever of the two a person
+  // types, a board whose sector holds no table says so before it says anything else.
+  if (tableKeeper.theSectorHoldsNoTable()) out.printf("!!        %s\r\n", tableKeeper.line());
+
   // What this image says it is (task p1.15-58): the 96 bytes the build placed inside it, read
   // back from the image that is running. It is the one line that proves on a bench what
   // tools/check-descriptor.py proves in CI, and reading it here is also what keeps the linker
@@ -732,12 +759,22 @@ void printUpdateApply(Stream& out) {
 // `update slot`: the one command of this console that erases and writes flash. One sector, at the
 // partition table's own address, and only when the table is the one boards were flashed with
 // (src/platform/PartitionTable.h). A power cut during it leaves a board that needs a merged image
-// over USB; it is the only moment of this pile that can.
+// over USB; it is the only moment of this pile that can. A write that *fails* does not: the new
+// table is tried three times, the old one is put back three times after that, and only a sector
+// that takes neither is left with no table - and the keeper above goes on at it (task p1.16-63).
 void printUpdateSlot(Stream& out) {
-  const mm::TablePair tables = mm::tablesForThisBoard();
-  const mm::AddSlotResult r = mm::addSecondSlot(mm::partitionTableFlash(), tables.oneSlot, tables.twoSlots);
+  const mm::AddSlotResult r = addTheSecondSlot();
   out.printf("%s\r\n", r.line);
-  mm::logf(r.added ? mm::LogLevel::Warn : mm::LogLevel::Info, "update slot: %s", r.line);
+  // Which of the three endings it was, in the one word, and the tries it took when it took more
+  // than one. The sentence above says both in words; this says them in a shape two boards can be
+  // compared by (task p1.16-63, deliverable 3). A sector nothing was written to has no tries.
+  if (r.tries > 0) {
+    out.printf("          ending `%s`", mm::addSlotEndingWord(r.ending));
+    if (r.tries > 1) out.printf(", after %d tries of the new table", r.tries);
+    if (r.triesBack > 0) out.printf(", and %d of the old one", r.triesBack);
+    out.printf("\r\n");
+  }
+  if (tableKeeper.theSectorHoldsNoTable()) out.printf("          %s\r\n", tableKeeper.line());
 }
 
 // `mesh`: what the radio has heard. The names are printed here and in no log line - this is the
@@ -1160,6 +1197,19 @@ void loop() {
 
   console.loop();
   oled.loop();
+
+  // The old partition table, once a minute, while the sector holds none (task p1.16-63). It does
+  // nothing at all otherwise, and the first write that holds ends it for good: a board whose table
+  // is the one it had is a board that boots.
+  if (tableKeeper.theSectorHoldsNoTable()) {
+    const mm::TablePair tables = mm::tablesForThisBoard();
+    const mm::KeeperStep went = tableKeeper.step(mm::partitionTableFlash(), tables.oneSlot, millis());
+    if (went == mm::KeeperStep::Back) {
+      mm::logf(mm::LogLevel::Warn, "update slot: %s", tableKeeper.line());
+    } else if (went == mm::KeeperStep::Tried) {
+      mm::logf(mm::LogLevel::Error, "update slot: %s", tableKeeper.line());
+    }
+  }
 
   // The trial, if a switched image is on one (task p1.15-60): the three conditions latched as
   // each is first seen, the image marked valid the moment the third is, and the board sent back

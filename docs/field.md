@@ -201,9 +201,17 @@ and then one of four endings, which is what the tab finally says:
 | *refused* | nothing was switched, and the word says why: `inProgress` (an update was already in hand), `table` (this board's table is one the firmware will not write — `update` at the console says so), `current` (the release asked for is the one it runs), `fetch` (the release could not be downloaded) or `check` with a number 1 to 5 (the signature, the manifest, the image for this board, the file's hash, the descriptor) |
 | *stuck* | the board cannot say what happened. Walk to it: `update` on the console prints the ask, the step it reached and the journal |
 
-A board whose `update` says `one` or `other` on the console is a board the server
-will **refuse** with `table`; `update slot` is what makes a `one` board ready, and
-from the release of p1.15-61 the firmware does that itself at the first ask.
+`table` is the refusal of **`other` alone**: a table this firmware does not
+recognise is one it will not write over, and that board needs the merged image
+over USB (§9). A board whose `update` says **`one`** is *not* refused — since the
+release of p1.15-61 it adds the second slot itself at the first ask, which is
+what the `adding-slot` step above is, and `update slot` at the console does the
+same thing by hand.
+
+A *stuck* that came out of `adding-slot` says in its journal which of two things
+happened: *the table is the one the board had*, which is a board that is exactly
+as it was and can be asked again, or *the sector holds no partition table*, which
+is a board to walk to now — §9 says what it is doing about it and what not to do.
 
 **The page says *online* but the jobs come back `unreachable`.** That is the
 radio, not the network: `mesh` to see whether the repeater is heard at all, and
@@ -413,6 +421,32 @@ added: app1 at 0x350000, 0x320000 bytes. Type `reboot`; the table is read at the
   before it boots again — the only moment in this work that can leave a board
   needing a cable.
 - On a board that is already `two`, `update slot` says so and writes nothing.
+
+**A write that fails is tried again.** The new table is written and read back up
+to three times; when it will not hold, the table the board came with is put back
+the same way and as many times, because a board whose table is the one it had is
+a board that boots. So `update slot` has three endings, and it names the one that
+happened — with the tries, when it took more than one:
+
+| what it says | what has happened | what to do |
+|---|---|---|
+| *added* (`added`) | the sector holds the new table, and the board has `app1` from the next boot | `reboot`, then `update` to see `two` |
+| *the board is as it was* (`as-it-was`) | the new table would not hold, and the sector holds the one the board came with, byte for byte | nothing at the window: the board boots and runs as before. Try again later; if it keeps failing, flash the release's merged image over USB with `esptool` |
+| *the sector holds NO table* (`no-table`) | neither table would hold. **This board does not boot if it restarts now** | **do not cut the power.** The firmware keeps putting the old table back, once a minute, for as long as it runs, and says so in the first line of `update` and of `status` until one holds. Leave it on the power and watch those lines. If you must move it, flash the merged image over USB first |
+
+The third is rare and loud: the firmware has already asked six times by the time
+it says it. While it stands, `update` and `status` both begin with
+
+```
+!!        DO NOT CUT THE POWER: the partition table's sector holds no table and the old one is being put back once a minute (2 more tries so far). A board that reboots first needs the merged image over USB
+```
+
+and that line goes away by itself the moment a write holds — the board is then as
+it was, without the second slot, and can be asked again.
+
+The server's own ask does the same writing with nobody at the window, so an ask
+that ends *stuck* at `adding-slot` carries whichever of the last two it was in
+its journal (§5).
 
 ### Fetching a release into the second slot
 

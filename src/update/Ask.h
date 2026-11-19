@@ -165,8 +165,11 @@ class AskTable {
   virtual ~AskTable() {}
   virtual const char* word() const = 0;  // "one" | "two" | "other"
   // Write the sector. True when the slot is there afterwards; `line` is the one sentence the
-  // function answered, which goes into the journal either way.
-  virtual bool addSecondSlot(char* line, size_t cap) = 0;
+  // function answered, which goes into the journal either way. `theSectorHoldsATable` says, when
+  // the slot was not added, which of the two endings it was: the table the board had is still
+  // there and the board boots, or the sector holds neither and it does not (task p1.16-63).
+  // An ask reads it because nobody is at the console to read the sentence.
+  virtual bool addSecondSlot(char* line, size_t cap, bool* theSectorHoldsATable) = 0;
 };
 
 // The fetch of a release into the slot that is not running (task p1.15-59).
