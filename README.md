@@ -174,6 +174,21 @@ and pick the release's file for the board:
   the key. **Never upgrade with the `-merged.bin` there**: the erase takes the
   key, and the exit node then needs a new token and its associations made again.
 
+**Going back a release is not a flash.** A board that has taken an update — from
+meshmaster.dk, or with `update apply` at the console — runs from its *second*
+application slot, and the flasher writes the plain `.bin` to the first one
+whatever the board boots from. The first slot is where the release it came from
+still lies, so flashing that release again writes the same bytes it already
+holds and the board comes up on the newer one: the flasher succeeds and nothing
+changes. **`update back` at the console is the way back** — it switches to
+whatever is in the other slot and puts it on trial like any other, so a release
+that cannot reach the mesh, the WiFi or the server is not what you are left
+with — and the board's boot says which release it found and did not switch to
+([`console.md`](docs/console.md), [`field.md` §9](docs/field.md#9-updating-a-board-that-is-already-in-the-field)).
+A release older than the second slot has nothing inside it saying what it is, and
+nothing switches to one of those: the only way back there is the `-merged.bin`,
+and it takes the key with it.
+
 The release notes say the same with each version's file names, and the
 console lines to set it up (below). What follows is the same for a developer,
 with PlatformIO or `esptool` — and **with those tools a merged image erases

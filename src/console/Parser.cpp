@@ -9,10 +9,12 @@ namespace {
 
 bool isSpace(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
 
-ParseResult refuse(const char* fmt, const char* a = "", const char* b = "", const char* c = "") {
+// Four, since `update` has four words to name in one refusal (task p1.16-64).
+ParseResult refuse(const char* fmt, const char* a = "", const char* b = "", const char* c = "",
+                   const char* d = "") {
   ParseResult r;
   r.ok = false;
-  std::snprintf(r.error, sizeof r.error, fmt, a, b, c);
+  std::snprintf(r.error, sizeof r.error, fmt, a, b, c, d);
   return r;
 }
 
@@ -112,11 +114,13 @@ ParseResult parseLine(const char* line) {
   }
   if (std::strcmp(verb, "update") == 0) {
     // Task p1.15-57: the word alone reads the table, `update slot` writes it. Task p1.15-59 adds
-    // `update fetch <id>` and task p1.15-60 `update apply`. Nothing else, so that a typo cannot
-    // become a flash write or a restart into another firmware.
+    // `update fetch <id>`, task p1.15-60 `update apply` and task p1.16-64 `update back`. Nothing
+    // else, so that a typo cannot become a flash write or a restart into another firmware - and
+    // `update backwards` is a refusal, not a way back.
     if (!hasRest) return accept(Verb::Update);
     if (std::strcmp(rest, kSlotWord) == 0) return accept(Verb::UpdateSlot);
     if (std::strcmp(rest, kApplyWord) == 0) return accept(Verb::UpdateApply);
+    if (std::strcmp(rest, kBackWord) == 0) return accept(Verb::UpdateBack);
     const size_t fetchLen = std::strlen(kFetchWord);
     if (std::strncmp(rest, kFetchWord, fetchLen) == 0 && isSpace(rest[fetchLen])) {
       const char* id = rest + fetchLen;
@@ -139,8 +143,8 @@ ParseResult parseLine(const char* line) {
     if (std::strcmp(rest, kFetchWord) == 0) {
       return refuse("update %s takes one release id: update %s 12", kFetchWord, kFetchWord);
     }
-    return refuse("update takes no argument, the word '%s', the word '%s', or '%s <release id>'", kSlotWord,
-                  kApplyWord, kFetchWord);
+    return refuse("update takes no argument, the word '%s', the word '%s', the word '%s', or '%s <release id>'",
+                  kSlotWord, kApplyWord, kBackWord, kFetchWord);
   }
   if (std::strcmp(verb, "erase") == 0) {
     if (!hasRest) return refuse("erase forgets every setting; to do it, type: erase %s", kEraseWord);

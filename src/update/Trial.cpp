@@ -107,6 +107,8 @@ const char* bootFindingWord(BootFinding finding) {
       return "a trial was cut short";
     case BootFinding::SwitchedAtBoot:
       return "switched to the first slot";
+    case BootFinding::Stuck:
+      return "stuck in a firmware that could not be sent back";
     case BootFinding::Nothing:
       break;
   }
@@ -159,6 +161,25 @@ bool Updater::recordKnows(const char* version) const {
   if (record_.from[0] != '\0' && strcmp(version, record_.from) == 0) return true;
   if (record_.to[0] != '\0' && strcmp(version, record_.to) == 0) return true;
   return false;
+}
+
+OtherSlot Updater::readTheOtherSlot(Descriptor& found, size_t& descriptors) const {
+  found = Descriptor();
+  descriptors = 0;
+  if (!seams_.slots->available()) return OtherSlot::Nothing;
+  SlotImage other;
+  if (!seams_.slots->describeOther(other)) return OtherSlot::Nothing;
+  if (!other.verifies || other.length == 0) return OtherSlot::WillNotLoad;
+
+  const SlotBytes bytes(*seams_.slot, other.length);
+  uint32_t at = 0;
+  if (!findOneDescriptor(bytes, found, at, descriptors)) return OtherSlot::NoDescriptor;
+  if (found.role != kRoleExitNode || strcmp(found.board, board_) != 0 || strcmp(found.band, kBand) != 0) {
+    return OtherSlot::AnotherProduct;
+  }
+  // The one thing the bytes do not say: whether this board has met that version. The record does
+  // (task p1.16-64).
+  return recordKnows(found.version) ? OtherSlot::Known : OtherSlot::Unknown;
 }
 
 bool Updater::switchAndRestart(const char* why, bool postWhatWaits) {
@@ -235,10 +256,13 @@ BootFinding Updater::atBoot() {
     onTrial_ = false;
     save();  // the phase stays `trial`: the boot after this restart is what finishes the record
     if (!seams_.slots->bootOther()) {
+      // Nothing can send this board back: it is not pending, so the bootloader will not, and the
+      // framework refused the boot choice. **That is not `rolledBack`** - the image that failed
+      // is what runs (task p1.16-64, deliverable 5).
       char line[kMaxNoteLen + 1];
       snprintf(line, sizeof(line), "%.48s, and the boot choice could not be set back", reason);
-      finish(Ended::RolledBack, line);
-      finding_ = BootFinding::RolledBack;
+      finish(Ended::Stuck, line);
+      finding_ = BootFinding::Stuck;
       return finding_;
     }
     seams_.restart->note("a firmware on trial was restarted and is being undone");
@@ -253,24 +277,42 @@ BootFinding Updater::atBoot() {
   finding_ = BootFinding::Nothing;
   if (running != 1) return finding_;  // running from the first slot: nothing is switched at boot
 
-  SlotImage other;
-  if (!seams_.slots->describeOther(other) || !other.verifies || other.length == 0) return finding_;
-
-  const SlotBytes bytes(*seams_.slot, other.length);
+  // One reading, and **one line a boot** about what it found: before task p1.16-64 a first slot
+  // holding a release this board had already run, or an image with no descriptor at all, was
+  // passed over without a word, and an owner who had flashed it saw the flasher succeed and the
+  // board come up on the other firmware (deliverable 3).
   Descriptor found;
-  uint32_t at = 0;
-  size_t count = 0;
-  if (!findOneDescriptor(bytes, found, at, count)) {
-    if (count > 1) say("the first slot holds %u descriptors, so it is not switched to", static_cast<unsigned>(count));
-    return finding_;
+  size_t descriptors = 0;
+  switch (readTheOtherSlot(found, descriptors)) {
+    case OtherSlot::Nothing:
+    case OtherSlot::WillNotLoad:
+      // There is no image there that the framework would load, so there is nothing to say.
+      return finding_;
+    case OtherSlot::NoDescriptor:
+      if (descriptors > 1) {
+        say("the first slot holds %u descriptors, so it is not switched to", static_cast<unsigned>(descriptors));
+      } else {
+        say("the first slot holds an image with no descriptor, so it is not switched to: a release older than the "
+            "second slot carries none, and only a merged image over USB reaches one");
+      }
+      return finding_;
+    case OtherSlot::AnotherProduct: {
+      char role[16];
+      say("the first slot holds %s %s band %s, which is not this product for this board", roleName(found.role, role, sizeof(role)),
+          found.board, found.band);
+      return finding_;
+    }
+    case OtherSlot::Known:
+      // A version this board has run - the one it was switched from, or one it tried and undid.
+      // The bytes of a slot are the same whether somebody flashed them a minute ago or they have
+      // lain there since the update, so nothing is switched and nothing is guessed: the way back
+      // is asked for.
+      say("the first slot holds %s, which this board has run, so it is not switched to: `update back` goes back to it",
+          found.version);
+      return finding_;
+    case OtherSlot::Unknown:
+      break;  // the one switch a boot makes, and it is task p1.15-60's
   }
-  if (found.role != kRoleExitNode || strcmp(found.board, board_) != 0 || strcmp(found.band, kBand) != 0) {
-    char role[16];
-    say("the first slot holds %s %s band %s, which is not this product for this board", roleName(found.role, role, sizeof(role)),
-        found.board, found.band);
-    return finding_;
-  }
-  if (recordKnows(found.version)) return finding_;
 
   record_ = UpdateRecord();
   record_.phase = Phase::Switching;
@@ -373,14 +415,27 @@ void Updater::rollBack(const char* why) {
   seams_.restart->note(why);
   if (pending_) {
     if (seams_.slots->markInvalidAndRestart()) return;  // does not return on a board
-  } else if (seams_.slots->bootOther()) {
+    // The framework refused (ESP_ERR_OTA_ROLLBACK_FAILED), and this image is **still pending**.
+    // A plain restart is what undoes a pending image - the bootloader marks it aborted and the
+    // other slot's entry is then the one it chooses (the header of this file) - so this restarts
+    // rather than finishing anything here: nothing is called rolled back before it is (task
+    // p1.16-64, deliverable 4). The phase stays `trial`, and the boot after the restart finishes
+    // the record from whichever image comes up.
+    journal(kStepRollingBack, "the framework would not mark it invalid; restarting, which undoes a pending image");
+    save();
     seams_.restart->restart();  // does not return on a board
     return;
   }
+  if (seams_.slots->bootOther()) {
+    seams_.restart->restart();  // does not return on a board
+    return;
+  }
+  // Not pending and the boot choice refused: nothing at all can send this board back, and the
+  // image that failed is what runs. **Not `rolledBack`** (deliverable 5).
   char line[kMaxNoteLen + 1];
   snprintf(line, sizeof(line), "%.48s, and the board could not be sent back", why);
   journal(kStepRollingBack, "%s", line);
-  finish(Ended::RolledBack, line);
+  finish(Ended::Stuck, line);
 }
 
 void Updater::finish(Ended ended, const char* why) {
@@ -446,6 +501,75 @@ bool Updater::apply(char* why, size_t cap) {
   return true;
 }
 
+bool Updater::goBack(const char* elsewhere, char* why, size_t cap) {
+  if (!begun_) record_ = loadUpdate(*seams_.store);
+
+  // The console's own two first, because they are what somebody at the window has just started
+  // and this machine knows neither: meshmaster.dk's ask in hand, and a fetch running.
+  if (elsewhere != nullptr && elsewhere[0] != '\0') {
+    snprintf(why, cap, "%s", elsewhere);
+    return false;
+  }
+  if (onTrial_ || record_.inHand()) {
+    snprintf(why, cap, "an update is already in hand (%s %s); nothing is switched on top of one",
+             phaseWord(record_.phase), record_.to);
+    return false;
+  }
+  if (!seams_.slots->available()) {
+    snprintf(why, cap, "%s", seams_.slots->why());
+    return false;
+  }
+
+  Descriptor found;
+  size_t descriptors = 0;
+  switch (readTheOtherSlot(found, descriptors)) {
+    case OtherSlot::Nothing:
+      snprintf(why, cap, "%s", seams_.slots->why());
+      return false;
+    case OtherSlot::WillNotLoad:
+      snprintf(why, cap, "the other slot holds nothing this firmware would boot, so there is nothing to go back to");
+      return false;
+    case OtherSlot::NoDescriptor:
+      snprintf(why, cap,
+               "the other slot holds an image with no descriptor%s, and nothing switches to one: a release older than "
+               "the second slot carries none, and only a merged image over USB reaches it",
+               descriptors > 1 ? " this firmware can read" : "");
+      return false;
+    case OtherSlot::AnotherProduct: {
+      char role[16];
+      snprintf(why, cap, "the other slot holds %s %s band %s, which is not this product for this board",
+               roleName(found.role, role, sizeof(role)), found.board, found.band);
+      return false;
+    }
+    case OtherSlot::Known:
+    case OtherSlot::Unknown:
+      break;  // taken, whether or not the record has met it: that is what this command is for
+  }
+
+  const int running = seams_.slots->runningSlot();
+  record_ = UpdateRecord();
+  record_.phase = Phase::Switching;
+  snprintf(record_.from, sizeof(record_.from), "%s", version_);
+  snprintf(record_.to, sizeof(record_.to), "%s", found.version);
+  // No hash: no release named these bytes, as for an image found after a flash over USB. What
+  // stands for the judgement here is the framework's own - `bootOther()` refuses an image it
+  // would not load - and the descriptor just read out of the slot.
+  record_.at = seams_.clock->epoch();
+  record_.slot = running == 0 ? 1 : 0;
+  journal(kStepSwitching, "back to %s, which lies in app%u", found.version, static_cast<unsigned>(record_.slot));
+  if (!save()) {
+    record_ = UpdateRecord();
+    saveUpdate(*seams_.store, record_);
+    snprintf(why, cap, "the record of the update could not be written, so nothing is switched");
+    return false;
+  }
+  if (!switchAndRestart("`update back` was typed at the console", true)) {
+    snprintf(why, cap, "the framework refused the boot choice, so nothing is switched: %s", seams_.slots->why());
+    return false;
+  }
+  return true;
+}
+
 uint32_t Updater::trialLeftMs() const {
   if (!onTrial_) return 0;
   const uint32_t gone = seams_.clock->ms() - trialStartMs_;
@@ -482,6 +606,40 @@ const char* Updater::whyTheOtherSlotMayNotBeWritten() const {
   return nullptr;
 }
 
+void Updater::reportOther(TextOut& out) const {
+  Descriptor found;
+  size_t descriptors = 0;
+  const OtherSlot what = readTheOtherSlot(found, descriptors);
+  char slot[8];
+  snprintf(slot, sizeof(slot), "app%d", seams_.slots->runningSlot() == 0 ? 1 : 0);
+  switch (what) {
+    case OtherSlot::Nothing:
+      return;  // this board has no second slot, and `update`'s table lines have said so already
+    case OtherSlot::WillNotLoad:
+      out.printf("back      %s holds nothing this firmware would boot\r\n", slot);
+      return;
+    case OtherSlot::NoDescriptor:
+      out.printf("back      %s holds an image with no descriptor%s, which nothing switches to\r\n", slot,
+                 descriptors > 1 ? " this firmware can read" : "");
+      return;
+    case OtherSlot::AnotherProduct: {
+      char role[16];
+      out.printf("back      %s holds %s %s band %s, which is not this product for this board\r\n", slot,
+                 roleName(found.role, role, sizeof(role)), found.board, found.band);
+      return;
+    }
+    case OtherSlot::Known:
+    case OtherSlot::Unknown:
+      break;
+  }
+  out.printf("back      %s holds %s\r\n", slot, found.version);
+  // And the command, where that is what it would do. While an update is in hand it is refused,
+  // and `trial` or `last` below says what is in the way.
+  if (!onTrial_ && !record_.inHand()) {
+    out.printf("          `update back` switches to it and restarts; it then has ten minutes to prove itself\r\n");
+  }
+}
+
 void Updater::report(TextOut& out) const {
   if (onTrial_) {
     const uint32_t left = trialLeftMs();
@@ -502,6 +660,11 @@ void Updater::report(TextOut& out) const {
     if (record_.ended == Ended::Committed) {
       out.printf("last      committed: %s, from %s, switched at %s\r\n", record_.to, record_.from,
                  record_.at != 0 ? when : "no clock");
+    } else if (record_.ended == Ended::Stuck) {
+      // Not back, and not kept: the trial failed and nothing could send the board back, so what
+      // runs is the image that failed (task p1.16-64, deliverable 5).
+      out.printf("last      stuck: %s; %s is still running and %s is in the other slot, switched at %s\r\n",
+                 record_.why, record_.to, record_.from, record_.at != 0 ? when : "no clock");
     } else {
       out.printf("last      rolled back: %s; %s is running, %s was switched to at %s\r\n", record_.why, record_.from,
                  record_.to, record_.at != 0 ? when : "no clock");

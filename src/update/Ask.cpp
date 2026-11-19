@@ -562,8 +562,16 @@ void Asked::watchTheTrial() {
     return;
   }
   if (ours && seams_.trial->record().phase == Phase::Ended) {
-    end(seams_.trial->record().ended == Ended::Committed ? AskOutcome::Committed : AskOutcome::RolledBack,
-        AskRefusal::None, 0, "%s", "");
+    // The record's ending, in the contract's words. Its third - `stuck` - is a firmware that
+    // failed its trial and could not be sent back at all (task p1.16-64, deliverable 5): nothing
+    // was rolled back, so the result does not say so, and `toVersion` below is the version that
+    // runs, which is the one that failed. No outcome is added: `stuck` is the contract's own word
+    // for a board that cannot say what happened, and its journal's last entry says what that was.
+    const Ended ended = seams_.trial->record().ended;
+    AskOutcome outcome = AskOutcome::Stuck;
+    if (ended == Ended::Committed) outcome = AskOutcome::Committed;
+    if (ended == Ended::RolledBack) outcome = AskOutcome::RolledBack;
+    end(outcome, AskRefusal::None, 0, "%s", "");
     return;
   }
   if (ours) return;  // still `switching`: the restart into the new image has not happened yet

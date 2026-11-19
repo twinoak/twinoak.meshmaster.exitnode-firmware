@@ -16,11 +16,11 @@
 //   fw.up.from     the version that was running when the switch was made
 //   fw.up.to       the version switched to
 //   fw.up.sha      the SHA-256 of the image switched to, 64 lowercase hex characters (empty for
-//                  an image found in the first slot after a flash over USB, which no release
-//                  named)
+//                  an image no release named: one found in the first slot after a flash over USB,
+//                  or whatever `update back` went back to)
 //   fw.up.at       UNIX seconds of the switch, in decimal; 0 when the board had no clock
 //   fw.up.slot     the application slot switched to, `0` or `1`
-//   fw.up.end      `committed` or `rolledBack`, once the record is finished
+//   fw.up.end      `committed`, `rolledBack` or `stuck`, once the record is finished
 //   fw.up.why      for a rollback: what was missing, in a sentence
 //   fw.up.jr       the journal, one line an entry (see below)
 //
@@ -67,9 +67,15 @@ enum class Phase : uint8_t {
   Ended = 3,      // `fw.up.end` says how it ended
 };
 
-// How an update ended, in meshmaster.dk's words (`FirmwareApplyOutcomes`). The two this task can
-// produce; task 61 is what turns a refusal into `refused`.
-enum class Ended : uint8_t { None = 0, Committed = 1, RolledBack = 2 };
+// How an update ended, in meshmaster.dk's words (`FirmwareApplyOutcomes`). Task 61 is what turns
+// a refusal into `refused`.
+//
+// **`rolledBack` is said only of a board that runs the old image again** (task p1.16-64). A trial
+// that failed and could be sent back - by the bootloader, or by this firmware setting the boot
+// choice back - is `rolledBack`; one that could not be sent back at all is `stuck`, which is the
+// contract's word for *the board cannot say what happened*, and the record then carries the
+// version that is running, which is the one that failed.
+enum class Ended : uint8_t { None = 0, Committed = 1, RolledBack = 2, Stuck = 3 };
 
 const char* phaseWord(Phase phase);
 const char* endedWord(Ended ended);

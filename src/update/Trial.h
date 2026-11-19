@@ -48,6 +48,15 @@
 // record knows - the one running, the one it was switched from, or one it knows as tried and
 // failed - is not switched to again.
 //
+// **And the way back is asked for** (task p1.16-64). An image the record *does* know is not
+// switched to, because the bytes of a slot are the same whether somebody flashed them a minute
+// ago or they have lain there since the update: after an update from A to B the first slot still
+// holds A, so flashing A again over USB does nothing, and the firmware cannot tell and should not
+// guess. What it does instead is say so, once, at the boot that found it - and take `update back`
+// from a person, which switches to whatever lies in the other slot and puts *that* on trial like
+// any other. Nothing switches by itself that did not before: the one switch at boot is still the
+// one above.
+//
 // Everything in this file is portable and host-tested (test/test_trial): the slots and the boot
 // choice are behind BootSlots, the three conditions behind TrialConditions, the clock behind
 // TrialClock and the restart behind DeliberateRestart; the bytes of the slot that is not running
@@ -61,6 +70,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "Descriptor.h"
 #include "Fetch.h"
 #include "UpdateRecord.h"
 
@@ -181,6 +191,21 @@ class TrialClock {
   virtual uint32_t epoch() const = 0;
 };
 
+// -- what lies in the slot that is not running -------------------------------------------------
+
+// One reading of the other slot, which `update back`, the boot and `update` all go by (task
+// p1.16-64). The last two are the same bytes and the same descriptor: what tells them apart is
+// whether the record has met that version, which is what decides whether a boot switches to it by
+// itself or says so and waits to be asked.
+enum class OtherSlot : uint8_t {
+  Nothing = 0,     // this board has no second application slot, or the framework would not say
+  WillNotLoad,     // there is no image there the framework would load
+  NoDescriptor,    // an image, and not exactly one of this product's 96 bytes in it
+  AnotherProduct,  // one descriptor, naming another product, another board or another band
+  Known,           // this product for this board, and a version the record has met
+  Unknown,         // this product for this board, and a version the record has not met
+};
+
 // -- what a boot finds -------------------------------------------------------------------------
 
 enum class BootFinding : uint8_t {
@@ -193,6 +218,9 @@ enum class BootFinding : uint8_t {
                    // boot choice was set back here and the restart follows
   SwitchedAtBoot,  // the first slot held an image the record does not know: switched to it, and
                    // the restart follows
+  Stuck,           // a trial that failed, and neither the framework nor the boot choice would
+                   // send the board back: the record was finished *stuck* and the image that
+                   // failed is what runs (task p1.16-64)
 };
 
 const char* bootFindingWord(BootFinding finding);
@@ -232,6 +260,21 @@ class Updater {
   // `why` when nothing was switched; true does not return on a board.
   bool apply(char* why, size_t cap);
 
+  // `update back`: switch to whatever lies in the slot that is **not** running, and restart into
+  // it (task p1.16-64). It is taken when the framework would load that image and it carries this
+  // product's descriptor for this board - whether or not the record has met its version, which is
+  // the whole point - and it is then on trial like any other, so a trial it fails ends in the
+  // image the command was typed in.
+  //
+  // `elsewhere` is the sentence the **console** has when something it owns is in the way:
+  // meshmaster.dk's own ask in hand, or a fetch running. This machine knows neither, so the
+  // caller hands them over (src/main.cpp, printUpdateBack); nullptr when nothing is in the way.
+  // Then come the five this machine does know: an update in hand or a firmware on trial, a board
+  // with one slot, and the three states of the other slot that are not switched to.
+  //
+  // False and one sentence in `why` when nothing was switched; true does not return on a board.
+  bool goBack(const char* elsewhere, char* why, size_t cap);
+
   bool onTrial() const { return onTrial_; }
   // Milliseconds of the trial left, 0 when none is running.
   uint32_t trialLeftMs() const;
@@ -249,6 +292,12 @@ class Updater {
   // moment. Task 59's fetch is what asks (src/main.cpp).
   const char* whyTheOtherSlotMayNotBeWritten() const;
 
+  // The line `update` prints about the slot that is **not** running (task p1.16-64): the version
+  // its descriptor names, or that it holds an image with no descriptor, or nothing that loads, or
+  // another product - and `update back` under it where that is what would be taken. It reads the
+  // slot, so it costs a pass over the bytes there; nothing is written and nothing is decided.
+  void reportOther(TextOut& out) const;
+
   // The lines `update` prints: the trial while there is one, and the last update's ending.
   void report(TextOut& out) const;
   // The words `status` adds to its first line while a trial runs, or "".
@@ -265,6 +314,10 @@ class Updater {
   // The version of an image the record has already met: the one running, the one it was switched
   // from, or the one it was switched to - tried and failed, or committed and now the other slot's.
   bool recordKnows(const char* version) const;
+  // One reading of the slot that is not running: which of the six it is, and the descriptor when
+  // there is exactly one. `descriptors` is how many were found, so that none and two read as the
+  // same state and still say different things.
+  OtherSlot readTheOtherSlot(Descriptor& found, size_t& descriptors) const;
   // Switch to the other slot, having written the record: the boot choice, what waits in RAM, and
   // the restart, in that order. False when the boot choice refused and the record was put back.
   bool switchAndRestart(const char* why, bool postFirst);

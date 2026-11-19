@@ -24,6 +24,7 @@ const char kTrial[] = "trial";
 const char kDone[] = "done";
 const char kCommitted[] = "committed";
 const char kRolledBack[] = "rolledBack";
+const char kStuck[] = "stuck";
 
 // One field of a journal line into `out`, with `|`, CR and LF turned into spaces and the length
 // bounded. Returns what was written.
@@ -67,6 +68,8 @@ const char* endedWord(Ended ended) {
       return kCommitted;
     case Ended::RolledBack:
       return kRolledBack;
+    case Ended::Stuck:
+      return kStuck;
     case Ended::None:
       break;
   }
@@ -284,6 +287,7 @@ UpdateRecord loadUpdate(RecordStore& store) {
   if (readKey(store, kUpdateKeyEnd, end, sizeof(end))) {
     if (strcmp(end, kCommitted) == 0) rec.ended = Ended::Committed;
     if (strcmp(end, kRolledBack) == 0) rec.ended = Ended::RolledBack;
+    if (strcmp(end, kStuck) == 0) rec.ended = Ended::Stuck;
   }
   readKey(store, kUpdateKeyWhy, rec.why, sizeof(rec.why));
   // Straight into the journal's own buffer: no second one anywhere (Journal::readFrom).

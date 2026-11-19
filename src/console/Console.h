@@ -56,6 +56,12 @@ struct ConsoleHost {
   // runs on trial for ten minutes. It either does not return - the board restarts - or prints
   // one sentence saying why nothing was switched; nullptr prints nothing.
   void (*updateApply)(Stream& out);
+  // `update back` (task p1.16-64): switch to whatever lies in the slot that is not running and
+  // restart into it, on trial like any other. Flashing the release before over USB does not bring
+  // it back on a board that has been updated - the bytes of the first slot are the same whether
+  // they were flashed a minute ago or have lain there since - so this is the way back. Same shape
+  // as `update apply`: it either does not return or prints one sentence; nullptr prints nothing.
+  void (*updateBack)(Stream& out);
 };
 
 class Console {

@@ -31,6 +31,10 @@
 // rollback marks, and between them they decide which of two firmwares a board comes back as -
 // which is why they belong in one file a person can read in a minute, beside the one that writes
 // the slot and the one that writes the table. `nvs_flash_erase` is still in no file at all.
+//
+// Task p1.16-64 gave the console a second way to change the boot choice - `update back` - and
+// **added no caller**: it goes through the same `BootSlots::bootOther()` seam `update apply` does,
+// so the three files below are still the three, and this test is what says so.
 
 #include <gtest/gtest.h>
 
