@@ -30,6 +30,40 @@ uint32_t le32(const unsigned char* p) {
          (static_cast<uint32_t>(p[3]) << 24);
 }
 
+// One erase, one write and a read-back of the whole sector, which is what writing this table means
+// - and the only place that asks for either. True when the sector holds `want` byte for byte with
+// 0xFF above it *and* parses as `expect`; false, and nothing claimed, at the first thing that did
+// not go. A caller tries again rather than reading a reason: there is nothing else to do with one.
+// (task p1.16-63)
+bool writeTheTable(TableFlash& flash, const unsigned char* want, const unsigned char* oneSlotTable, TableKind expect,
+                   TableReading* reading = nullptr) {
+  if (!flash.eraseSector()) return false;
+  if (!flash.write(0, want, kTableBytesLen)) return false;
+
+  unsigned char buf[kChunk];
+  for (size_t at = 0; at < kTableSectorLen; at += kChunk) {
+    if (!flash.read(at, buf, kChunk)) return false;
+    for (size_t i = 0; i < kChunk; i++) {
+      const unsigned char should = (at + i < kTableBytesLen) ? want[at + i] : 0xFF;
+      if (buf[i] != should) return false;
+    }
+  }
+
+  const TableReading after = readTable(flash, oneSlotTable);
+  if (!after.read || after.kind != expect) return false;
+  if (expect == TableKind::Two && !after.app1.present) return false;
+  if (reading != nullptr) *reading = after;
+  return true;
+}
+
+// What a person must read while the sector holds no table, wherever they come to read it.
+void sayWhatIsTrue(char* line, size_t cap, int tries) {
+  std::snprintf(line, cap,
+                "DO NOT CUT THE POWER: the partition table's sector holds no table and the old one is being put back "
+                "once a minute (%d more tr%s so far). A board that reboots first needs the merged image over USB",
+                tries, tries == 1 ? "y" : "ies");
+}
+
 }  // namespace
 
 const char* tableKindWord(TableKind kind) {
@@ -42,6 +76,18 @@ const char* tableKindWord(TableKind kind) {
       break;
   }
   return "other";
+}
+
+const char* addSlotEndingWord(AddSlotEnding ending) {
+  switch (ending) {
+    case AddSlotEnding::Added:
+      return "added";
+    case AddSlotEnding::AsItWas:
+      return "as-it-was";
+    case AddSlotEnding::NoTable:
+      break;
+  }
+  return "no-table";
 }
 
 TableReading readTable(TableFlash& flash, const unsigned char* oneSlotTable) {
@@ -122,53 +168,92 @@ AddSlotResult addSecondSlot(TableFlash& flash, const unsigned char* oneSlotTable
     return out;
   }
 
-  if (!flash.eraseSector()) {
-    std::snprintf(out.line, sizeof out.line,
-                  "the partition table's sector could not be erased; the table may now be unreadable - "
-                  "flash the merged image of a release over USB before rebooting");
-    return out;
-  }
-  if (!flash.write(0, twoSlotTable, kTableBytesLen)) {
-    std::snprintf(out.line, sizeof out.line,
-                  "the new partition table could not be written; the sector is erased - "
-                  "flash the merged image of a release over USB before rebooting");
-    return out;
-  }
-
-  // What is there now, read back from the flash and compared with what should be: the entries
-  // against the new table, and the sector above them against the 0xFF an erase leaves.
-  unsigned char buf[kChunk];
-  for (size_t at = 0; at < kTableSectorLen; at += kChunk) {
-    if (!flash.read(at, buf, kChunk)) {
-      std::snprintf(out.line, sizeof out.line,
-                    "the new partition table was written but could not be read back at 0x%03lX; "
-                    "check it with `update` before rebooting",
-                    static_cast<unsigned long>(at));
+  // The new table, up to kTableTries times. A write that fails once - a sector that did not erase,
+  // a byte that read back wrong - may hold the next time, and while this firmware runs it can
+  // still ask. Nothing is given up on until every try is spent.
+  for (int t = 1; t <= kTableTries; t++) {
+    out.tries = t;
+    TableReading after;
+    if (writeTheTable(flash, twoSlotTable, oneSlotTable, TableKind::Two, &after)) {
+      out.ending = AddSlotEnding::Added;
+      out.added = true;
+      if (t == 1) {
+        std::snprintf(out.line, sizeof out.line,
+                      "added: app1 at 0x%06lX, 0x%06lX bytes. Type `reboot`; the table is read at the next boot",
+                      static_cast<unsigned long>(after.app1.offset), static_cast<unsigned long>(after.app1.size));
+      } else {
+        std::snprintf(out.line, sizeof out.line,
+                      "added after %d tries: app1 at 0x%06lX, 0x%06lX bytes. Type `reboot`; the table is read at "
+                      "the next boot",
+                      t, static_cast<unsigned long>(after.app1.offset), static_cast<unsigned long>(after.app1.size));
+      }
       return out;
     }
-    for (size_t i = 0; i < kChunk; i++) {
-      const unsigned char want = (at + i < kTableBytesLen) ? twoSlotTable[at + i] : 0xFF;
-      if (buf[i] != want) {
-        std::snprintf(out.line, sizeof out.line,
-                      "the sector reads 0x%02X at 0x%03lX where the new table has 0x%02X; the slot was NOT added - "
-                      "flash the merged image of a release over USB before rebooting",
-                      buf[i], static_cast<unsigned long>(at + i), want);
-        return out;
-      }
+  }
+
+  // It would not hold. An erase that never took leaves the old table where it was, and that board
+  // boots: there is nothing to put back and nothing should be written over it.
+  const TableReading now = readTable(flash, oneSlotTable);
+  if (now.read && now.kind == TableKind::One) {
+    out.ending = AddSlotEnding::AsItWas;
+    std::snprintf(out.line, sizeof out.line,
+                  "the slot was NOT added: the sector would not take the new table in %d tries and nothing was "
+                  "written over the old one, so the board is as it was",
+                  kTableTries);
+    return out;
+  }
+
+  // The old table back, the same way and as many times. A board whose table is the one it had is a
+  // board that boots, and that is worth more than the second slot.
+  for (int t = 1; t <= kTableTries; t++) {
+    out.triesBack = t;
+    if (writeTheTable(flash, oneSlotTable, oneSlotTable, TableKind::One)) {
+      out.ending = AddSlotEnding::AsItWas;
+      std::snprintf(out.line, sizeof out.line,
+                    "the slot was NOT added: the new table would not hold in %d tries and the old one is back in "
+                    "the sector after %d, so the board is as it was",
+                    kTableTries, t);
+      return out;
     }
   }
 
-  const TableReading after = readTable(flash, oneSlotTable);
-  if (after.kind != TableKind::Two || !after.app1.present) {
-    std::snprintf(out.line, sizeof out.line,
-                  "the sector was written and reads back as it was written, but the table in it has no second slot - "
-                  "flash the merged image of a release over USB before rebooting");
-    return out;
-  }
-  out.added = true;
-  std::snprintf(out.line, sizeof out.line, "added: app1 at 0x%06lX, 0x%06lX bytes. Type `reboot`; the table is read at the next boot",
-                static_cast<unsigned long>(after.app1.offset), static_cast<unsigned long>(after.app1.size));
+  // Neither holds. This is the one ending that leaves a board which does not boot, and the sentence
+  // says so: the firmware goes on trying (TableKeeper) for as long as it runs.
+  out.ending = AddSlotEnding::NoTable;
+  std::snprintf(out.line, sizeof out.line,
+                "the slot was NOT added and the sector holds NO table: do NOT cut the power - the old table is put "
+                "back once a minute from now. A board that reboots first needs the merged image over USB");
   return out;
+}
+
+void TableKeeper::note(AddSlotEnding ending, uint32_t nowMs) {
+  if (ending != AddSlotEnding::NoTable) {
+    trying_ = false;
+    tries_ = 0;
+    line_[0] = '\0';
+    return;
+  }
+  trying_ = true;
+  tries_ = 0;
+  lastTryMs_ = nowMs;  // addSecondSlot has just spent its own tries; the next one is a minute away
+  sayWhatIsTrue(line_, sizeof line_, tries_);
+}
+
+KeeperStep TableKeeper::step(TableFlash& flash, const unsigned char* oneSlotTable, uint32_t nowMs) {
+  if (!trying_) return KeeperStep::Nothing;
+  if (nowMs - lastTryMs_ < kPutTheTableBackEveryMs) return KeeperStep::Nothing;  // unsigned: a wrap is one minute
+  lastTryMs_ = nowMs;
+  tries_++;
+  if (writeTheTable(flash, oneSlotTable, oneSlotTable, TableKind::One)) {
+    trying_ = false;
+    std::snprintf(line_, sizeof line_,
+                  "the old partition table is back in the sector after %d more tr%s; the board boots again, and the "
+                  "second slot was not added",
+                  tries_, tries_ == 1 ? "y" : "ies");
+    return KeeperStep::Back;
+  }
+  sayWhatIsTrue(line_, sizeof line_, tries_);
+  return KeeperStep::Tried;
 }
 
 }  // namespace mm

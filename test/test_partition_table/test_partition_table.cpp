@@ -1,9 +1,10 @@
 // Which partition table a board runs on, and adding the second application slot to it
-// (task p1.15-57, src/platform/PartitionTable.h).
+// (tasks p1.15-57 and p1.16-63, src/platform/PartitionTable.h).
 //
 // No test here can write a board's table, so the flash is scripted: a 4 kB sector this suite
 // fills, and a TableFlash over it that counts every read, erase and write and can be told to fail
-// any of them or to read back a byte other than the one written. What is held:
+// any of them, to fail the next few, to refuse one of the two tables and to take them and not
+// keep them. What is held:
 //
 //   the word    `one` for the table boards in the field hold - this board's, byte for byte -
 //               `two` for the new table and for the framework's own default (which has an app1
@@ -12,8 +13,12 @@
 //   the write   on `one`: one erase and one write of that sector and no other call that changes
 //               it, and the sector afterwards is the new table byte for byte with 0xFF above it.
 //               On `two` and on `other`: nothing erased, nothing written.
-//   the honesty a sector that reads back one byte other than what was written is reported with
-//               the byte and the offset, and the function does not say *added*.
+//   the trying  a write that fails is tried again, three times; a new table that will not hold
+//               is followed by the old one put back, three times, and a sector that takes neither
+//               is the one ending that leaves a board which does not boot. No more than six
+//               erases are asked for between them.
+//   the keeping and that board goes on being written to, once a minute, for as long as the
+//               firmware runs - the first that holds ends it and the sentence changes with it.
 //   the files   the two csv files of a board differ by the app1 line and by nothing else, and the
 //               slot the firmware's own bytes carry is at the offset and size the task names.
 //
@@ -59,6 +64,11 @@ class ScriptedSector final : public mm::TableFlash {
   bool eraseFails = false;
   bool writeFails = false;
   long corruptAt = -1;
+  // Task p1.16-63 tries a write again, so a sector has to be able to fail a write and then take
+  // one, and to take one table and refuse the other.
+  int writeFailsTimes = 0;                     // the next N writes fail, whatever they carry
+  int corruptTimes = -1;                       // how many writes `corruptAt` spoils; -1 is every one
+  const unsigned char* refuseTable = nullptr;  // a write of exactly these bytes fails, always
 
   ScriptedSector() { std::memset(sector, 0xFF, sizeof sector); }
 
@@ -85,8 +95,16 @@ class ScriptedSector final : public mm::TableFlash {
   bool write(size_t at, const unsigned char* from, size_t len) override {
     writes++;
     if (writeFails || at + len > kTableSectorLen) return false;
+    if (writeFailsTimes > 0) {
+      writeFailsTimes--;
+      return false;
+    }
+    if (refuseTable != nullptr && len == kTableBytesLen && std::memcmp(from, refuseTable, len) == 0) return false;
     std::memcpy(sector + at, from, len);
-    if (corruptAt >= 0 && static_cast<size_t>(corruptAt) < kTableSectorLen) sector[corruptAt] ^= 0x01;
+    if (corruptAt >= 0 && corruptTimes != 0 && static_cast<size_t>(corruptAt) < kTableSectorLen) {
+      sector[corruptAt] ^= 0x01;
+      if (corruptTimes > 0) corruptTimes--;
+    }
     return true;
   }
 };
@@ -243,7 +261,11 @@ TEST(AddingTheSlot, OnOneTheSectorBecomesTheNewTableWithOneEraseAndOneWrite) {
   const mm::AddSlotResult r = mm::addSecondSlot(flash, mm::kTable8MBOneSlot, mm::kTable8MBTwoSlots);
 
   EXPECT_TRUE(r.added) << r.line;
+  EXPECT_EQ(mm::AddSlotEnding::Added, r.ending);
+  EXPECT_EQ(1, r.tries) << "it held the first time, so nothing says otherwise";
+  EXPECT_EQ(0, r.triesBack);
   EXPECT_NE(std::string(r.line).find("added"), std::string::npos) << r.line;
+  EXPECT_EQ(std::string(r.line).find("tries"), std::string::npos) << "one try is not worth a word: " << r.line;
   EXPECT_NE(std::string(r.line).find("0x350000"), std::string::npos) << r.line;
   EXPECT_NE(std::string(r.line).find("reboot"), std::string::npos) << r.line;
 
@@ -272,6 +294,8 @@ TEST(AddingTheSlot, OnTwoNothingIsErasedOrWritten) {
   flash.hold(mm::kTable8MBTwoSlots);
   const mm::AddSlotResult r = mm::addSecondSlot(flash, mm::kTable8MBOneSlot, mm::kTable8MBTwoSlots);
   EXPECT_FALSE(r.added);
+  EXPECT_EQ(mm::AddSlotEnding::AsItWas, r.ending);
+  EXPECT_EQ(0, r.tries) << "nothing was written, so nothing was tried";
   EXPECT_NE(std::string(r.line).find("already there"), std::string::npos) << r.line;
   EXPECT_NE(std::string(r.line).find("0x350000"), std::string::npos) << r.line;
   EXPECT_EQ(0, flash.erases);
@@ -286,6 +310,7 @@ TEST(AddingTheSlot, OnOtherItRefusesInASentenceAndWritesNothing) {
   flash.hold(changed.data());
   const mm::AddSlotResult r = mm::addSecondSlot(flash, mm::kTable8MBOneSlot, mm::kTable8MBTwoSlots);
   EXPECT_FALSE(r.added);
+  EXPECT_EQ(mm::AddSlotEnding::AsItWas, r.ending);
   EXPECT_NE(std::string(r.line).find("not one this firmware knows"), std::string::npos) << r.line;
   EXPECT_EQ(0, flash.erases);
   EXPECT_EQ(0, flash.writes);
@@ -296,62 +321,230 @@ TEST(AddingTheSlot, AnErasedSectorIsNotWrittenEither) {
   ScriptedSector flash;  // all 0xFF: a board caught between the erase and the write
   const mm::AddSlotResult r = mm::addSecondSlot(flash, mm::kTable8MBOneSlot, mm::kTable8MBTwoSlots);
   EXPECT_FALSE(r.added);
+  EXPECT_EQ(mm::AddSlotEnding::AsItWas, r.ending) << "`other` is refused, and refusing changes nothing";
   EXPECT_EQ(0, flash.erases);
   EXPECT_EQ(0, flash.writes);
 }
 
-TEST(AddingTheSlot, AReadbackThatDiffersByOneByteSaysWhatItReadAndDoesNotSayAdded) {
+// ---- a write that fails, and what is done about it (task p1.16-63) --------------------------------
+
+TEST(TryingAgain, AFirstWriteThatFailsAndASecondThatHoldsIsAddedAndTheSentenceSaysTwoTries) {
+  ScriptedSector flash;
+  flash.hold(mm::kTable8MBOneSlot);
+  flash.writeFailsTimes = 1;
+
+  const mm::AddSlotResult r = mm::addSecondSlot(flash, mm::kTable8MBOneSlot, mm::kTable8MBTwoSlots);
+  EXPECT_TRUE(r.added) << r.line;
+  EXPECT_EQ(mm::AddSlotEnding::Added, r.ending);
+  EXPECT_EQ(2, r.tries);
+  EXPECT_EQ(0, r.triesBack);
+  EXPECT_NE(std::string(r.line).find("2 tries"), std::string::npos) << r.line;
+  EXPECT_EQ(TableKind::Two, mm::readTable(flash, mm::kTable8MBOneSlot).kind);
+  EXPECT_EQ(0, std::memcmp(flash.sector, mm::kTable8MBTwoSlots, kTableBytesLen));
+  EXPECT_EQ(2, flash.erases) << "one erase a try, and no more";
+}
+
+TEST(TryingAgain, AReadbackThatIsOneByteWrongOnceIsTheSame) {
   ScriptedSector flash;
   flash.hold(mm::kTable8MBOneSlot);
   flash.corruptAt = 0x44;  // inside an entry, so the byte is not 0xFF either way
-  const unsigned char want = mm::kTable8MBTwoSlots[0x44];
+  flash.corruptTimes = 1;  // the first write comes back wrong; the second does not
+
+  const mm::AddSlotResult r = mm::addSecondSlot(flash, mm::kTable8MBOneSlot, mm::kTable8MBTwoSlots);
+  EXPECT_TRUE(r.added) << r.line;
+  EXPECT_EQ(mm::AddSlotEnding::Added, r.ending);
+  EXPECT_EQ(2, r.tries);
+  EXPECT_NE(std::string(r.line).find("2 tries"), std::string::npos) << r.line;
+  EXPECT_EQ(0, std::memcmp(flash.sector, mm::kTable8MBTwoSlots, kTableBytesLen));
+}
+
+TEST(TryingAgain, ASectorThatTakesNoNewTableButTakesTheOldIsLeftAsItWas) {
+  ScriptedSector flash;
+  flash.hold(mm::kTable8MBOneSlot);
+  flash.refuseTable = mm::kTable8MBTwoSlots;  // the new table never holds; the old one does
 
   const mm::AddSlotResult r = mm::addSecondSlot(flash, mm::kTable8MBOneSlot, mm::kTable8MBTwoSlots);
   EXPECT_FALSE(r.added);
-  const std::string line(r.line);
-  EXPECT_EQ(line.find("added:"), std::string::npos) << line;
-  EXPECT_NE(line.find("NOT added"), std::string::npos) << line;
-  EXPECT_NE(line.find("0x044"), std::string::npos) << "the offset it read: " << line;
+  EXPECT_EQ(mm::AddSlotEnding::AsItWas, r.ending);
+  EXPECT_EQ(mm::kTableTries, r.tries);
+  EXPECT_EQ(1, r.triesBack) << "the old one held the first time it was asked for";
+  EXPECT_NE(std::string(r.line).find("the board is as it was"), std::string::npos) << r.line;
 
-  char read_byte[8];
-  char want_byte[8];
-  std::snprintf(read_byte, sizeof read_byte, "0x%02X", static_cast<unsigned>(want ^ 0x01));
-  std::snprintf(want_byte, sizeof want_byte, "0x%02X", static_cast<unsigned>(want));
-  EXPECT_NE(line.find(read_byte), std::string::npos) << "the byte it read: " << line;
-  EXPECT_NE(line.find(want_byte), std::string::npos) << "the byte it wanted: " << line;
+  // And the sector holds the table the board came with, byte for byte, with 0xFF above it.
+  EXPECT_EQ(0, std::memcmp(flash.sector, mm::kTable8MBOneSlot, kTableBytesLen)) << "the entries";
+  for (size_t at = kTableBytesLen; at < kTableSectorLen; at++) {
+    ASSERT_EQ(0xFF, flash.sector[at]) << "0x" << std::hex << at << " above the entries";
+  }
+  EXPECT_EQ(TableKind::One, mm::readTable(flash, mm::kTable8MBOneSlot).kind) << "which is a board that boots";
 }
 
-TEST(AddingTheSlot, AnEraseOrAWriteThatFailsSaysSoAndSaysWhatToDo) {
-  {
-    ScriptedSector flash;
-    flash.hold(mm::kTable8MBOneSlot);
-    flash.eraseFails = true;
-    const mm::AddSlotResult r = mm::addSecondSlot(flash, mm::kTable8MBOneSlot, mm::kTable8MBTwoSlots);
-    EXPECT_FALSE(r.added);
-    EXPECT_NE(std::string(r.line).find("could not be erased"), std::string::npos) << r.line;
-    EXPECT_NE(std::string(r.line).find("merged image"), std::string::npos) << r.line;
-    EXPECT_EQ(0, flash.writes);
-  }
-  {
-    ScriptedSector flash;
-    flash.hold(mm::kTable8MBOneSlot);
-    flash.writeFails = true;
-    const mm::AddSlotResult r = mm::addSecondSlot(flash, mm::kTable8MBOneSlot, mm::kTable8MBTwoSlots);
-    EXPECT_FALSE(r.added);
-    EXPECT_NE(std::string(r.line).find("could not be written"), std::string::npos) << r.line;
-    EXPECT_EQ(1, flash.erases);
-    EXPECT_EQ(1, flash.writes);
-  }
-}
-
-TEST(AddingTheSlot, TheLineIsAlwaysOneLine) {
+TEST(TryingAgain, ASectorThatTakesNoWriteAtAllEndsWithNoTableAndSixErasesAtMost) {
   ScriptedSector flash;
   flash.hold(mm::kTable8MBOneSlot);
+  flash.writeFails = true;
+
   const mm::AddSlotResult r = mm::addSecondSlot(flash, mm::kTable8MBOneSlot, mm::kTable8MBTwoSlots);
+  EXPECT_FALSE(r.added);
+  EXPECT_EQ(mm::AddSlotEnding::NoTable, r.ending);
+  EXPECT_EQ(mm::kTableTries, r.tries);
+  EXPECT_EQ(mm::kTableTries, r.triesBack);
   const std::string line(r.line);
-  EXPECT_FALSE(line.empty());
-  EXPECT_EQ(line.find('\n'), std::string::npos) << line;
-  EXPECT_EQ(line.find('\r'), std::string::npos) << line;
+  EXPECT_NE(line.find("NO table"), std::string::npos) << line;
+  EXPECT_NE(line.find("do NOT cut the power"), std::string::npos) << line;
+  EXPECT_NE(line.find("merged image"), std::string::npos) << "and what to flash: " << line;
+  EXPECT_LE(flash.erases, 2 * mm::kTableTries) << "three tries of each table, and no more";
+  EXPECT_EQ(TableKind::Other, mm::readTable(flash, mm::kTable8MBOneSlot).kind) << "the sector holds no table";
+}
+
+TEST(TryingAgain, AnEraseThatFailsLeavesTheTableUntouchedAndNothingIsWrittenOverIt) {
+  ScriptedSector flash;
+  flash.hold(mm::kTable8MBOneSlot);
+  flash.eraseFails = true;
+
+  const mm::AddSlotResult r = mm::addSecondSlot(flash, mm::kTable8MBOneSlot, mm::kTable8MBTwoSlots);
+  EXPECT_FALSE(r.added);
+  EXPECT_EQ(mm::AddSlotEnding::AsItWas, r.ending);
+  EXPECT_EQ(0, flash.writes) << "an erase that never took leaves the old table where it is";
+  EXPECT_EQ(0, r.triesBack) << "and there is nothing to put back";
+  EXPECT_NE(std::string(r.line).find("the board is as it was"), std::string::npos) << r.line;
+  EXPECT_EQ(0, std::memcmp(flash.sector, mm::kTable8MBOneSlot, kTableBytesLen)) << "untouched";
+  EXPECT_EQ(TableKind::One, mm::readTable(flash, mm::kTable8MBOneSlot).kind);
+}
+
+TEST(TryingAgain, AReadbackThatIsWrongEveryTimeEndsWithNoTable) {
+  ScriptedSector flash;
+  flash.hold(mm::kTable8MBOneSlot);
+  flash.corruptAt = 0x44;  // every write of either table comes back one byte wrong
+
+  const mm::AddSlotResult r = mm::addSecondSlot(flash, mm::kTable8MBOneSlot, mm::kTable8MBTwoSlots);
+  EXPECT_FALSE(r.added);
+  EXPECT_EQ(mm::AddSlotEnding::NoTable, r.ending);
+  EXPECT_NE(std::string(r.line).find("do NOT cut the power"), std::string::npos) << r.line;
+}
+
+// ---- and then, for as long as the firmware runs (deliverable 4) -----------------------------------
+
+TEST(TheKeeper, SaysNothingAtAllWhenTheSlotWasAddedOrTheBoardIsAsItWas) {
+  for (mm::AddSlotEnding ending : {mm::AddSlotEnding::Added, mm::AddSlotEnding::AsItWas}) {
+    mm::TableKeeper keeper;
+    keeper.note(ending, 1000);
+    EXPECT_FALSE(keeper.theSectorHoldsNoTable());
+    EXPECT_STREQ("", keeper.line());
+
+    ScriptedSector flash;
+    flash.hold(mm::kTable8MBOneSlot);
+    EXPECT_EQ(mm::KeeperStep::Nothing, keeper.step(flash, mm::kTable8MBOneSlot, 1000 + 10 * 60 * 1000));
+    EXPECT_EQ(0, flash.erases);
+    EXPECT_EQ(0, flash.writes);
+  }
+}
+
+TEST(TheKeeper, PutsTheOldTableBackOnceAMinuteAndTheFirstThatHoldsEndsIt) {
+  ScriptedSector flash;  // all 0xFF: the sector addSecondSlot gave up on
+  flash.writeFails = true;
+  mm::TableKeeper keeper;
+  keeper.note(mm::AddSlotEnding::NoTable, 1000);
+
+  EXPECT_TRUE(keeper.theSectorHoldsNoTable());
+  EXPECT_EQ(0, keeper.tries());
+  EXPECT_NE(std::string(keeper.line()).find("DO NOT CUT THE POWER"), std::string::npos) << keeper.line();
+
+  // Nothing at all before the minute is up, however many passes of the loop there are.
+  for (uint32_t at : {uint32_t{1000}, uint32_t{1001}, uint32_t{30000}, uint32_t{60999}}) {
+    EXPECT_EQ(mm::KeeperStep::Nothing, keeper.step(flash, mm::kTable8MBOneSlot, at)) << at;
+  }
+  EXPECT_EQ(0, flash.erases);
+  EXPECT_EQ(0, flash.writes);
+
+  // The minute is up and the sector still takes nothing: one erase, one write, and it says so.
+  EXPECT_EQ(mm::KeeperStep::Tried, keeper.step(flash, mm::kTable8MBOneSlot, 61000));
+  EXPECT_EQ(1, keeper.tries());
+  EXPECT_EQ(1, flash.erases);
+  EXPECT_EQ(1, flash.writes);
+  EXPECT_TRUE(keeper.theSectorHoldsNoTable());
+  EXPECT_EQ(mm::KeeperStep::Nothing, keeper.step(flash, mm::kTable8MBOneSlot, 90000)) << "and not twice in a minute";
+
+  EXPECT_EQ(mm::KeeperStep::Tried, keeper.step(flash, mm::kTable8MBOneSlot, 121000));
+  EXPECT_EQ(2, keeper.tries());
+
+  // A minute later the sector takes a write again: the table is back, and the board boots.
+  flash.writeFails = false;
+  EXPECT_EQ(mm::KeeperStep::Back, keeper.step(flash, mm::kTable8MBOneSlot, 181000));
+  EXPECT_EQ(3, keeper.tries());
+  EXPECT_EQ(TableKind::One, mm::readTable(flash, mm::kTable8MBOneSlot).kind);
+  EXPECT_EQ(0, std::memcmp(flash.sector, mm::kTable8MBOneSlot, kTableBytesLen));
+
+  // And `update` and `status` stop saying to keep the power on, because this is how they ask.
+  EXPECT_FALSE(keeper.theSectorHoldsNoTable());
+  EXPECT_EQ(std::string(keeper.line()).find("DO NOT CUT THE POWER"), std::string::npos) << keeper.line();
+  EXPECT_NE(std::string(keeper.line()).find("back in the sector"), std::string::npos) << keeper.line();
+
+  // Nothing more is ever written, whatever the clock does.
+  const int erases = flash.erases;
+  EXPECT_EQ(mm::KeeperStep::Nothing, keeper.step(flash, mm::kTable8MBOneSlot, 9000000));
+  EXPECT_EQ(erases, flash.erases);
+}
+
+TEST(TheKeeper, ASectorThatTakesTheOldTableAtTheFirstMinuteIsBackAtOnce) {
+  // The whole of acceptance criterion five: the board of the test above, a minute later.
+  ScriptedSector flash;
+  mm::TableKeeper keeper;
+  keeper.note(mm::AddSlotEnding::NoTable, 0);
+  EXPECT_EQ(mm::KeeperStep::Back, keeper.step(flash, mm::kTable8MBOneSlot, mm::kPutTheTableBackEveryMs));
+  EXPECT_EQ(1, keeper.tries());
+  EXPECT_EQ(TableKind::One, mm::readTable(flash, mm::kTable8MBOneSlot).kind);
+  EXPECT_FALSE(keeper.theSectorHoldsNoTable());
+}
+
+TEST(TheKeeper, TheMillisecondCounterWrappingIsOneMoreMinute) {
+  ScriptedSector flash;
+  mm::TableKeeper keeper;
+  keeper.note(mm::AddSlotEnding::NoTable, 0xFFFFFFFFu - 1000u);
+  EXPECT_EQ(mm::KeeperStep::Nothing, keeper.step(flash, mm::kTable8MBOneSlot, 1000u)) << "2 s later, wrapped";
+  EXPECT_EQ(mm::KeeperStep::Back, keeper.step(flash, mm::kTable8MBOneSlot, 60000u)) << "and a minute after that";
+}
+
+TEST(TheEndings, AreTheThreeTheHeaderNames) {
+  EXPECT_STREQ("added", mm::addSlotEndingWord(mm::AddSlotEnding::Added));
+  EXPECT_STREQ("as-it-was", mm::addSlotEndingWord(mm::AddSlotEnding::AsItWas));
+  EXPECT_STREQ("no-table", mm::addSlotEndingWord(mm::AddSlotEnding::NoTable));
+}
+
+TEST(AddingTheSlot, TheLineIsAlwaysOneLineAndAlwaysFitsWhicheverEndingItIs) {
+  // Every ending this task has, driven through the one function, and each line read as a console
+  // reads it: one line, not empty, and short enough that snprintf did not cut it short.
+  struct Case {
+    const char* what;
+    bool writeFails;
+    const unsigned char* refuse;
+    bool eraseFails;
+    int failTimes;
+  };
+  const Case cases[] = {
+      {"added at the first try", false, nullptr, false, 0},
+      {"added at the second", false, nullptr, false, 1},
+      {"the old table back", false, mm::kTable8MBTwoSlots, false, 0},
+      {"nothing written over it", false, nullptr, true, 0},
+      {"no table at all", true, nullptr, false, 0},
+  };
+  for (const Case& c : cases) {
+    ScriptedSector flash;
+    flash.hold(mm::kTable8MBOneSlot);
+    flash.writeFails = c.writeFails;
+    flash.refuseTable = c.refuse;
+    flash.eraseFails = c.eraseFails;
+    flash.writeFailsTimes = c.failTimes;
+    const mm::AddSlotResult r = mm::addSecondSlot(flash, mm::kTable8MBOneSlot, mm::kTable8MBTwoSlots);
+    const std::string line(r.line);
+    EXPECT_FALSE(line.empty()) << c.what;
+    EXPECT_EQ(line.find('\n'), std::string::npos) << c.what << ": " << line;
+    EXPECT_EQ(line.find('\r'), std::string::npos) << c.what << ": " << line;
+    EXPECT_LT(line.size(), sizeof(r.line) - 1) << c.what << ": it was cut short: " << line;
+  }
+
+  mm::TableKeeper keeper;
+  keeper.note(mm::AddSlotEnding::NoTable, 0);
+  EXPECT_LT(std::strlen(keeper.line()), size_t{200}) << keeper.line();
 }
 
 TEST(TheWords, AreTheThreeTheDocumentationSays) {

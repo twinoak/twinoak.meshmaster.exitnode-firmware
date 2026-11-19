@@ -453,10 +453,16 @@ void Asked::decide() {
       return;
     }
     char line[200] = {0};
-    const bool added = seams_.table->addSecondSlot(line, sizeof(line));
+    bool holds = true;
+    const bool added = seams_.table->addSecondSlot(line, sizeof(line), &holds);
     say("adding-slot: %s", line);
     if (!added) {
-      end(AskOutcome::Stuck, AskRefusal::None, 0, "%.90s", line);
+      // Nobody is at the console to read the sentence, so the journal says which of the two
+      // endings it was in words the server's page can show as they are (task p1.16-63): a board
+      // that is as it was and boots, or one whose sector holds no table at all. Nothing restarts
+      // a board in either case - a restart is what the second one does not survive.
+      end(AskOutcome::Stuck, AskRefusal::None, 0, "%s; %.55s",
+          holds ? "the table is the one the board had" : "the sector holds no partition table", line);
       return;
     }
     seams_.restart->note("a second application slot was added for an update the server asked for");
