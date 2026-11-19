@@ -28,6 +28,8 @@
 //                            what the other slot holds (tasks p1.15-57 and p1.15-59)
 //   update slot              add the second application slot to this board's table, and say to reboot
 //   update fetch <id>        fetch release <id> from the server into the other slot and judge it
+//   update apply             switch to the judged image and restart; it then runs on trial
+//   update back              switch to whatever lies in the other slot, on trial like any other
 //
 // Since task p1.7-26 the lines of the observer firmware's Danish guide are understood as well:
 // `set wifi.pwd ...` is `set wifi.pass ...` (Keys.cpp, findKey), and `set timezone ...` and
@@ -68,6 +70,7 @@ enum class Verb : unsigned char {
   UpdateSlot,  // `update slot`: add the second application slot to this board's table
   UpdateFetch, // `update fetch <id>`: fetch release <id> into the other slot and judge it (task p1.15-59)
   UpdateApply, // `update apply`: switch to the judged image and restart; it runs on trial (task p1.15-60)
+  UpdateBack,  // `update back`: switch to whatever lies in the other slot, on trial like any other (task p1.16-64)
 };
 
 struct Command {
@@ -91,10 +94,11 @@ ParseResult parseLine(const char* line);
 // The confirmation word `erase` needs, so the help text and the test say the same thing.
 constexpr const char* kEraseWord = "confirm";
 
-// The three words `update` takes, for the same reason.
+// The four words `update` takes, for the same reason.
 constexpr const char* kSlotWord = "slot";
 constexpr const char* kFetchWord = "fetch";
 constexpr const char* kApplyWord = "apply";
+constexpr const char* kBackWord = "back";
 
 // A release id is digits and nothing else, at most this many: it becomes a path on the wire
 // (src/update/Fetch.h, releaseIdIsSane, which the board applies again before it asks).

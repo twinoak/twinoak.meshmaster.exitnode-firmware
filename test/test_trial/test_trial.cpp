@@ -754,6 +754,35 @@ static void aBoardRunningFromTheSecondSlot(Board& b) {
   ASSERT_EQ(Ended::Committed, b.record().ended);
 }
 
+// And the first slot then holds the image it was switched from, with that version's own
+// descriptor in it - which is the state `update back` exists for and the one a boot has to say
+// something about (task p1.16-64). Returns A's bytes; the board is booted and `atBoot` run.
+static std::vector<uint8_t> aBoardThatHasBeenUpdated(Board& b) {
+  aBoardRunningFromTheSecondSlot(b);
+  const std::vector<uint8_t> a = imageAtVersion(theImage(), kOldVersion);
+  b.slot.bytes = a;
+  b.boot(kNewVersion, 1, SlotState::Valid);
+  b.slots.otherVerifies = true;
+  b.slots.otherLength = static_cast<uint32_t>(a.size());
+  EXPECT_EQ(BootFinding::Nothing, b.updater.atBoot());
+  EXPECT_EQ(0, b.slots.boots) << "a version the record has met is not switched to at boot";
+  return a;
+}
+
+// The same image with its one descriptor's magic broken: an image the framework would load and
+// this firmware can say nothing about, which is what every release older than the second slot
+// looks like from here.
+static std::vector<uint8_t> anImageWithNoDescriptor() {
+  std::vector<uint8_t> image = imageAtVersion(theImage(), kOldVersion);
+  const mm::update::MemoryBytes reader(image.data(), static_cast<uint32_t>(image.size()));
+  mm::update::Descriptor found;
+  uint32_t at = 0;
+  size_t count = 0;
+  EXPECT_TRUE(mm::update::findOneDescriptor(reader, found, at, count));
+  image[at] ^= 0xFF;
+  return image;
+}
+
 TEST(AFlashOverUsb, AnUnknownImageOfThisProductInTheFirstSlotIsSwitchedToOnce) {
   Board b;
   aBoardRunningFromTheSecondSlot(b);
@@ -1142,6 +1171,359 @@ TEST(TheTrial, TheOtherSlotMayNotBeWrittenWhileAnUpdateIsInHand) {
   b.clock.advanceMs(5000);
   b.updater.step();
   EXPECT_EQ(nullptr, b.updater.whyTheOtherSlotMayNotBeWritten()) << "a committed update is out of the way";
+}
+
+// ---- the way back ----------------------------------------------------------------------------
+//
+// After an update from A to B the first slot still holds A, and flashing A again over USB does
+// nothing: the boot above switches only to a version the record has **not** met, and the record
+// has met A - it is the version it switched from. The bytes are the same whether somebody flashed
+// them a minute ago or they have lain there since the update, so the firmware cannot tell and does
+// not guess. `update back` is what is asked for instead (task p1.16-64).
+
+TEST(TheWayBack, SwitchesToWhatTheOtherSlotHoldsAndThatImageIsOnTrialLikeAnyOther) {
+  Board b;
+  aBoardThatHasBeenUpdated(b);
+
+  char why[224] = {0};
+  ASSERT_TRUE(b.updater.goBack(nullptr, why, sizeof(why))) << why;
+  EXPECT_EQ(1, b.slots.boots);
+  EXPECT_EQ(1, b.restart.restarts);
+  EXPECT_EQ(1, b.restart.posts) << "what waits in RAM is given its one try, as `update apply` gives it one";
+  // The record first, then the boot choice, then the restart - the order a power cut is survived by.
+  ASSERT_GE(b.order.size(), 5u);
+  EXPECT_EQ(std::vector<std::string>({"record:switching", "boot-other", "post-what-waits", "note", "restart"}),
+            std::vector<std::string>(b.order.end() - 5, b.order.end()));
+
+  const UpdateRecord rec = b.record();
+  EXPECT_EQ(Phase::Switching, rec.phase);
+  EXPECT_STREQ(kNewVersion, rec.from);
+  EXPECT_STREQ(kOldVersion, rec.to);
+  EXPECT_EQ(0u, rec.slot) << "the first slot, which is the one not running";
+  EXPECT_STREQ("", rec.sha256hex) << "no release named these bytes, as for an image flashed over USB";
+  EXPECT_NE(std::string::npos, b.lastNote().find("back to")) << b.lastNote();
+
+  // The boot after it is A on trial, and A proved is `committed` with `from` B and `to` A.
+  b.boot(kOldVersion, 0, SlotState::Pending);
+  ASSERT_EQ(BootFinding::TrialBegun, b.updater.atBoot());
+  b.conditions.mesh = b.conditions.link = b.conditions.server = true;
+  b.clock.advanceMs(4000);
+  b.updater.step();
+  EXPECT_EQ(1, b.slots.valids);
+  const UpdateRecord done = b.record();
+  EXPECT_EQ(Ended::Committed, done.ended);
+  EXPECT_STREQ(kNewVersion, done.from);
+  EXPECT_STREQ(kOldVersion, done.to);
+}
+
+TEST(TheWayBack, ATrialThatFailsEndsInTheImageTheCommandWasTypedIn) {
+  Board b;
+  aBoardThatHasBeenUpdated(b);
+  char why[224] = {0};
+  ASSERT_TRUE(b.updater.goBack(nullptr, why, sizeof(why))) << why;
+
+  b.boot(kOldVersion, 0, SlotState::Pending);
+  ASSERT_EQ(BootFinding::TrialBegun, b.updater.atBoot());
+  b.conditions.mesh = true;  // no wifi, and the ten minutes go by
+  b.clock.advanceMs(kTrialMs);
+  b.updater.step();
+  EXPECT_EQ(1, b.slots.invalids) << "the bootloader then boots the other slot, which holds B";
+
+  // ... and that boot is B again, which finishes the record.
+  b.boot(kNewVersion, 1, SlotState::Valid);
+  EXPECT_EQ(BootFinding::RolledBack, b.updater.atBoot());
+  const UpdateRecord rec = b.record();
+  EXPECT_EQ(Ended::RolledBack, rec.ended);
+  EXPECT_NE(std::string::npos, std::string(rec.why).find("no wifi")) << rec.why;
+  EXPECT_STREQ(kNewVersion, rec.from) << "B is what the command was typed in, and B is what runs";
+}
+
+TEST(TheWayBack, SevenRefusalsEachItsOwnSentenceAndNothingIsSwitched) {
+  std::vector<std::string> sentences;
+  char why[224] = {0};
+
+  // 1 and 2, the console's own: meshmaster.dk's ask in hand, and a fetch running. This machine
+  // knows neither, so src/main.cpp hands over the sentence a person is given.
+  for (const char* elsewhere : {"an update asked for by meshmaster.dk is in hand at `fetching`",
+                                "a fetch is running; wait for its ending before switching to anything"}) {
+    Board b;
+    aBoardThatHasBeenUpdated(b);
+    EXPECT_FALSE(b.updater.goBack(elsewhere, why, sizeof(why))) << elsewhere;
+    EXPECT_STREQ(elsewhere, why);
+    EXPECT_EQ(0, b.slots.boots);
+    EXPECT_EQ(0, b.restart.restarts);
+    sentences.push_back(why);
+  }
+
+  // 3: a firmware on trial. The other slot then holds the image this board would go back to.
+  {
+    Board b;
+    applyTheJudgedImage(b);
+    b.boot(kNewVersion, 1, SlotState::Pending);
+    ASSERT_EQ(BootFinding::TrialBegun, b.updater.atBoot());
+    EXPECT_FALSE(b.updater.goBack(nullptr, why, sizeof(why)));
+    EXPECT_NE(std::string::npos, std::string(why).find("already in hand")) << why;
+    EXPECT_EQ(0, b.slots.boots);
+    sentences.push_back(why);
+  }
+
+  // 4: a board with one application slot.
+  {
+    Board b;
+    b.boot(kOldVersion, 0, SlotState::Undefined);
+    b.slots.there = false;
+    b.slots.reason = "this board has no second application slot";
+    EXPECT_FALSE(b.updater.goBack(nullptr, why, sizeof(why)));
+    EXPECT_STREQ("this board has no second application slot", why);
+    EXPECT_EQ(0, b.slots.boots);
+    sentences.push_back(why);
+  }
+
+  // 5: a slot the framework would not load.
+  {
+    Board b;
+    aBoardThatHasBeenUpdated(b);
+    b.slots.otherVerifies = false;
+    b.slots.otherLength = 0;
+    EXPECT_FALSE(b.updater.goBack(nullptr, why, sizeof(why)));
+    EXPECT_NE(std::string::npos, std::string(why).find("nothing this firmware would boot")) << why;
+    EXPECT_EQ(0, b.slots.boots);
+    sentences.push_back(why);
+  }
+
+  // 6: an image with no descriptor - every release older than the second slot. Only a merged
+  // image over USB reaches one of those, and the board's identity goes with it.
+  {
+    Board b;
+    aBoardRunningFromTheSecondSlot(b);
+    const std::vector<uint8_t> blank = anImageWithNoDescriptor();
+    b.slot.bytes = blank;
+    b.boot(kNewVersion, 1, SlotState::Valid);
+    b.slots.otherVerifies = true;
+    b.slots.otherLength = static_cast<uint32_t>(blank.size());
+    EXPECT_FALSE(b.updater.goBack(nullptr, why, sizeof(why)));
+    EXPECT_NE(std::string::npos, std::string(why).find("no descriptor")) << why;
+    EXPECT_NE(std::string::npos, std::string(why).find("merged image over USB")) << why;
+    EXPECT_EQ(0, b.slots.boots);
+    sentences.push_back(why);
+  }
+
+  // 7: an image of the other board.
+  {
+    Board b;
+    aBoardRunningFromTheSecondSlot(b);
+    const std::vector<uint8_t> v4 = theImage("heltec_v4");
+    b.slot.bytes = v4;
+    b.boot(kNewVersion, 1, SlotState::Valid);
+    b.slots.otherVerifies = true;
+    b.slots.otherLength = static_cast<uint32_t>(v4.size());
+    EXPECT_FALSE(b.updater.goBack(nullptr, why, sizeof(why)));
+    EXPECT_NE(std::string::npos, std::string(why).find("heltec_v4")) << why;
+    EXPECT_NE(std::string::npos, std::string(why).find("not this product for this board")) << why;
+    EXPECT_EQ(0, b.slots.boots);
+    sentences.push_back(why);
+  }
+
+  // Seven, and each its own: a refusal that reads like another is a refusal nobody can act on.
+  ASSERT_EQ(7u, sentences.size());
+  for (size_t i = 0; i < sentences.size(); i++) {
+    EXPECT_FALSE(sentences[i].empty()) << i;
+    for (size_t j = i + 1; j < sentences.size(); j++) EXPECT_NE(sentences[i], sentences[j]) << i << " and " << j;
+  }
+}
+
+// ---- the boot that did not switch, and says so -----------------------------------------------
+
+TEST(TheBootThatDidNotSwitch, NamesTheVersionInTheFirstSlotAndUpdateBackWithIt) {
+  Board b;
+  aBoardRunningFromTheSecondSlot(b);
+  const std::vector<uint8_t> a = imageAtVersion(theImage(), kOldVersion);
+  b.slot.bytes = a;
+  b.boot(kNewVersion, 1, SlotState::Valid);
+  b.slots.otherVerifies = true;
+  b.slots.otherLength = static_cast<uint32_t>(a.size());
+
+  EXPECT_EQ(BootFinding::Nothing, b.updater.atBoot());
+  EXPECT_EQ(0, b.slots.boots) << "nothing switches by itself that did not before";
+  EXPECT_EQ(0, b.restart.restarts);
+  EXPECT_TRUE(b.lines.holds(kOldVersion)) << b.lines.all;
+  EXPECT_TRUE(b.lines.holds("which this board has run")) << b.lines.all;
+  EXPECT_TRUE(b.lines.holds("update back")) << b.lines.all;
+}
+
+TEST(TheBootThatDidNotSwitch, SaysSoForAnImageWithNoDescriptorRatherThanPassingItOverInSilence) {
+  Board b;
+  aBoardRunningFromTheSecondSlot(b);
+  const std::vector<uint8_t> blank = anImageWithNoDescriptor();
+  b.slot.bytes = blank;
+  b.boot(kNewVersion, 1, SlotState::Valid);
+  b.slots.otherVerifies = true;
+  b.slots.otherLength = static_cast<uint32_t>(blank.size());
+
+  EXPECT_EQ(BootFinding::Nothing, b.updater.atBoot());
+  EXPECT_EQ(0, b.slots.boots);
+  EXPECT_TRUE(b.lines.holds("no descriptor")) << b.lines.all;
+  EXPECT_FALSE(b.lines.holds("update back")) << "nothing switches to an image with no descriptor";
+}
+
+TEST(TheBootThatDidNotSwitch, AnImageTheRecordDoesNotKnowIsStillSwitchedToAsBefore) {
+  Board b;
+  aBoardRunningFromTheSecondSlot(b);
+  const std::vector<uint8_t> flashed = imageAtVersion(theImage(), "0.9.0+abcdef1");
+  b.slot.bytes = flashed;
+  b.boot(kNewVersion, 1, SlotState::Valid);
+  b.slots.otherVerifies = true;
+  b.slots.otherLength = static_cast<uint32_t>(flashed.size());
+
+  EXPECT_EQ(BootFinding::SwitchedAtBoot, b.updater.atBoot());
+  EXPECT_EQ(1, b.slots.boots);
+  EXPECT_FALSE(b.lines.holds("has run")) << b.lines.all;
+}
+
+// ---- a rollback the framework refuses ---------------------------------------------------------
+//
+// `markInvalidAndRestart()` answers ESP_ERR_OTA_ROLLBACK_FAILED when the framework will not write
+// the verdict. The image is **still pending**, and a plain restart is what undoes a pending one:
+// the bootloader marks it aborted and the other slot's entry is the one it chooses. So the board
+// restarts, and nothing is called rolled back before it is (task p1.16-64, deliverable 4).
+
+TEST(ARollbackTheFrameworkRefuses, RestartsRatherThanFinishingTheRecordWhereItStands) {
+  Board b;
+  applyTheJudgedImage(b);
+  b.boot(kNewVersion, 1, SlotState::Pending);
+  ASSERT_EQ(BootFinding::TrialBegun, b.updater.atBoot());
+  b.slots.markInvalidWorks = false;
+  b.conditions.mesh = true;
+  b.conditions.link = true;  // no heartbeat, and the ten minutes go by
+  b.clock.advanceMs(kTrialMs);
+  b.updater.step();
+
+  EXPECT_EQ(1, b.restart.restarts) << "a plain restart is what undoes a pending image";
+  EXPECT_EQ(0, b.slots.boots) << "the boot choice is not touched: the bootloader is what chooses";
+  EXPECT_EQ(Phase::OnTrial, b.record().phase) << "the boot after the restart finishes the record";
+  EXPECT_EQ(Ended::None, b.record().ended) << "nothing is finished as rolled back before it has been";
+  EXPECT_NE(std::string::npos, b.lastNote().find("restarting")) << b.lastNote();
+
+  // The boot after it in the old image: `rolledBack`, which is now true of it.
+  b.boot(kOldVersion, 0, SlotState::Valid, "Software reset");
+  EXPECT_EQ(BootFinding::RolledBack, b.updater.atBoot());
+  EXPECT_EQ(Ended::RolledBack, b.record().ended);
+  EXPECT_NE(std::string::npos, std::string(b.record().why).find("no server")) << b.record().why;
+}
+
+TEST(ARollbackTheFrameworkRefuses, TheSameImageAgainWithNoWayBackIsStuckAndNotRolledBack) {
+  Board b;
+  applyTheJudgedImage(b);
+  b.boot(kNewVersion, 1, SlotState::Pending);
+  ASSERT_EQ(BootFinding::TrialBegun, b.updater.atBoot());
+  b.slots.markInvalidWorks = false;
+  b.conditions.mesh = true;
+  b.conditions.link = true;
+  b.clock.advanceMs(kTrialMs);
+  b.updater.step();
+  ASSERT_EQ(1, b.restart.restarts);
+
+  // The restart came back as the same image - this bootloader does not undo one - and the boot
+  // choice cannot be set back either. The board is not back, so nothing says it is.
+  b.boot(kNewVersion, 1, SlotState::New, "Software reset");
+  b.slots.bootOtherWorks = false;
+  EXPECT_EQ(BootFinding::Stuck, b.updater.atBoot());
+  const UpdateRecord rec = b.record();
+  EXPECT_EQ(Ended::Stuck, rec.ended);
+  EXPECT_STREQ("stuck", mm::update::endedWord(rec.ended));
+  EXPECT_STREQ(kNewVersion, rec.to) << "the version that runs, which is the one that failed";
+  EXPECT_NE(std::string::npos, std::string(rec.why).find("could not be set back")) << rec.why;
+  EXPECT_EQ(std::vector<std::string>({"switching", "proving", "rolling-back", "rolling-back", "rolling-back"}),
+            b.steps())
+      << "no `restored` entry: nothing was restored";
+
+  Lines out;
+  b.updater.report(out);
+  EXPECT_TRUE(out.holds("last      stuck")) << out.all;
+  EXPECT_TRUE(out.holds(kNewVersion)) << out.all;
+  EXPECT_FALSE(out.holds("rolled back")) << out.all;
+}
+
+TEST(ARollbackTheFrameworkRefuses, OnABootloaderThatDoesNotUndoABootChoiceThatRefusesIsStuckToo) {
+  Board b;
+  applyTheJudgedImage(b);
+  b.boot(kNewVersion, 1, SlotState::New);  // never marked pending: this firmware undoes it
+  ASSERT_EQ(BootFinding::TrialBegun, b.updater.atBoot());
+  b.slots.bootOtherWorks = false;
+  b.conditions.mesh = true;
+  b.clock.advanceMs(kTrialMs);
+  b.updater.step();
+
+  EXPECT_EQ(0, b.restart.restarts) << "there is nowhere to restart to";
+  const UpdateRecord rec = b.record();
+  EXPECT_EQ(Ended::Stuck, rec.ended) << "the image that failed is what runs: that is not rolled back";
+  EXPECT_NE(std::string::npos, std::string(rec.why).find("could not be sent back")) << rec.why;
+}
+
+// ---- what `update` says the other slot holds --------------------------------------------------
+
+TEST(TheWords, UpdateSaysTheOtherSlotsVersionAndUpdateBackWhereThatWouldBeTaken) {
+  Board b;
+  aBoardThatHasBeenUpdated(b);
+  Lines out;
+  b.updater.reportOther(out);
+  EXPECT_TRUE(out.holds("back      app0 holds")) << out.all;
+  EXPECT_TRUE(out.holds(kOldVersion)) << out.all;
+  EXPECT_TRUE(out.holds("`update back` switches to it and restarts")) << out.all;
+}
+
+TEST(TheWords, UpdateSaysTheThreeOtherStatesOfTheOtherSlotAndOffersNothingThere) {
+  // An image with no descriptor.
+  {
+    Board b;
+    aBoardRunningFromTheSecondSlot(b);
+    const std::vector<uint8_t> blank = anImageWithNoDescriptor();
+    b.slot.bytes = blank;
+    b.boot(kNewVersion, 1, SlotState::Valid);
+    b.slots.otherVerifies = true;
+    b.slots.otherLength = static_cast<uint32_t>(blank.size());
+    Lines out;
+    b.updater.reportOther(out);
+    EXPECT_TRUE(out.holds("no descriptor")) << out.all;
+    EXPECT_FALSE(out.holds("update back")) << out.all;
+  }
+  // Nothing the framework would load.
+  {
+    Board b;
+    aBoardRunningFromTheSecondSlot(b);
+    b.boot(kNewVersion, 1, SlotState::Valid);
+    b.slots.otherVerifies = false;
+    b.slots.otherLength = 0;
+    Lines out;
+    b.updater.reportOther(out);
+    EXPECT_TRUE(out.holds("holds nothing this firmware would boot")) << out.all;
+    EXPECT_FALSE(out.holds("update back")) << out.all;
+  }
+  // Another board.
+  {
+    Board b;
+    aBoardRunningFromTheSecondSlot(b);
+    const std::vector<uint8_t> v4 = theImage("heltec_v4");
+    b.slot.bytes = v4;
+    b.boot(kNewVersion, 1, SlotState::Valid);
+    b.slots.otherVerifies = true;
+    b.slots.otherLength = static_cast<uint32_t>(v4.size());
+    Lines out;
+    b.updater.reportOther(out);
+    EXPECT_TRUE(out.holds("heltec_v4")) << out.all;
+    EXPECT_TRUE(out.holds("not this product for this board")) << out.all;
+    EXPECT_FALSE(out.holds("update back")) << out.all;
+  }
+  // And a board with one application slot says nothing here at all: `update`'s own table lines
+  // have already said that it has no second slot.
+  {
+    Board b;
+    b.boot(kOldVersion, 0, SlotState::Undefined);
+    b.slots.there = false;
+    Lines out;
+    b.updater.reportOther(out);
+    EXPECT_TRUE(out.all.empty()) << out.all;
+  }
 }
 
 int main(int argc, char** argv) {

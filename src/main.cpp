@@ -668,6 +668,14 @@ void printUpdate(Stream& out) {
   const mm::update::SlotRecord judged = mm::update::loadRecord(slotRecordStore);
   mm::update::renderRecordLine(judged, held, sizeof(held));
   out.printf("other     %s\r\n", held);
+  // And what is **in** that slot, read out of it rather than out of a record (task p1.16-64,
+  // deliverable 2). The two are different things: the line above is what a fetch judged, and a
+  // board that has taken an update has no judged image at all - the other slot then holds the
+  // firmware it was switched from, which is where `update back` goes.
+  if (updaterReady) {
+    mm::StreamOut back(out);
+    updater.reportOther(back);
+  }
   if (fetcher.running()) {
     out.println("          a fetch is running now; its steps are in the log");
   } else if (r.kind == mm::TableKind::Two && !judged.judged) {
@@ -754,6 +762,36 @@ void printUpdateApply(Stream& out) {
   }
   out.printf("apply     %s\r\n", why);
   mm::logf(mm::LogLevel::Info, "update apply: %s", why);
+}
+
+// `update back`: switch to whatever lies in the slot that is not running, and restart into it on
+// trial like any other (task p1.16-64, deliverable 1).
+//
+// After an update from A to B the first slot still holds A, and flashing A again over USB does
+// nothing: the boot switches to an image in the first slot only when the record does not know its
+// version, and the record knows A - it is the version it switched from. The bytes of a slot are
+// the same whether somebody flashed them a minute ago or they have lain there since the update,
+// so the firmware cannot tell and does not guess. This is asked for instead. Either it does not
+// return - the board restarts - or nothing at all was switched and one sentence says why.
+void printUpdateBack(Stream& out) {
+  if (!updaterReady) {
+    out.println("back      not ready: this board has not finished starting up");
+    return;
+  }
+  // The two the machine does not know, handed to it as the one sentence a person is given:
+  // meshmaster.dk's own ask in hand, and a fetch running - the slot a fetch is writing is no
+  // slot to boot from.
+  const char* elsewhere = asked.whyNotNow();
+  if (elsewhere == nullptr && fetcher.running()) {
+    elsewhere = "a fetch is running; wait for its ending before switching to anything";
+  }
+  char why[224];
+  if (updater.goBack(elsewhere, why, sizeof(why))) {
+    out.println("back      switching; the board restarts now");  // not reached on a board
+    return;
+  }
+  out.printf("back      %s\r\n", why);
+  mm::logf(mm::LogLevel::Info, "update back: %s", why);
 }
 
 // `update slot`: the one command of this console that erases and writes flash. One sector, at the
@@ -1152,7 +1190,7 @@ void setup() {
                           &printWifi,     &doReboot,     &onSettingChanged, &onErased,
                           &printMqttStatus, &printKeyNote, &printDiscoverScopes,
                           &printUpdate,   &printUpdateSlot,  &printUpdateFetch,
-                          &printUpdateApply};
+                          &printUpdateApply, &printUpdateBack};
   console.begin(Serial, settings, host);
   // The fetch's three seams (task p1.15-59): the server over the one TLS client every call goes
   // through, the other application slot over the ESP-IDF's OTA writer, and the record in NVS.

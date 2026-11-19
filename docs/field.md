@@ -548,14 +548,78 @@ last      committed: 0.8.0+1a2b3c4, from 0.7.2+4a4e791, switched at 2026-11-20T1
   *rolled back*.
 - **Nothing starts an update but a person** — `update apply` here, or, from the
   next release, one press on meshmaster.dk. A release existing starts nothing.
-- **A flash over USB is still the last word.** A board that has taken an update
-  runs from the second slot, and the web flasher writes the plain `.bin` to the
-  first one whatever the board boots from. So at its next boot the board finds a
-  firmware there it has never run, switches to it once and puts *it* on trial.
-  An image it already tried and rolled back is not taken again.
+- **A flash over USB is still the last word, for a firmware the board has never
+  run.** A board that has taken an update runs from the second slot, and the web
+  flasher writes the plain `.bin` to the first one whatever the board boots from.
+  So at its next boot the board finds a firmware there it has never run, switches
+  to it once and puts *it* on trial. An image it already tried and rolled back is
+  not taken again — and neither is the release it was switched *from*, which is
+  what the next section is about.
+- **A trial that nothing could send back says `stuck`, not `rolled back`.** The
+  framework can refuse to mark a failed image invalid; the board then restarts,
+  because a restart is what undoes an image that is still on trial, and the boot
+  after it says what is running. Only if that boot comes up in the failed image
+  *again* and the boot choice cannot be set back either is there nothing to be
+  done, and `update` then says `stuck` with the version that is running. Nothing
+  is called rolled back before the board is back.
 - **On the OLED** nothing new appears: the panel shows the clock, the link and
   the open job as it always did, and the version it shows is simply the version
   that is running. The trial is on the console and in the log.
+
+### Going back a release
+
+Since the release of task p1.16-64 there is `update back`.
+
+**Flashing the release before over USB does not bring it back** on a board that
+has been updated from the server. After an update from A to B the board runs B
+from the second slot and the first slot still holds A; the paragraph above
+switches at boot only to a firmware the board has **never run**, and it has run
+A — A is the version it was switched from. The bytes in the slot are the same
+whether somebody flashed A a minute ago or it has lain there since the update,
+so the firmware cannot tell the two apart and does not guess. The flasher
+succeeds, and the board comes up on B.
+
+What it does instead is **say so at the boot**, once, and wait to be asked:
+
+```
+[12:31:04] W update: the first slot holds 0.7.2+4a4e791, which this board has run, so it is not switched to: `update back` goes back to it
+> update
+other     holds nothing this firmware will boot
+back      app0 holds 0.7.2+4a4e791
+          `update back` switches to it and restarts; it then has ten minutes to prove itself
+> update back
+back      switching; the board restarts now
+[12:31:40] I update: switching: back to 0.7.2+4a4e791, which lies in app0
+... the board restarts, and 0.7.2 comes up on trial ...
+[12:32:08] I update: proving: on trial for 10 min; a reset ends it and the bootloader undoes it
+```
+
+- **It is on trial like any other**, with the same three conditions and the same
+  ten minutes, so a release that cannot reach the mesh, the WiFi or the server
+  from this board is not what you are left with: a trial it fails ends in the
+  image the command was typed in.
+- **The `back` line of `update` is not the `other` line.** `other` is what a
+  *fetch* judged, read from a record; `back` is what is **in** the slot, read out
+  of the slot itself. A board that has taken an update has nothing judged at all
+  and still has a firmware in the other slot.
+- **It is refused in a sentence, and nothing at all is switched**, when an update
+  meshmaster.dk asked for is in hand, when a fetch is running, when a firmware is
+  on trial or an update has not been restarted into yet, when this board has one
+  application slot, when the other slot holds nothing this firmware would boot,
+  when it holds an image with no descriptor, and when it holds another product or
+  another board's firmware.
+- **An image with no descriptor is never switched to**, by this command or at the
+  boot. Every release older than the second slot has none, so the only way back
+  to one of those is the merged image over USB — and that erases the key, the
+  token and the WiFi. The boot says which it is rather than passing it over in
+  silence:
+
+```
+[12:31:04] W update: the first slot holds an image with no descriptor, so it is not switched to: a release older than the second slot carries none, and only a merged image over USB reaches one
+```
+
+- **The line at the boot is printed once a boot**, and nothing switches by itself
+  that did not before: the one switch a boot makes is still the one above.
 
 ### Started from meshmaster.dk instead
 
@@ -676,6 +740,24 @@ running and release B fetched:
       any release through the web flasher. After the flash the board restarts
       once more by itself and **that release runs**; `update` then shows it as
       the version it was switched to, from the one that was running.
+- [ ] **⚠ Flashing the release it came *from* changes nothing, and the boot
+      says so.** With B committed from A, flash **A**'s plain `.bin` through the
+      web flasher. The flasher succeeds and the board still comes up on **B**;
+      the log of that boot carries one line naming A and `update back`, and
+      `update`'s `back` line names A too. This is the thing that was silent
+      before task p1.16-64.
+- [ ] **⚠ `update back` commits A inside two minutes.** From B, `update back`:
+      the board restarts, `status` says *on trial* and names A, and inside two
+      minutes `update` says `last      committed` with A, from B. The identity
+      is the same 64 characters, and the exit node's page shows A.
+- [ ] **⚠ And a `update back` whose trial fails ends where it was typed.** From
+      A, with the access point switched **off**, `update back`: the board
+      switches to B, B's ten minutes go by without the WiFi, and the board comes
+      back on **A** — the image the command was typed in. Switch the WiFi back
+      on: `update` says `rolled back: no wifi...` and names B.
+- [ ] **⚠ `update back` is refused on a board that has never updated.** On a
+      board that says `two` with nothing fetched, `update back` says the other
+      slot holds nothing this firmware would boot, and nothing is switched.
 
 **With meshmaster.dk's pile 4.42 deployed**, release A on a board that has
 **never had a second slot** and release B released or canary for it, on a **V3**

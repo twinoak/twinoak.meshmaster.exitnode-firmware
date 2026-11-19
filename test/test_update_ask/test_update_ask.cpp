@@ -258,6 +258,17 @@ class ScriptedTrial final : public mm::update::AskTrial {
     rec.ended = Ended::RolledBack;
     save();
   }
+  // The record's third ending (task p1.16-64): a trial that failed and a board that could not be
+  // sent back at all. There is no `restored` entry, because nothing was restored - the image that
+  // failed is what runs - and `rolledBack` is not said of it.
+  void stuck(const char* why) {
+    rec.journal.add(clock->epoch(), "rolling-back", why);
+    std::snprintf(rec.why, sizeof(rec.why), "%s", why);
+    rec.phase = Phase::Ended;
+    rec.ended = Ended::Stuck;
+    onTrialNow = false;
+    save();
+  }
 
   void save() { mm::update::saveUpdate(*store, rec); }
 };
@@ -335,6 +346,19 @@ struct Board {
     lines.all.clear();
     trial.load();
     trial.restored(runningVersion);
+    return begin();
+  }
+
+  // The boot after a trial that failed and that nothing could send back: the image that failed is
+  // what runs, and its boot finishes task 60's record as `stuck` (task p1.16-64).
+  Asked& bootStuck(const char* runningVersion, const char* why) {
+    version = runningVersion;
+    trial.applies = 0;
+    fetch.starts = 0;
+    restart.restarts = 0;
+    lines.all.clear();
+    trial.load();
+    trial.stuck(why);
     return begin();
   }
 
@@ -906,6 +930,46 @@ TEST(ATrialThatFails, IsOneResultRolledBackPostedByTheOldImageWithTheOldVersion)
   EXPECT_NE(std::string::npos, body.find("no heartbeat answered in 10 min")) << body;
   EXPECT_EQ(std::string::npos, body.find("\"refusal\"")) << body
       << "no real result has a refusal beside rolledBack";
+  EXPECT_FALSE(b.postTheResult(true, false));
+}
+
+// And a trial that failed but could not be sent back is **not** `rolledBack`: nothing was rolled
+// back, and the firmware that failed is the one running. `stuck` is the contract's word for a
+// board that cannot say what happened, and the result carries the version that runs (task
+// p1.16-64, deliverable 5). No outcome is added.
+TEST(ATrialThatFails, AndCouldNotBeSentBackIsOneResultStuckWithTheVersionThatRuns) {
+  Board b;
+  b.boot(kOld);
+  b.hearTheAsk(17);
+  b.asked.step();
+  b.clock.advance(40);
+  b.fetch.endWith(Ending::Fetched, 0, "fetched");
+  b.asked.step();
+
+  b.clock.advance(20);
+  b.bootOnTrial(kNew);
+  ASSERT_EQ(AskStep::Proving, b.record().step);
+  b.clock.advance(600);
+  b.trial.rollBack("no heartbeat answered in 10 min");
+  b.asked.step();
+  EXPECT_EQ(AskStep::Proving, b.record().step) << "the ask waits for the boot that finishes the record";
+
+  // The restart came back as the same image, and nothing could send the board back.
+  b.clock.advance(20);
+  b.bootStuck(kNew, "no server: no heartbeat was answered, and the board could not be sent back");
+  const AskRecord rec = b.record();
+  EXPECT_EQ(AskStep::Ended, rec.step);
+  EXPECT_EQ(AskOutcome::Stuck, rec.outcome);
+  EXPECT_EQ(AskRefusal::None, rec.refusal);
+  EXPECT_STREQ(kOld, rec.from);
+  EXPECT_STREQ(kNew, rec.to) << "toVersion is the version that runs, which is the one that failed";
+
+  std::string body;
+  ASSERT_TRUE(b.postTheResult(true, false, &body));
+  EXPECT_NE(std::string::npos, body.find("\"outcome\":\"stuck\"")) << body;
+  EXPECT_EQ(std::string::npos, body.find("rolledBack")) << body << "nothing was rolled back";
+  EXPECT_NE(std::string::npos, body.find("could not be sent back")) << body;
+  EXPECT_EQ(std::string::npos, body.find("\"refusal\"")) << body;
   EXPECT_FALSE(b.postTheResult(true, false));
 }
 
