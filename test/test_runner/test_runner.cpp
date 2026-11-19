@@ -704,7 +704,7 @@ TEST_F(RunnerTest, NeighboursAtGuestPagesByNine) {
   EXPECT_EQ(mesh.requestsOf(mm::kReqTypeGetNeighbours), 2) << "nine a page, so twelve is two pages (§7)";
   EXPECT_EQ(transactionsOf(body), 3) << "the login and two pages";
   const std::string data = dataOf(body);
-  EXPECT_TRUE(fake::followsShapeOf(data, fake::contractAhead("NeighboursResultTotal")));
+  EXPECT_TRUE(fake::followsShapeOf(data, fake::contract("NeighboursResultTotal")));
   EXPECT_EQ(prefixesOf(data).size(), 12u);
   EXPECT_EQ(totalOf(data), 12) << "a whole list: as many entries as the repeater said it has";
 }
@@ -2078,7 +2078,7 @@ TEST_F(RunnerTest, TheNeighbourReadAnAclLoginAnsweredAtGuestRunsAndSaysWhatItRan
   // p4.37-210), and the data is the reading a `neighbours` job always answers.
   EXPECT_TRUE(followsBothFixtures(body)) << body;
   const std::string data = dataOf(body);
-  EXPECT_TRUE(fake::followsShapeOf(data, fake::contractAhead("NeighboursResultTotal"))) << data;
+  EXPECT_TRUE(fake::followsShapeOf(data, fake::contract("NeighboursResultTotal"))) << data;
   EXPECT_NE(data.find("\"prefix\":\"" + repeater().substr(0, 16) + "\""), std::string::npos) << data;
   EXPECT_EQ(totalOf(data), 1) << "one neighbour, and the repeater says it has one: " << data;
   EXPECT_NE(logOf(body).find("logged in as guest, below the read-only this job asked for"), std::string::npos) << body;

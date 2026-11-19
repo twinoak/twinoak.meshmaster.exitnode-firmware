@@ -33,7 +33,33 @@ disagree.
 
 ## v0.7.3
 
-Nothing yet.
+Pile 1.16 (`tasks/phase-1.16/`), in progress. **`agent-core` 0.7.3** in the three
+manifests; the contract fixtures moved to meshmaster.dk **`28daabd`** (95 files,
+from `v0.7.2`'s `461469e`, 79) and the companion frame fixtures are the same 46
+files, byte for byte, at that same commit; MeshCore is still
+**`companion-v1.18.0`, `81dbae59`**; `kMeshReplyDataCap` 184 and `kMeshPathCap`
+64, unmoved. **Nothing of yours stops compiling and nothing of yours has to
+change.** The four questions:
+
+- **Did a method move?** **No.** Nothing of `IMesh`, `IUplink`, `IPlatform`,
+  `IClock`, `IJobExtension`, `JobContext`, `ResultWriter`, `TextOut`, `Backoff`,
+  `WakeState` or `IRetained` moved.
+- **Did a `MeshReply` constant move?** **No.** `kMeshReplyDataCap` is 184 and
+  `kMeshPathCap` is 64, at the same MeshCore pin.
+- **Did the fixtures' manifest commit move?** **Yes**, `461469e` → `28daabd`
+  (the sync of 19 November, and p1.16-62, which pointed the tests at what it
+  brought), and **no record lost a member and no existing file's bytes changed**.
+  Sixteen files were added. Six of them are envelopes this repository had already
+  written for itself from the lines of meshmaster.dk's tasks 239 and 244, and
+  every one came across **byte for byte**: `NeighboursResultTotal.json`,
+  `HeartbeatUpdate.json`, `AgentHeartbeatUpdate.json`, `UpdateAsk.json`,
+  `HeartbeatReplyUpdate.json` and `UpdateResult.json` — the wire of v0.7.2's
+  neighbours count and of the update, the contract now rather than a promissory
+  note. The other ten belong to a unit of meshmaster.dk's and nothing of this
+  library reads them. The **companion** frame fixtures and the firmware-manifest
+  fixtures are the same bytes at the new commit: no MeshCore bump in this pile.
+- **The version and the pin:** `agent-core` 0.7.3; MeshCore
+  `companion-v1.18.0`, `81dbae59`.
 
 ## v0.7.2
 

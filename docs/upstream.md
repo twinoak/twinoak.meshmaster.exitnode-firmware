@@ -195,6 +195,12 @@ the copied tree and the waiting file is deleted. It is an item of the pile's
 agree on, and the point of writing the line down twice is to find it before a
 release and not after.
 
+**It has happened once.** Six envelopes waited for meshmaster.dk's tasks 239 and
+244 — the neighbours result with its count, and the update's five — and the sync
+of 19 November brought all six, the same bytes as the lines that had waited. The
+tests read them from the copied tree and the waiting directory is empty today;
+its README says what to do with the next one.
+
 ## Reading the firmware you build against
 
 After a build, the pinned MeshCore is on disk:

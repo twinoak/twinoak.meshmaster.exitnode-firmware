@@ -39,9 +39,6 @@
 #ifndef FIXTURES_DIR
 #error "FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
 #endif
-#ifndef AHEAD_FIXTURES_DIR
-#error "AHEAD_FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
-#endif
 
 namespace {
 
@@ -55,12 +52,6 @@ std::string readOne(const std::string& dir, const char* name) {
 }
 
 std::string readFixture(const char* name) { return readOne(FIXTURES_DIR, name); }
-
-// A fixture that is **waiting for a sync**: an envelope written here from the line of the task
-// that needs it, because meshmaster.dk has not put it on its master yet
-// (tests/fixtures/contracts-ahead/README.md). Read exactly as a copied one is; when the sync
-// brings the real file the two must be the same bytes and this reader goes.
-std::string readAhead(const char* name) { return readOne(AHEAD_FIXTURES_DIR, name); }
 
 // The thirteen types of API §3, in the order MeshMaster.Contracts' JobTypes.All gives them -
 // which is the order the fixture carries. Since task 05 that is the firmware's own list,
@@ -638,12 +629,13 @@ TEST(Observations, ANameFromAStrangerIsEscapedAndNeverBreaksTheBody) {
 
 // ---- the update (task p1.15-61; meshmaster.dk's task p4.42-244) -------------------------------
 
-// The member's own line, as the task carries it: the table word, and the ask in hand with the
-// newest step of its journal.
-TEST(Update, TheSameInputMakesTheWaitingFixtureByteForByte) {
-  const std::string fixture = readAhead("AgentHeartbeatUpdate.json");
-  ASSERT_FALSE(fixture.empty()) << "tests/fixtures/contracts-ahead/AgentHeartbeatUpdate.json is missing";
-  const std::string member = readAhead("HeartbeatUpdate.json");
+// The member's own line: the table word, and the ask in hand with the newest step of its
+// journal.
+TEST(Update, TheSameInputMakesTheDotNetFixtureByteForByte) {
+  const std::string fixture = readFixture("AgentHeartbeatUpdate.json");
+  ASSERT_FALSE(fixture.empty())
+      << "tests/fixtures/contracts/AgentHeartbeatUpdate.json is missing - run tools/sync-fixtures.ps1";
+  const std::string member = readFixture("HeartbeatUpdate.json");
   ASSERT_FALSE(member.empty());
 
   mm::HeartbeatUpdate update;
@@ -756,10 +748,11 @@ class Entries final : public mm::UpdateJournal {
   }
 };
 
-// The sample of the task's own line: every field the shape has, so that a parser meets each.
-TEST(UpdateResultBytes, TheSameInputMakesTheWaitingFixtureByteForByte) {
-  const std::string fixture = readAhead("UpdateResult.json");
-  ASSERT_FALSE(fixture.empty()) << "tests/fixtures/contracts-ahead/UpdateResult.json is missing";
+// The sample the contract's line carries: every field the shape has, so a parser meets each.
+TEST(UpdateResultBytes, TheSameInputMakesTheDotNetFixtureByteForByte) {
+  const std::string fixture = readFixture("UpdateResult.json");
+  ASSERT_FALSE(fixture.empty())
+      << "tests/fixtures/contracts/UpdateResult.json is missing - run tools/sync-fixtures.ps1";
 
   Entries journal;
   journal.lines.push_back({1795165200u, "check", "table one, 0.7.2 running"});          // 09:00:00

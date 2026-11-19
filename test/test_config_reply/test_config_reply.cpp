@@ -17,9 +17,6 @@
 #ifndef FIXTURES_DIR
 #error "FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
 #endif
-#ifndef AHEAD_FIXTURES_DIR
-#error "AHEAD_FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
-#endif
 
 namespace {
 
@@ -31,9 +28,6 @@ std::string readOne(const std::string& dir, const char* name) {
 }
 
 std::string readFixture(const char* name) { return readOne(FIXTURES_DIR, name); }
-
-// A fixture that is waiting for a sync (tests/fixtures/contracts-ahead/README.md).
-std::string readAhead(const char* name) { return readOne(AHEAD_FIXTURES_DIR, name); }
 
 }  // namespace
 
@@ -86,9 +80,10 @@ TEST(HeartbeatReply, AnUnknownMemberIsSkippedLikeTheDotNetSideDoes) {
 
 // ---- the ask in the reply (task p1.15-61; meshmaster.dk's task p4.42-244) ---------------------
 
-TEST(UpdateAskReply, TheWaitingFixtureReadsIntoTheStructFieldForField) {
-  const std::string json = readAhead("HeartbeatReplyUpdate.json");
-  ASSERT_FALSE(json.empty()) << "tests/fixtures/contracts-ahead/HeartbeatReplyUpdate.json is missing";
+TEST(UpdateAskReply, TheDotNetFixtureReadsIntoTheStructFieldForField) {
+  const std::string json = readFixture("HeartbeatReplyUpdate.json");
+  ASSERT_FALSE(json.empty())
+      << "tests/fixtures/contracts/HeartbeatReplyUpdate.json is missing - run tools/sync-fixtures.ps1";
 
   mm::HeartbeatReply r;
   char err[128] = {0};
@@ -107,7 +102,7 @@ TEST(UpdateAskReply, TheWaitingFixtureReadsIntoTheStructFieldForField) {
   EXPECT_EQ(1432000u, r.update.size);
 
   // And the member on its own is a file of its own, which the reply holds verbatim.
-  std::string ask = readAhead("UpdateAsk.json");
+  std::string ask = readFixture("UpdateAsk.json");
   while (!ask.empty() && (ask.back() == '\n' || ask.back() == '\r')) ask.pop_back();
   ASSERT_FALSE(ask.empty());
   EXPECT_NE(std::string::npos, json.find(ask)) << "the reply does not hold UpdateAsk.json";

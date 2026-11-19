@@ -6,6 +6,9 @@
 // hand is a different size" is caught here too.
 //
 // From F-01 on, the tests that round-trip the agent's envelopes read the same files.
+//
+// The second half of this file is tests/fixtures/contracts-ahead/, the envelopes a task writes
+// here from its own line while meshmaster.dk has not landed them. Nothing waits there today.
 
 #include <gtest/gtest.h>
 
@@ -152,78 +155,63 @@ TEST(ContractFixtures, NothingInTheDirectoryIsMissingFromTheManifest) {
   }
 }
 
+// The two nested pairs of the update's fixtures (task p1.15-61, meshmaster.dk's task 244), now
+// that the sync of 19 November has brought them across: a member that is a file of its own
+// appears inside the envelope that carries it, byte for byte. It is the rule the fixtures'
+// README states, and it is held here against the copied tree, which is the contract.
+TEST(ContractFixtures, TheNestedOnesAreHeldVerbatimByTheirEnvelope) {
+  const std::string member = read_file(fixtures_dir() / "HeartbeatUpdate.json");
+  const std::string heartbeat = read_file(fixtures_dir() / "AgentHeartbeatUpdate.json");
+  const std::string ask = read_file(fixtures_dir() / "UpdateAsk.json");
+  const std::string reply = read_file(fixtures_dir() / "HeartbeatReplyUpdate.json");
+  ASSERT_FALSE(member.empty()) << "run tools/sync-fixtures.ps1";
+  ASSERT_FALSE(heartbeat.empty()) << "run tools/sync-fixtures.ps1";
+  ASSERT_FALSE(ask.empty()) << "run tools/sync-fixtures.ps1";
+  ASSERT_FALSE(reply.empty()) << "run tools/sync-fixtures.ps1";
+
+  // Each of the two is the whole of its file less the trailing newline, inside the other.
+  EXPECT_NE(std::string::npos, heartbeat.find(member.substr(0, member.size() - 1)))
+      << "AgentHeartbeatUpdate.json no longer holds HeartbeatUpdate.json verbatim";
+  EXPECT_NE(std::string::npos, reply.find(ask.substr(0, ask.size() - 1)))
+      << "HeartbeatReplyUpdate.json no longer holds UpdateAsk.json verbatim";
+
+  // And the heartbeat is AgentHeartbeat.json with the member appended, which is what makes the
+  // two one sample rather than two agents.
+  const std::string whole = read_file(fixtures_dir() / "AgentHeartbeat.json");
+  ASSERT_FALSE(whole.empty());
+  std::string body = whole;
+  while (!body.empty() && (body.back() == '\n' || body.back() == '\r')) body.pop_back();
+  ASSERT_FALSE(body.empty());
+  EXPECT_EQ(body.substr(0, body.size() - 1), heartbeat.substr(0, body.size() - 1))
+      << "AgentHeartbeatUpdate.json is no longer AgentHeartbeat.json plus the update member";
+}
+
 // ---------------------------------------------------------------------------------------------
 // The fixtures that wait (task p1.15-56)
 //
-// `tests/fixtures/contracts-ahead/` is **not** a copy: each file is an envelope written here from
-// the line of the task that needs it, because the two repositories' piles run at the same time
-// and meshmaster.dk had not put it on its master. `tools/sync-fixtures.ps1` does not touch the
-// directory and MANIFEST.txt does not list it. What this suite can hold it to is the bytes: they
-// are the task's line exactly, so that when the sync brings the real file the two can be
-// compared byte for byte and a wire the two ends do not agree on is found before any release.
-
-// The one line of task p1.15-56, which is meshmaster.dk's task 239 deliverable 1, and the one
-// trailing newline every fixture of the copied tree has.
-const char* const kNeighboursResultTotal =
-    "{\"neighbours\":[{\"prefix\":\"a1\",\"lastHeardS\":42,\"snr\":7.25},"
-    "{\"prefix\":\"7f\",\"lastHeardS\":3600,\"snr\":-2.5}],\"total\":17}\n";
-
-// The five lines of task p1.15-61, which are meshmaster.dk's task 244's: the heartbeat's `update`
-// member, a heartbeat that carries it, the ask in a reply's `update`, a reply that carries it, and
-// the one result.
-const char* const kHeartbeatUpdate = "{\"table\":\"one\",\"id\":17,\"step\":\"proving\"}\n";
-
-const char* const kAgentHeartbeatUpdate =
-    "{\"agentVersion\":\"0.3.1\",\"transport\":\"onboard\",\"at\":\"2026-09-23T14:00:00Z\","
-    "\"companionPublicKey\":\"a1b2\",\"companionFirmware\":\"v1.17.1\","
-    "\"radio\":{\"freqMHz\":869.618,\"bwKHz\":62.5,\"sf\":8,\"cr\":8},"
-    "\"jobTypes\":[\"status\",\"telemetry\",\"neighbours\",\"config.read\",\"config.apply\",\"cli\","
-    "\"trace\",\"discover\",\"advert.request\",\"clock.sync\",\"password.set\",\"acl.set\",\"reboot\"],"
-    "\"budget\":{\"maxTransactionsPerMinute\":2,\"minGapSeconds\":20},\"companionConnected\":true,"
-    "\"queueDepth\":0,\"errors\":{\"uplink\":0},\"board\":\"heltec_v3\",\"nextCheckInS\":3600,"
-    "\"maxTransactionsThisWake\":12,\"update\":{\"table\":\"one\",\"id\":17,\"step\":\"proving\"}}\n";
-
-const char* const kUpdateAsk =
-    "{\"id\":17,\"releaseId\":9,\"product\":\"twinoak-exitnode-firmware\",\"version\":\"0.8.0\","
-    "\"base\":\"/agent/v1/firmware/9\","
-    "\"expectedSha256\":\"3b1f0c4e5d6a79880817a6b5c4d3e2f1a0b9c8d7e6f5041322314051607f8e9d\","
-    "\"size\":1432000}\n";
-
-const char* const kHeartbeatReplyUpdate =
-    "{\"serverTime\":\"2026-09-23T14:00:01Z\","
-    "\"budget\":{\"maxTransactionsPerMinute\":2,\"minGapSeconds\":20},\"pollIntervalS\":30,"
-    "\"jobsWaiting\":false,\"update\":{\"id\":17,\"releaseId\":9,"
-    "\"product\":\"twinoak-exitnode-firmware\",\"version\":\"0.8.0\","
-    "\"base\":\"/agent/v1/firmware/9\","
-    "\"expectedSha256\":\"3b1f0c4e5d6a79880817a6b5c4d3e2f1a0b9c8d7e6f5041322314051607f8e9d\","
-    "\"size\":1432000}}\n";
-
-const char* const kUpdateResult =
-    "{\"outcome\":\"rolledBack\",\"fromVersion\":\"0.7.2\",\"toVersion\":\"0.7.2\","
-    "\"refusal\":\"check\",\"check\":4,"
-    "\"journal\":[{\"at\":\"2026-11-20T09:00:00Z\",\"step\":\"check\","
-    "\"note\":\"table one, 0.7.2 running\"},"
-    "{\"at\":\"2026-11-20T09:00:01Z\",\"step\":\"adding-slot\"},"
-    "{\"at\":\"2026-11-20T09:00:40Z\",\"step\":\"fetching\",\"note\":\"0.8.0, 1432000 bytes\"},"
-    "{\"at\":\"2026-11-20T09:01:10Z\",\"step\":\"switching\"},"
-    "{\"at\":\"2026-11-20T09:01:30Z\",\"step\":\"proving\",\"note\":\"mesh up, wifi up\"},"
-    "{\"at\":\"2026-11-20T09:11:30Z\",\"step\":\"rolling-back\","
-    "\"note\":\"no heartbeat answered in 10 min\"},"
-    "{\"at\":\"2026-11-20T09:11:50Z\",\"step\":\"restored\",\"note\":\"0.7.2 running\"}]}\n";
+// `tests/fixtures/contracts-ahead/` is **not** a copy: each file there is an envelope written
+// here from the line of the task that needs it, because the two repositories' piles run at the
+// same time and meshmaster.dk has not put it on its master. `tools/sync-fixtures.ps1` does not
+// touch the directory and MANIFEST.txt does not list it. What this suite can hold such a file to
+// is the bytes: they are the task's line exactly, so that when the sync brings the real file the
+// two can be compared byte for byte and a wire the two ends do not agree on is found before any
+// release.
+//
+// **Nothing waits today** (task p1.16-62). The six of tasks p1.15-56 and p1.15-61 came across in
+// the sync of 19 November, the same bytes as the lines that had waited, and every test now reads
+// them from the copied tree. The directory, its README and the two tripwires below stay, because
+// two piles will run side by side again: the next task that needs an envelope meshmaster.dk has
+// not landed writes the file, adds its line to `kWaiting` below and its row to the README's
+// table, and these three tests hold it until the sync brings the real one.
 
 struct Waiting {
   const char* name;
-  const char* const line;
+  const char* line;
 };
 
-const Waiting kWaiting[] = {
-    {"NeighboursResultTotal.json", kNeighboursResultTotal},
-    {"HeartbeatUpdate.json", kHeartbeatUpdate},
-    {"AgentHeartbeatUpdate.json", kAgentHeartbeatUpdate},
-    {"UpdateAsk.json", kUpdateAsk},
-    {"HeartbeatReplyUpdate.json", kHeartbeatReplyUpdate},
-    {"UpdateResult.json", kUpdateResult},
-};
+// Empty: nothing waits. A task that writes a waiting fixture adds `{"Name.json", kName}` here,
+// with the line it carries above, and `NoneOfThemIsUnaccountedFor` fails until it does.
+const std::vector<Waiting> kWaiting = {};
 
 TEST(WaitingFixtures, TheyAreTheirTasksLineByteForByte) {
   ASSERT_TRUE(fs::is_directory(ahead_dir())) << ahead_dir();
@@ -249,27 +237,6 @@ TEST(WaitingFixtures, NoneOfThemIsUnaccountedFor) {
     }
     EXPECT_TRUE(held) << name << " is waiting and no test holds it to the line of the task that wrote it";
   }
-}
-
-// The three nested pairs of this task's lines, which is the rule the fixtures' README states: a
-// member that is a file of its own appears inside the envelope that carries it, byte for byte.
-TEST(WaitingFixtures, TheNestedOnesAreHeldVerbatimByTheirEnvelope) {
-  const std::string member = std::string(kHeartbeatUpdate);
-  const std::string heartbeat = std::string(kAgentHeartbeatUpdate);
-  const std::string ask = std::string(kUpdateAsk);
-  const std::string reply = std::string(kHeartbeatReplyUpdate);
-  EXPECT_NE(std::string::npos, heartbeat.find(member.substr(0, member.size() - 1)));
-  EXPECT_NE(std::string::npos, reply.find(ask.substr(0, ask.size() - 1)));
-
-  // And the heartbeat is the copied AgentHeartbeat.json with the member appended, which is what
-  // makes the two one sample rather than two agents.
-  const std::string copied = read_file(fixtures_dir() / "AgentHeartbeat.json");
-  ASSERT_FALSE(copied.empty());
-  std::string body = copied;
-  while (!body.empty() && (body.back() == '\n' || body.back() == '\r')) body.pop_back();
-  ASSERT_FALSE(body.empty());
-  EXPECT_EQ(body.substr(0, body.size() - 1), heartbeat.substr(0, body.size() - 1))
-      << "AgentHeartbeatUpdate.json is no longer AgentHeartbeat.json plus the update member";
 }
 
 TEST(WaitingFixtures, NoneOfThemIsInTheCopiedTreeOrItsManifest) {

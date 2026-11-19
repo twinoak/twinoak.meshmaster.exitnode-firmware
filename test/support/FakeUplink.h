@@ -97,8 +97,8 @@ class FakeUplink : public mm::IUplink {
 
   void setServerTime(uint32_t epoch) { serverEpoch_ = epoch; }
 
-  // A reply that carries an **ask for an update** (task p1.15-61): the members of the waiting
-  // fixture `tests/fixtures/contracts-ahead/HeartbeatReplyUpdate.json`, with this fake's own
+  // A reply that carries an **ask for an update** (task p1.15-61): the members of the contract
+  // fixture `tests/fixtures/contracts/HeartbeatReplyUpdate.json`, with this fake's own
   // server time so that nothing of the clock moves, and `jobsWaiting` as a test wants it - the
   // real server sends an exit node no job while an ask is out, and the board's own hold is what
   // these tests are for.

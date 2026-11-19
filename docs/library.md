@@ -1449,8 +1449,13 @@ goes. The copied tree is the contract; this one is a promissory note, and a
 difference between them is a wire the two ends do not agree on, found before a
 release rather than after.
 
-**The neighbours result is the first of them** (task p1.15-56, waiting on
-meshmaster.dk's task 239). A `neighbours` job reads the list nine to a page, and a
+**Nothing waits there today.** The six below waited for meshmaster.dk's tasks 239
+and 244, the sync of 19 November brought every one of them byte for byte, and
+they are ordinary contract fixtures now — read from `tests/fixtures/contracts/`
+like all the rest, and listed in `MANIFEST.txt`.
+
+**The neighbours result was the first of them** (task p1.15-56, meshmaster.dk's
+task 239). A `neighbours` job reads the list nine to a page, and a
 page that goes unanswered after an earlier one came back ends the *reading* and
 not the job — the server gets what was heard. So the result carries `total`, the
 count the repeater gave in the last page that was read, after the array and
@@ -1467,8 +1472,8 @@ bytes, which cost the server the other eight as *lost* at every short listing.
 `mm::writeNeighboursResult` takes the count as its third argument; if you write
 that result yourself, this is the one call of this release that stops compiling.
 
-**The update's five are the rest of them** (task p1.15-61, waiting on
-meshmaster.dk's task 244): `HeartbeatUpdate.json` and `AgentHeartbeatUpdate.json`
+**The update's five were the rest of them** (task p1.15-61, meshmaster.dk's
+task 244): `HeartbeatUpdate.json` and `AgentHeartbeatUpdate.json`
 for the heartbeat's member, `UpdateAsk.json` and `HeartbeatReplyUpdate.json` for
 the ask in its reply, and `UpdateResult.json` for the one result (§6.5). Nothing
 of yours stops compiling for them — they are an addition — and the two files that

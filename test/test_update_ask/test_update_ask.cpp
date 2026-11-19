@@ -11,10 +11,9 @@
 // Every fake pushes a word into one shared list as it is called, which is how *the steps in
 // order* is held rather than described.
 //
-// The bytes of the result are held against the waiting fixture
-// `tests/fixtures/contracts-ahead/UpdateResult.json`, which is the line task 61 carries and
-// meshmaster.dk's task 244 will make with its own serializer: a difference there is a wire the
-// two ends do not agree on.
+// The bytes of the result are held against the contract fixture
+// `tests/fixtures/contracts/UpdateResult.json`, which meshmaster.dk's task 244 made with its own
+// serializer: a difference there is a wire the two ends do not agree on.
 
 #include <gtest/gtest.h>
 
@@ -34,8 +33,8 @@
 #include "update/Trial.h"
 #include "update/UpdateRecord.h"
 
-#ifndef AHEAD_FIXTURES_DIR
-#error "AHEAD_FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
+#ifndef FIXTURES_DIR
+#error "FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
 #endif
 
 namespace {
@@ -398,8 +397,8 @@ struct Board {
   }
 };
 
-std::string waitingFixture(const char* name) {
-  std::ifstream in(std::string(AHEAD_FIXTURES_DIR) + "/" + name, std::ios::binary);
+std::string contractFixture(const char* name) {
+  std::ifstream in(std::string(FIXTURES_DIR) + "/" + name, std::ios::binary);
   std::ostringstream all;
   all << in.rdbuf();
   std::string text = all.str();
@@ -976,8 +975,9 @@ TEST(TheResultsPost, AnAnswerForAnotherIdIsIgnored) {
 // The bytes, for the sample the contract's own line carries (deliverable: the result the firmware
 // writes for that sample is `UpdateResult.json` byte for byte).
 TEST(TheResultsPost, TheFixturesSampleIsWrittenByteForByte) {
-  const std::string fixture = waitingFixture("UpdateResult.json");
-  ASSERT_FALSE(fixture.empty()) << "tests/fixtures/contracts-ahead/UpdateResult.json is missing";
+  const std::string fixture = contractFixture("UpdateResult.json");
+  ASSERT_FALSE(fixture.empty())
+      << "tests/fixtures/contracts/UpdateResult.json is missing - run tools/sync-fixtures.ps1";
 
   // The record that sample is: an ask that was refused at check 4 - which is the shape the line
   // was written to carry every field of - with the journal of a whole run.
