@@ -749,6 +749,16 @@ reading.
   versions either side, the time, and a journal of every step — and survives
   both restarts, so `update` can say *committed* or *rolled back: no wifi*
   afterwards (`src/update/Trial.h`, `test/test_trial`).
+- **An update is started by a person, on the server or at the console, and by
+  nothing else.** A release existing starts nothing, and neither does a schedule
+  or the server by itself: either somebody types `update apply` at this board's
+  console, or somebody presses *Update* for this board and one release on
+  meshmaster.dk — which the server then puts in the reply to this board's next
+  heartbeat, and the board does the steps in order by itself and posts one result
+  (`src/update/Ask.h`, `test/test_update_ask`). An ask is taken once; while one is
+  in hand no job is claimed, and a job that was already running is finished
+  first. A build that trusts no release key tells the server nothing and takes no
+  ask at all, because it could believe no signature.
 - **It stays up, and says why when it did not.** A task watchdog on the loop
   that is also the network, a deliberate restart when the server has been
   unreachable against a live link for an hour and a half, and the last five

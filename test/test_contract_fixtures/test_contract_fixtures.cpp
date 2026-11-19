@@ -168,13 +168,108 @@ const char* const kNeighboursResultTotal =
     "{\"neighbours\":[{\"prefix\":\"a1\",\"lastHeardS\":42,\"snr\":7.25},"
     "{\"prefix\":\"7f\",\"lastHeardS\":3600,\"snr\":-2.5}],\"total\":17}\n";
 
+// The five lines of task p1.15-61, which are meshmaster.dk's task 244's: the heartbeat's `update`
+// member, a heartbeat that carries it, the ask in a reply's `update`, a reply that carries it, and
+// the one result.
+const char* const kHeartbeatUpdate = "{\"table\":\"one\",\"id\":17,\"step\":\"proving\"}\n";
+
+const char* const kAgentHeartbeatUpdate =
+    "{\"agentVersion\":\"0.3.1\",\"transport\":\"onboard\",\"at\":\"2026-09-23T14:00:00Z\","
+    "\"companionPublicKey\":\"a1b2\",\"companionFirmware\":\"v1.17.1\","
+    "\"radio\":{\"freqMHz\":869.618,\"bwKHz\":62.5,\"sf\":8,\"cr\":8},"
+    "\"jobTypes\":[\"status\",\"telemetry\",\"neighbours\",\"config.read\",\"config.apply\",\"cli\","
+    "\"trace\",\"discover\",\"advert.request\",\"clock.sync\",\"password.set\",\"acl.set\",\"reboot\"],"
+    "\"budget\":{\"maxTransactionsPerMinute\":2,\"minGapSeconds\":20},\"companionConnected\":true,"
+    "\"queueDepth\":0,\"errors\":{\"uplink\":0},\"board\":\"heltec_v3\",\"nextCheckInS\":3600,"
+    "\"maxTransactionsThisWake\":12,\"update\":{\"table\":\"one\",\"id\":17,\"step\":\"proving\"}}\n";
+
+const char* const kUpdateAsk =
+    "{\"id\":17,\"releaseId\":9,\"product\":\"twinoak-exitnode-firmware\",\"version\":\"0.8.0\","
+    "\"base\":\"/agent/v1/firmware/9\","
+    "\"expectedSha256\":\"3b1f0c4e5d6a79880817a6b5c4d3e2f1a0b9c8d7e6f5041322314051607f8e9d\","
+    "\"size\":1432000}\n";
+
+const char* const kHeartbeatReplyUpdate =
+    "{\"serverTime\":\"2026-09-23T14:00:01Z\","
+    "\"budget\":{\"maxTransactionsPerMinute\":2,\"minGapSeconds\":20},\"pollIntervalS\":30,"
+    "\"jobsWaiting\":false,\"update\":{\"id\":17,\"releaseId\":9,"
+    "\"product\":\"twinoak-exitnode-firmware\",\"version\":\"0.8.0\","
+    "\"base\":\"/agent/v1/firmware/9\","
+    "\"expectedSha256\":\"3b1f0c4e5d6a79880817a6b5c4d3e2f1a0b9c8d7e6f5041322314051607f8e9d\","
+    "\"size\":1432000}}\n";
+
+const char* const kUpdateResult =
+    "{\"outcome\":\"rolledBack\",\"fromVersion\":\"0.7.2\",\"toVersion\":\"0.7.2\","
+    "\"refusal\":\"check\",\"check\":4,"
+    "\"journal\":[{\"at\":\"2026-11-20T09:00:00Z\",\"step\":\"check\","
+    "\"note\":\"table one, 0.7.2 running\"},"
+    "{\"at\":\"2026-11-20T09:00:01Z\",\"step\":\"adding-slot\"},"
+    "{\"at\":\"2026-11-20T09:00:40Z\",\"step\":\"fetching\",\"note\":\"0.8.0, 1432000 bytes\"},"
+    "{\"at\":\"2026-11-20T09:01:10Z\",\"step\":\"switching\"},"
+    "{\"at\":\"2026-11-20T09:01:30Z\",\"step\":\"proving\",\"note\":\"mesh up, wifi up\"},"
+    "{\"at\":\"2026-11-20T09:11:30Z\",\"step\":\"rolling-back\","
+    "\"note\":\"no heartbeat answered in 10 min\"},"
+    "{\"at\":\"2026-11-20T09:11:50Z\",\"step\":\"restored\",\"note\":\"0.7.2 running\"}]}\n";
+
+struct Waiting {
+  const char* name;
+  const char* const line;
+};
+
+const Waiting kWaiting[] = {
+    {"NeighboursResultTotal.json", kNeighboursResultTotal},
+    {"HeartbeatUpdate.json", kHeartbeatUpdate},
+    {"AgentHeartbeatUpdate.json", kAgentHeartbeatUpdate},
+    {"UpdateAsk.json", kUpdateAsk},
+    {"HeartbeatReplyUpdate.json", kHeartbeatReplyUpdate},
+    {"UpdateResult.json", kUpdateResult},
+};
+
 TEST(WaitingFixtures, TheyAreTheirTasksLineByteForByte) {
   ASSERT_TRUE(fs::is_directory(ahead_dir())) << ahead_dir();
-  const fs::path file = ahead_dir() / "NeighboursResultTotal.json";
-  ASSERT_TRUE(fs::exists(file)) << file;
-  EXPECT_EQ(read_file(file), std::string(kNeighboursResultTotal))
-      << "a waiting fixture is the line its task carries, and nothing else: it is compared with "
-         "the copied file byte for byte when the sync brings it";
+  for (const Waiting& w : kWaiting) {
+    const fs::path file = ahead_dir() / w.name;
+    ASSERT_TRUE(fs::exists(file)) << file;
+    EXPECT_EQ(read_file(file), std::string(w.line))
+        << w.name
+        << ": a waiting fixture is the line its task carries, and nothing else - it is compared "
+           "with the copied file byte for byte when the sync brings it";
+  }
+}
+
+// Every file in the directory is one of the lines above: a waiting fixture that no test holds to
+// its task's line would be a wire nobody checked.
+TEST(WaitingFixtures, NoneOfThemIsUnaccountedFor) {
+  for (const auto& item : fs::directory_iterator(ahead_dir())) {
+    if (!item.is_regular_file() || item.path().extension() != ".json") continue;
+    const std::string name = item.path().filename().string();
+    bool held = false;
+    for (const Waiting& w : kWaiting) {
+      if (name == w.name) { held = true; break; }
+    }
+    EXPECT_TRUE(held) << name << " is waiting and no test holds it to the line of the task that wrote it";
+  }
+}
+
+// The three nested pairs of this task's lines, which is the rule the fixtures' README states: a
+// member that is a file of its own appears inside the envelope that carries it, byte for byte.
+TEST(WaitingFixtures, TheNestedOnesAreHeldVerbatimByTheirEnvelope) {
+  const std::string member = std::string(kHeartbeatUpdate);
+  const std::string heartbeat = std::string(kAgentHeartbeatUpdate);
+  const std::string ask = std::string(kUpdateAsk);
+  const std::string reply = std::string(kHeartbeatReplyUpdate);
+  EXPECT_NE(std::string::npos, heartbeat.find(member.substr(0, member.size() - 1)));
+  EXPECT_NE(std::string::npos, reply.find(ask.substr(0, ask.size() - 1)));
+
+  // And the heartbeat is the copied AgentHeartbeat.json with the member appended, which is what
+  // makes the two one sample rather than two agents.
+  const std::string copied = read_file(fixtures_dir() / "AgentHeartbeat.json");
+  ASSERT_FALSE(copied.empty());
+  std::string body = copied;
+  while (!body.empty() && (body.back() == '\n' || body.back() == '\r')) body.pop_back();
+  ASSERT_FALSE(body.empty());
+  EXPECT_EQ(body.substr(0, body.size() - 1), heartbeat.substr(0, body.size() - 1))
+      << "AgentHeartbeatUpdate.json is no longer AgentHeartbeat.json plus the update member";
 }
 
 TEST(WaitingFixtures, NoneOfThemIsInTheCopiedTreeOrItsManifest) {

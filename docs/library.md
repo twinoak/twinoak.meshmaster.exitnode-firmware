@@ -594,6 +594,7 @@ exactly that, in `src/agent/AgentClient.cpp`, and caps at an hour itself.)
 | `claimJobs(jobs, max, count&)` | 200 and the body parsed | `POST /agent/v1/jobs/claim` with `{"max":N}` from `writeClaimRequest`. Parse into the caller's array with `parseClaimResponse`, which parses **in place** and puts the credential in the job's own buffer and nowhere else. `count` may be 0 |
 | `postJobResult(jobId, body, len)` | 200 | `POST /agent/v1/jobs/{id}/result`. A late result is taken all the same and a duplicate `clientId` stores nothing twice, so this is safe to retry — which is what the offline buffer does |
 | `extendLease(jobId, seconds, leaseUntil&)` | 200 | `POST /agent/v1/jobs/{id}/extend` with `{"seconds":N}` (1–1800). A **409 is "you are not the lease holder any more"** and is false. Nothing in the library calls this yet; it is here because the protocol has it and a long job of your own will want it |
+| `postUpdateResult(updateId, body, len, notFound&)` | 200 | `POST /agent/v1/updates/{id}/result` with the bytes `writeUpdateResult` made (§6.5). **This one has a body already**, so a consumer that cannot be updated from the server implements nothing and is never asked. A result the server already has is answered 200 too — the first one stands — so it is safe to retry, which the loop does at every heartbeat's turn; `notFound` is the one **404** (an id that is not this exit node's), and it means *stop posting it*, not *it failed* |
 | `postProgress(jobId, body, len)` | 200 | `POST /agent/v1/jobs/{id}/progress` with the bytes `writeProgressReport` made: an intermediate `data` and a note, kept on the job and replaced by the next. Not a result. Also uncalled by the library |
 | `hasConfig()`, `config()`, `last()`, `lastCall()`, `limiter()` | — | reads of what you kept. `last()` is the config call's `Outcome` (the console's `server` line); `lastCall()` is the record of the most recent call of any kind; `limiter()` is the client-side 120-a-minute ceiling (§4.2) |
 
@@ -813,7 +814,12 @@ neighbour list alone is more than the 8 kB of stack the Arduino loop task has.
    `agent.setHeartbeatObserver(&yours)` if your unit also publishes every packet
    it hears to the community's MQTT brokers. Give none and the heartbeat is the
    heartbeat it always was, byte for byte.
-6. **Drive it**, one of two ways:
+6. **The update in the heartbeat** (optional, §6.5):
+   `agent.setUpdateProvider(&yours)` if your unit can be updated from
+   meshmaster.dk. Give none and the heartbeat is the heartbeat it always was,
+   byte for byte, no ask is read, no claim is ever held and
+   `postUpdateResult` is never called.
+7. **Drive it**, one of two ways:
    - **`agent.loop()`** — call it for ever, as often as you like, with the link
      up. It does at most one blocking call per pass, in the .NET agent's order:
      the config call once, the heartbeat every accepted interval, then the
@@ -825,7 +831,7 @@ neighbour list alone is more than the 8 kB of stack the Arduino loop task has.
      sleeps. Returns a `WakeReport`; then you sleep for
      `report.acceptedIntervalS`, but never less than `report.sleepAtLeastS`,
      and call it again.
-7. **Across a sleep**: `const mm::WakeState s = agent.state();` into retained
+8. **Across a sleep**: `const mm::WakeState s = agent.state();` into retained
    storage as bytes before you sleep, and `agent.restore(s, awayMs)` after the
    next boot, before the wake. It is a trivially copyable POD of 76 bytes; every
    duration in it is a *duration* and not a deadline, because `millis()` restarts
@@ -853,7 +859,7 @@ neighbour list alone is more than the 8 kB of stack the Arduino loop task has.
    asked for is still running*), and was quiet for about ninety minutes after one
    failed call — six hours at an hourly wake, and a whole day at the backoff's
    two-minute ceiling.
-8. **What the sleep keeps** (optional, §5.1): `agent.setRetained(&store,
+9. **What the sleep keeps** (optional, §5.1): `agent.setRetained(&store,
    scratch, sizeof scratch)` once after `begin()`, with a store of yours and a
    scratch the image is built in — the library allocates nothing, so the RAM is
    yours; **`mm::kMaxKeptImageLen`** (19 368 bytes) is the largest image it can
@@ -1045,6 +1051,9 @@ numbers for one, and not a count of them per key.* What a slot sent is between
 that unit and that broker; the heartbeat carries the slot's state and nothing
 else.
 
+The heartbeat's **other** optional member works the same way and is §6.5's: the
+`update`, for a unit that can be updated from the server.
+
 ### 6.2 `failedAt` — where a failed job failed
 
 Since `0.4.0`, and you get it for nothing: `JobRunner` fills it for every job it
@@ -1181,6 +1190,84 @@ that sentence is no part of the result. **If you write a `JobReport` yourself**,
 set `hasClock` or leave it, and never fill one number without the other.
 `JobResultReportWithClock.json` is the fixture, the two members last of all,
 after `loggedInAs`.
+
+### 6.5 `IUpdateProvider` — the update in the heartbeat, and the ask in its reply (optional)
+
+Since `0.8.0`. A person on meshmaster.dk may press *Update* for one exit node and
+one release. It is **not a job** — a job belongs to a repeater and this is about
+the exit node itself — so the server asks in the reply to that exit node's
+heartbeat, in every reply from the moment it was pressed until the result is
+recorded; the unit does whatever its own update means, and posts **one** result.
+
+**This library does not know what an update is.** Not a slot, not a release, not
+a signature, not a trial — and it is not going to. What it knows is that the
+heartbeat has an `update` member, that the reply may carry an ask, that there is a
+route to post a result to, and that somebody else does all of it:
+
+```cpp
+class MyUpdates : public mm::IUpdateProvider {
+ public:
+  bool describeUpdate(mm::HeartbeatUpdate& out) override {
+    if (!canBeUpdated_) return false;      // no member at all: a build that takes no update
+    out.table = tableWord_;                // your own vocabulary; the server keeps a word it
+    out.hasAsk = inHand_;                  //   has not heard of
+    out.id = id_;                          // only while an ask is in hand
+    out.step = step_;                      //   - the newest step of its journal
+    return true;
+  }
+  void onUpdateAsk(const mm::UpdateAsk& ask) override { keepItForLater(ask); }
+  void onHeartbeatAnswered(const mm::HeartbeatUpdate& posted) override { … }
+  bool resultToPost(long long& id, const char*& body, size_t& len) override { … }
+  void onResultPosted(long long id, bool taken, bool notFound) override { … }
+  bool holdsJobs() const override { return inHand_; }
+};
+
+MyUpdates updates;
+agent.setUpdateProvider(&updates);         // or never call it, and nothing changes
+```
+
+Six things to know, and then it is done:
+
+- **Absent is a first-class answer.** No provider, or a provider that returns
+  `false`, means there is no `update` member in the body at all, no ask is read,
+  no claim is ever held and `postUpdateResult` is never called. That is what the
+  Walter sends — it updates itself by a job of its own — and what this firmware
+  sends when it was built with no release key, because then nothing could be
+  signed in a way it believes.
+- **Nothing is copied.** `table` and `step` are yours and must be valid until the
+  heartbeat has been posted, as `HeartbeatIdentity`'s strings are. So are the
+  result's bytes, until `onResultPosted` has been called.
+- **`onUpdateAsk` is called from inside the heartbeat**, which on some consumers
+  happens inside a running job (`heartbeatIfOverdue`). Keep the ask and act on it
+  from your own loop: a provider that writes flash or restarts the board inside
+  that call restarts it in the middle of a job. This firmware keeps it and takes
+  it one pass later, which is also what makes *a job that was running when the ask
+  came is finished first* true for nothing.
+- **The loop decides nothing about what is new.** Every ask a reply carries is
+  handed over, the same `id` included, because only you know what you have in
+  hand. The server asks in every reply until it has a result.
+- **`onHeartbeatAnswered` hands back the member that went out**, and only when one
+  did and the call was answered `2xx`. That is how *the new firmware has reached
+  the server over TLS with its token* can be a condition of a trial without this
+  library knowing there is a trial: you wrote `step`, so you know what was proved.
+- **`holdsJobs()` holds the claim and nothing else.** The `claimDue_` the server
+  asked for is not cleared while you hold it, so the claim is made as soon as you
+  let go; the heartbeat, the offline buffer and the observation batch all go out
+  meanwhile, because a unit in the middle of an update is still an exit node.
+
+**The result's bytes** are `mm::writeUpdateResult` (`agent/Envelopes.h`), and its
+journal comes through one more small interface, `mm::UpdateJournal`, rather than
+an array: forty entries of a step and a note at the contract's bounds are four
+kilobytes of structs, and a unit that keeps them as one text should not have to
+build them. The two strings it hands back are **borrowed** — the writer writes
+each entry before it asks for the next — so one buffer of your own is enough.
+`writeUpdateResult` returns 0 rather than a half-written body, and the caller's
+answer to that is to drop the oldest journal entries and ask again.
+
+The words — `committed`, `rolledBack`, `refused`, `stuck`, and a refusal's
+`inProgress`, `table`, `current`, `fetch` or `check` — are meshmaster.dk's and
+this library writes them as it is given them: the vocabulary lives at the two ends
+of the protocol, and a copy of it here would be a third that could drift.
 
 ## 7. `IJobExtension` — your own job types
 
@@ -1380,6 +1467,13 @@ bytes, which cost the server the other eight as *lost* at every short listing.
 `mm::writeNeighboursResult` takes the count as its third argument; if you write
 that result yourself, this is the one call of this release that stops compiling.
 
+**The update's five are the rest of them** (task p1.15-61, waiting on
+meshmaster.dk's task 244): `HeartbeatUpdate.json` and `AgentHeartbeatUpdate.json`
+for the heartbeat's member, `UpdateAsk.json` and `HeartbeatReplyUpdate.json` for
+the ask in its reply, and `UpdateResult.json` for the one result (§6.5). Nothing
+of yours stops compiling for them — they are an addition — and the two files that
+nest hold their member verbatim, as the copied tree's pairs do.
+
 ## 10. Versioning, pinning, and watching this upstream
 
 **A tag `vX.Y.Z` of this repository is the library's version.** There is nothing
@@ -1411,6 +1505,8 @@ tag** the first heading of `CHANGELOG.md` is that release's own. Report both ver
 | change what the library *reads* of a repeater's reply | the companion fixtures move, and the pinned MeshCore tag in `platformio.ini`'s `[meshcore]` with them |
 | add a job type, a log line, a console report | nothing; new behaviour behind the same interfaces |
 | add a defaulted argument to a method of `AgentLoop` — `restore()`'s `awayMs` (task p1.10-42) | **nothing stops compiling**, and what changed is the meaning of a call you already make: read the changelog's entry and pass the figure if you have it. A device that never sleeps has nothing to do |
+| add a method to `IUplink` **with a body** — `postUpdateResult` (task p1.15-61) | **nothing stops compiling.** It is the one way a call can be added to that seam without breaking every tree that pins it, and it is only ever called for a consumer that gave the loop an `IUpdateProvider` (§6.5). Override it when you want the call; ignore it and your unit is as it was |
+| add an optional heartbeat member behind a provider — the `observer` (§6.1), the `update` (§6.5) | **nothing stops compiling**, and the body does not move by a byte until you hand the loop a provider. The fixtures' manifest commit moves, which is the row above |
 | change `WakeState`'s layout | `WakeState::kVersion` goes up, and `restore()` refuses your stored blob rather than misreading it. You lose a backoff across one sleep, which is the right failure |
 | change the kept image's layout (§5.1) | `kKeptImageVersion` goes up. A version this library knows is read — `0.7.2` reads version 1 as an image with no batch pending, so that update costs nothing — and any other is refused whole, counted, and written over by the next wake, which loses what one sleep kept, once, and says so |
 

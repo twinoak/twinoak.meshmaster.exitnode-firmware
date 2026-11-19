@@ -65,6 +65,7 @@
 #include "platform/TableFlash.h"
 #include "platform/TlsHeap.h"
 #include "settings/Store.h"
+#include "update/Ask.h"
 #include "update/Fetch.h"
 #include "update/FetchSeams.h"
 #include "update/ImageDescriptor.h"
@@ -108,6 +109,12 @@ bool fetcherReady = false;
 // src/platform/BootChoice.cpp.
 mm::update::Updater updater;
 bool updaterReady = false;
+// The ask meshmaster.dk makes in the reply to a heartbeat, and the steps it is taken in (task
+// p1.15-61). It is the loop's `IUpdateProvider`: the heartbeat's `update` member comes from it,
+// the reply's ask goes to it, and its one result is posted for it. The machine is portable; its
+// six seams are task 59's record store, task 60's clock and restart, and the three small classes
+// below.
+mm::update::Asked asked;
 
 uint32_t uplinkMemoryFailuresSeen = 0;  // AgentClient::memoryFailures() as last handed to the observer
 uint32_t uplinkCallsSeen = 0;           // KeepAlive's call count as last handed to the observer's gate (task p1.8-31)
@@ -160,7 +167,12 @@ class TrialNow final : public mm::update::TrialConditions {
  public:
   bool meshStarted() const override { return radio_ok; }
   bool linkAndClock() const override { return wifi.connected() && agentClock.fromNetwork(); }
-  bool heartbeatAnswered() const override { return agent.everHeartbeated(); }
+  // Since task p1.15-61 this is not simply *a heartbeat was answered*: while an ask from the
+  // server is in hand it is a heartbeat that **carried `step` `proving`** and was answered 2xx,
+  // which is what the server reads as *the new firmware has reached me with its token*
+  // (deliverable 5). With no ask in hand - a switch made at the console - it is task 60's own
+  // rule, and nothing changed.
+  bool heartbeatAnswered() const override { return asked.heartbeatProvesTheTrial(agent.everHeartbeated()); }
 };
 
 // Both clocks the trial needs: the milliseconds the ten minutes are counted in, and the UNIX
@@ -192,6 +204,62 @@ class TrialRestart final : public mm::update::DeliberateRestart {
 TrialNow trialConditions;
 TrialClockNow trialClock;
 TrialRestart trialRestart;
+
+// The ask's three board seams (task p1.15-61). Each is a plain forwarding of something this file
+// already does for the console: the partition table of task 57, the fetch of task 59 and the
+// switch of task 60.
+//
+// The table word is read out of the sector once and remembered, because the heartbeat asks for it
+// every thirty seconds and the sector is four kilobytes of flash; writing the slot forgets it, so
+// the boot after that reads the table again.
+class AskTableNow final : public mm::update::AskTable {
+ public:
+  const char* word() const override {
+    if (word_ == nullptr) {
+      const mm::TablePair tables = mm::tablesForThisBoard();
+      const mm::TableReading reading = mm::readTable(mm::partitionTableFlash(), tables.oneSlot);
+      word_ = mm::tableKindWord(reading.read ? reading.kind : mm::TableKind::Other);
+    }
+    return word_;
+  }
+
+  bool addSecondSlot(char* line, size_t cap) override {
+    const mm::TablePair tables = mm::tablesForThisBoard();
+    const mm::AddSlotResult r = mm::addSecondSlot(mm::partitionTableFlash(), tables.oneSlot, tables.twoSlots);
+    std::snprintf(line, cap, "%s", r.line);
+    mm::logf(r.added ? mm::LogLevel::Warn : mm::LogLevel::Info, "update slot: %s", r.line);
+    word_ = nullptr;
+    return r.added;
+  }
+
+ private:
+  mutable const char* word_ = nullptr;
+};
+
+class AskFetchNow final : public mm::update::AskFetch {
+ public:
+  bool ready() const override { return fetcherReady && server.configured() && wifi.connected(); }
+  bool start(const char* base) override { return fetcherReady && fetcher.start(base, millis()); }
+  bool running() const override { return fetcher.running(); }
+  const mm::update::FetchResult& result() const override { return fetcher.result(); }
+};
+
+class AskTrialNow final : public mm::update::AskTrial {
+ public:
+  bool apply(char* why, size_t cap) override {
+    if (!updaterReady) {
+      std::snprintf(why, cap, "this board has not finished starting up");
+      return false;
+    }
+    return updater.apply(why, cap);
+  }
+  bool onTrial() const override { return updater.onTrial(); }
+  const mm::update::UpdateRecord& record() const override { return updater.record(); }
+};
+
+AskTableNow askTable;
+AskFetchNow askFetch;
+AskTrialNow askTrial;
 
 // What the observer's connections read of this board (observer/Connection.h, Environment).
 uint32_t millisNow() { return millis(); }
@@ -586,6 +654,9 @@ void printUpdate(Stream& out) {
   // ending, which is what the record kept across the restarts (task p1.15-60, deliverable 8).
   mm::StreamOut text(out);
   updater.report(text);
+  // And what meshmaster.dk asked for, if anything (task p1.15-61): the ask in hand and the step
+  // it stands at, or the last one's outcome and whether the server has its result.
+  asked.report(text);
 }
 
 // `update fetch <id>`: fetch release `/agent/v1/firmware/<id>` into the other application slot
@@ -600,6 +671,11 @@ void printUpdateFetch(const char* id, Stream& out) {
   }
   if (fetcher.running()) {
     out.println("fetch     one is already running; its steps are in the log");
+    return;
+  }
+  // Not while meshmaster.dk's own ask is in hand (task p1.15-61): it is doing these steps itself.
+  if (const char* const asking = asked.whyNotNow()) {
+    out.printf("fetch     %s\r\n", asking);
     return;
   }
   // Not while a firmware is on trial (task p1.15-60): the slot a fetch writes is the one holding
@@ -634,6 +710,10 @@ void printUpdateFetch(const char* id, Stream& out) {
 void printUpdateApply(Stream& out) {
   if (!updaterReady) {
     out.println("apply     not ready: this board has not finished starting up");
+    return;
+  }
+  if (const char* const asking = asked.whyNotNow()) {
+    out.printf("apply     %s\r\n", asking);
     return;
   }
   if (fetcher.running()) {
@@ -955,6 +1035,18 @@ void setup() {
     seams.clock = &trialClock;
     updater.begin(seams, runningVersion, mm::boardName(), mm::bootReason(), &fetchLog);
     updaterReady = true;
+    // The ask's machine, on the same version string and the same log (task p1.15-61). A build
+    // that trusts no release key hands the loop a provider that writes no heartbeat member and
+    // takes no ask, because nothing could be signed in a way it believes (task p1.15-58).
+    mm::update::Asked::Seams askSeams;
+    askSeams.table = &askTable;
+    askSeams.fetch = &askFetch;
+    askSeams.trial = &askTrial;
+    askSeams.store = &slotRecordStore;
+    askSeams.clock = &trialClock;
+    askSeams.restart = &trialRestart;
+    const bool canBeUpdated = mm::update::trustedKeyCount() > 0 || mm::update::trustsTestKey();
+    asked.begin(askSeams, runningVersion, canBeUpdated, &fetchLog);
     const mm::update::BootFinding found = updater.atBoot();
     if (found != mm::update::BootFinding::Nothing) {
       LOG_W("update: this boot is %s", mm::update::bootFindingWord(found));
@@ -1008,6 +1100,10 @@ void setup() {
   // library knows nothing of brokers; MeshMaster shows the state and configures none of it
   // (meshmaster.dk D-46).
   agent.setHeartbeatObserver(&observer);
+  // And the update in the heartbeat, the ask in its reply and its one result (task p1.15-61): the
+  // loop carries the three and decides none of them, and a build with no release key writes no
+  // member at all (agent/AgentLoop.h, IUpdateProvider).
+  agent.setUpdateProvider(&asked);
   if (!server.configured()) LOG_I("server: not configured; set meshmaster.token (meshmaster.url is https://meshmaster.dk unless set)");
   if (display_ok) {
     applyDisplaySettings();  // `display.timeout`, before the first frame starts its clock
@@ -1031,6 +1127,10 @@ void setup() {
     mm::update::renderRecordLine(mm::update::loadRecord(slotRecordStore), held, sizeof(held));
     LOG_I("update: the other application slot %s", held);
   }
+  // And what meshmaster.dk asked for, if an ask was in hand when this board last restarted (task
+  // p1.15-61). **After** the fetcher, because an ask at `fetching` begins its fetch again here,
+  // and after the updater's own `atBoot`, whose answer is what an ask at `switching` reads.
+  asked.atBoot();
   board.onBootComplete();
 }
 
@@ -1065,6 +1165,11 @@ void loop() {
   // each is first seen, the image marked valid the moment the third is, and the board sent back
   // to the old one when ten minutes pass without them. It does nothing at all otherwise.
   updater.step();
+
+  // The ask the server made, a step a pass (task p1.15-61): the steps in order, each written down
+  // before it begins, and a restart where the step needs one. **From here and not from the pump
+  // inside a job**, so that a job that was running when the ask came is finished first.
+  asked.step();
 
   // One piece of a fetch a pass, and only when one is running: at most one request, so the mesh,
   // the console, the observer and the watchdog above all had their turn before it and have it

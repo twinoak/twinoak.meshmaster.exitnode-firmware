@@ -52,6 +52,14 @@
 // library knows nothing of brokers, topics or keys, and a consumer that gives none sends the
 // heartbeat it sent before, byte for byte.
 //
+// **The update, since task p1.15-61.** One more optional member of the heartbeat and one more
+// call: a consumer that can be updated from the server gives the loop an `IUpdateProvider`, the
+// loop writes the member the provider fills, hands it the `update` of a reply that carried one,
+// and posts its result to `POST /agent/v1/updates/{id}/result` at every heartbeat's turn until it
+// is taken or refused for good. While that provider says it holds the jobs, no claim is made. This
+// library knows nothing of slots, releases, signatures or trials, and a consumer that gives no
+// provider sends the heartbeat it sent before, byte for byte, reads no ask and makes no call.
+//
 // **Two ways to be driven, since task p1.5-18.** Everything above is `loop()`, called for ever
 // from the Arduino loop with the link up: that is the Heltec, and nothing of it changed. A device
 // that sleeps - the Walter of a repeater-v2 unit, on a battery and a panel, attaching to LTE a
@@ -314,6 +322,57 @@ class IHeartbeatObserver {
   ~IHeartbeatObserver() {}
 };
 
+// Where the heartbeat's `update` member comes from, where the ask in a reply goes, and whose
+// result is posted (task p1.15-61; meshmaster.dk's task p4.42-244). **This library does not know
+// what an update is** - not a slot, not a release, not a signature, not a trial - and it is not
+// going to: a consumer that can be updated from the server gives the loop one of these, and the
+// loop carries three things between it and the server and decides none of them.
+//
+// A consumer that has none gives the loop nothing, and then there is no `update` member in the
+// heartbeat, no ask is read, no claim is held and `postUpdateResult` is never called: **its
+// heartbeat is byte for byte the heartbeat it sent before**. On this firmware the provider is
+// `src/update/Ask.h`, and a build with no release key (`src/update/Trust.h`) hands one over that
+// writes no member and takes no ask - because nothing could be signed in a way it believes.
+class IUpdateProvider {
+ public:
+  // Fill `out` for the heartbeat about to go, and return true; false leaves the member out, which
+  // is how a provider says *not this build*. `out` is the loop's and is fresh at every call; the
+  // strings it is given are the provider's and must stay valid until the heartbeat has been
+  // posted - the loop copies nothing, as it copies nothing of HeartbeatIdentity.
+  virtual bool describeUpdate(HeartbeatUpdate& out) = 0;
+
+  // The `update` of a reply, as it came. The loop hands over every one it reads, including the
+  // same `id` again: **what is new is the provider's to decide**, because only it knows what it
+  // has in hand. Called from inside the heartbeat, which on some consumers happens inside a job
+  // (`heartbeatIfOverdue`), so a provider that may restart the board does its work elsewhere.
+  virtual void onUpdateAsk(const UpdateAsk& ask) = 0;
+
+  // A heartbeat that carried the member this provider described was answered 2xx, with the member
+  // as it was written. The provider knows what it said - this library does not - which is how
+  // *the new firmware has reached the server over TLS with its token* can be a condition of a
+  // trial without this library knowing there is one.
+  virtual void onHeartbeatAnswered(const HeartbeatUpdate& posted) = 0;
+
+  // A result waiting to go: its `id`, and the bytes `writeUpdateResult` made. False when none
+  // waits, which is the usual answer. The bytes are the provider's and must stay valid until
+  // `onResultPosted` has been called.
+  virtual bool resultToPost(long long& id, const char*& body, size_t& len) = 0;
+
+  // What that post came to: `taken` for the 200, `notFound` for the one 404. Both mean the result
+  // stops being posted; neither means it was kept. Anything else is false twice and the result
+  // waits for the next heartbeat's turn.
+  virtual void onResultPosted(long long id, bool taken, bool notFound) = 0;
+
+  // Whether no job may be claimed now. True from the moment an ask has been taken until it has
+  // ended, so that a board in the middle of an update is not given work it would restart out of;
+  // a job that was already running is run to its end and its result posted, because a claim is
+  // run to the end before the loop looks at anything else.
+  virtual bool holdsJobs() const = 0;
+
+ protected:
+  ~IUpdateProvider() {}
+};
+
 class AgentLoop {
  public:
   using Counters = AgentCounters;
@@ -328,6 +387,12 @@ class AgentLoop {
   // Optional and additive: nullptr - the default - is a consumer that is not an observer, and
   // its heartbeat does not change by a byte. May be set and unset at any time.
   void setHeartbeatObserver(IHeartbeatObserver* observer) { observerProvider_ = observer; }
+
+  // The update in the heartbeat, the ask in its reply, and the result's post, for a consumer that
+  // can be updated from the server (IUpdateProvider above). Optional and additive: nullptr - the
+  // default - is a consumer that cannot, and its heartbeat does not change by a byte. May be set
+  // and unset at any time.
+  void setUpdateProvider(IUpdateProvider* provider) { updateProvider_ = provider; }
 
   void loop();
 
@@ -473,6 +538,9 @@ class AgentLoop {
   bool doConfig();
   bool doHeartbeat();
   void doPendingResults();
+  // The one result of an update the server asked for, at every heartbeat's turn until the server
+  // takes it or answers the one 404 (task p1.15-61).
+  void doUpdateResult();
   // One observation batch, bounded by what a wake may still post (the ledger's `bytesLeft`): a
   // batch that will not fit is shortened until it does, and `loop()`, whose ledger has no
   // bounds, sends the batch it always sent.
@@ -538,6 +606,7 @@ class AgentLoop {
   JobRunner* jobs_ = nullptr;
   const HeartbeatIdentity* identity_ = nullptr;
   IHeartbeatObserver* observerProvider_ = nullptr;  // nullptr: no `observer` member is written
+  IUpdateProvider* updateProvider_ = nullptr;       // nullptr: no `update` member, no ask, no post
   // Where the provider's answer lives for the length of one heartbeat. A member and not a local
   // of buildHeartbeat(), because the Heartbeat it fills points at it and that struct outlives
   // the call (doHeartbeat and wakeHeartbeat both post after building).
@@ -545,6 +614,11 @@ class AgentLoop {
   // And the flood scope's, for the same reason (task p1.8-32): the counts are the runner's and
   // the scope is the mesh's, read at every heartbeat and written into this.
   HeartbeatFlood flood_;
+  // And the update's (task p1.15-61). It is handed back to the provider after a heartbeat that
+  // was answered, so it has to outlive the call as the other two do.
+  HeartbeatUpdate update_;
+  bool updateWritten_ = false;   // the member went out with the heartbeat that is on the wire
+  bool updateResultDue_ = false; // a heartbeat was answered: the result, if one waits, goes next
 
   ObservationRing ring_;
   Counters counters_;

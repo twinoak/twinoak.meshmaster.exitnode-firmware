@@ -17,15 +17,23 @@
 #ifndef FIXTURES_DIR
 #error "FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
 #endif
+#ifndef AHEAD_FIXTURES_DIR
+#error "AHEAD_FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
+#endif
 
 namespace {
 
-std::string readFixture(const char* name) {
-  std::ifstream in(std::string(FIXTURES_DIR) + "/" + name, std::ios::binary);
+std::string readOne(const std::string& dir, const char* name) {
+  std::ifstream in(dir + "/" + name, std::ios::binary);
   std::ostringstream all;
   all << in.rdbuf();
   return all.str();
 }
+
+std::string readFixture(const char* name) { return readOne(FIXTURES_DIR, name); }
+
+// A fixture that is waiting for a sync (tests/fixtures/contracts-ahead/README.md).
+std::string readAhead(const char* name) { return readOne(AHEAD_FIXTURES_DIR, name); }
 
 }  // namespace
 
@@ -74,6 +82,82 @@ TEST(HeartbeatReply, AnUnknownMemberIsSkippedLikeTheDotNetSideDoes) {
   ASSERT_TRUE(mm::parseHeartbeatReply(json, std::strlen(json), r, err, sizeof err)) << err;
   EXPECT_EQ(120, r.pollIntervalS);
   EXPECT_FALSE(r.jobsWaiting);
+}
+
+// ---- the ask in the reply (task p1.15-61; meshmaster.dk's task p4.42-244) ---------------------
+
+TEST(UpdateAskReply, TheWaitingFixtureReadsIntoTheStructFieldForField) {
+  const std::string json = readAhead("HeartbeatReplyUpdate.json");
+  ASSERT_FALSE(json.empty()) << "tests/fixtures/contracts-ahead/HeartbeatReplyUpdate.json is missing";
+
+  mm::HeartbeatReply r;
+  char err[128] = {0};
+  ASSERT_TRUE(mm::parseHeartbeatReply(json.data(), json.size(), r, err, sizeof err)) << err;
+  EXPECT_STREQ("2026-09-23T14:00:01Z", r.serverTime);
+  EXPECT_EQ(30, r.pollIntervalS);
+  EXPECT_FALSE(r.jobsWaiting) << "the server hands an exit node no job while an update is out";
+  ASSERT_TRUE(r.hasUpdate);
+  EXPECT_FALSE(r.updateRefused);
+  EXPECT_EQ(17, r.update.id);
+  EXPECT_EQ(9, r.update.releaseId);
+  EXPECT_STREQ("twinoak-exitnode-firmware", r.update.product);
+  EXPECT_STREQ("0.8.0", r.update.version);
+  EXPECT_STREQ("/agent/v1/firmware/9", r.update.base);
+  EXPECT_STREQ("3b1f0c4e5d6a79880817a6b5c4d3e2f1a0b9c8d7e6f5041322314051607f8e9d", r.update.expectedSha256);
+  EXPECT_EQ(1432000u, r.update.size);
+
+  // And the member on its own is a file of its own, which the reply holds verbatim.
+  std::string ask = readAhead("UpdateAsk.json");
+  while (!ask.empty() && (ask.back() == '\n' || ask.back() == '\r')) ask.pop_back();
+  ASSERT_FALSE(ask.empty());
+  EXPECT_NE(std::string::npos, json.find(ask)) << "the reply does not hold UpdateAsk.json";
+}
+
+// Every other reply, which is nearly all of them: no member, and nothing of this is read.
+TEST(UpdateAskReply, AReplyWithNoUpdateHasNoAsk) {
+  const std::string json = readFixture("HeartbeatReply.json");
+  ASSERT_FALSE(json.empty());
+  mm::HeartbeatReply r;
+  char err[128] = {0};
+  ASSERT_TRUE(mm::parseHeartbeatReply(json.data(), json.size(), r, err, sizeof err)) << err;
+  EXPECT_FALSE(r.hasUpdate);
+  EXPECT_FALSE(r.updateRefused);
+  EXPECT_EQ(0, r.update.id);
+}
+
+// An `update` object missing a member is **dropped with the reply still taken**: a reply refused
+// whole would be a heartbeat that failed, a backoff, and in the end an exit node the server reads
+// as offline over a member it is free not to send at all. The ask comes again in the next reply.
+TEST(UpdateAskReply, AnUpdateThatIsNotOfTheShapeIsDroppedAndTheReplyIsStillTaken) {
+  const char* const kMissingEach[] = {
+      R"({"serverTime":"2026-09-23T14:00:01Z","budget":{"maxTransactionsPerMinute":2,"minGapSeconds":20},"pollIntervalS":30,"jobsWaiting":false,"update":{"releaseId":9,"product":"p","version":"0.8.0","base":"/b","expectedSha256":"ab","size":10}})",
+      R"({"serverTime":"2026-09-23T14:00:01Z","budget":{"maxTransactionsPerMinute":2,"minGapSeconds":20},"pollIntervalS":30,"jobsWaiting":false,"update":{"id":17,"product":"p","version":"0.8.0","base":"/b","expectedSha256":"ab","size":10}})",
+      R"({"serverTime":"2026-09-23T14:00:01Z","budget":{"maxTransactionsPerMinute":2,"minGapSeconds":20},"pollIntervalS":30,"jobsWaiting":false,"update":{"id":17,"releaseId":9,"version":"0.8.0","base":"/b","expectedSha256":"ab","size":10}})",
+      R"({"serverTime":"2026-09-23T14:00:01Z","budget":{"maxTransactionsPerMinute":2,"minGapSeconds":20},"pollIntervalS":30,"jobsWaiting":false,"update":{"id":17,"releaseId":9,"product":"p","base":"/b","expectedSha256":"ab","size":10}})",
+      R"({"serverTime":"2026-09-23T14:00:01Z","budget":{"maxTransactionsPerMinute":2,"minGapSeconds":20},"pollIntervalS":30,"jobsWaiting":false,"update":{"id":17,"releaseId":9,"product":"p","version":"0.8.0","expectedSha256":"ab","size":10}})",
+      R"({"serverTime":"2026-09-23T14:00:01Z","budget":{"maxTransactionsPerMinute":2,"minGapSeconds":20},"pollIntervalS":30,"jobsWaiting":false,"update":{"id":17,"releaseId":9,"product":"p","version":"0.8.0","base":"/b","size":10}})",
+      R"({"serverTime":"2026-09-23T14:00:01Z","budget":{"maxTransactionsPerMinute":2,"minGapSeconds":20},"pollIntervalS":30,"jobsWaiting":false,"update":{"id":17,"releaseId":9,"product":"p","version":"0.8.0","base":"/b","expectedSha256":"ab"}})",
+      R"({"serverTime":"2026-09-23T14:00:01Z","budget":{"maxTransactionsPerMinute":2,"minGapSeconds":20},"pollIntervalS":30,"jobsWaiting":false,"update":{"id":"seventeen","releaseId":9,"product":"p","version":"0.8.0","base":"/b","expectedSha256":"ab","size":10}})",
+  };
+  for (const char* json : kMissingEach) {
+    mm::HeartbeatReply r;
+    char err[128] = {0};
+    ASSERT_TRUE(mm::parseHeartbeatReply(json, std::strlen(json), r, err, sizeof err)) << err << " for " << json;
+    EXPECT_FALSE(r.hasUpdate) << json;
+    EXPECT_TRUE(r.updateRefused) << json;
+    EXPECT_EQ(30, r.pollIntervalS) << "the rest of the reply is still taken";
+  }
+}
+
+// A member a newer server adds inside the ask is skipped, as every unknown member is.
+TEST(UpdateAskReply, AnUnknownMemberInsideTheAskIsSkipped) {
+  const char* json =
+      R"({"serverTime":"2026-09-23T14:00:01Z","budget":{"maxTransactionsPerMinute":2,"minGapSeconds":20},"pollIntervalS":30,"jobsWaiting":false,"update":{"id":17,"releaseId":9,"product":"p","version":"0.8.0","base":"/b","expectedSha256":"ab","size":10,"notes":"later"}})";
+  mm::HeartbeatReply r;
+  char err[128] = {0};
+  ASSERT_TRUE(mm::parseHeartbeatReply(json, std::strlen(json), r, err, sizeof err)) << err;
+  ASSERT_TRUE(r.hasUpdate);
+  EXPECT_EQ(17, r.update.id);
 }
 
 TEST(AgentConfig, TheConfigAnswerOfApiSection3ReadsIntoTheStruct) {

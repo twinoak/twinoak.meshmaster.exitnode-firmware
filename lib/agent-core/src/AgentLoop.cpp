@@ -147,9 +147,22 @@ void AgentLoop::loop() {
     doPendingResults();
     return;
   }
+  // The one result of an update the server asked for, before the claim: the board has nothing
+  // else to say about an update and the server is waiting for it (task p1.15-61). The flag is set
+  // by a heartbeat that was answered, so this is *at every heartbeat's turn* and not a loop of
+  // its own.
+  if (updateResultDue_) {
+    doUpdateResult();
+    return;
+  }
   // A claim before the batch: the server said work was waiting, and a job on the air is what
   // this exit node is for. One claim per heartbeat that said so.
-  if (claimDue_) {
+  //
+  // **Not while an update is in hand** (task p1.15-61, deliverable 7): `claimDue_` is left
+  // standing rather than cleared, so the claim the server asked for is made once the update has
+  // ended - and the observation batch below still goes out meanwhile, which is why this does not
+  // return.
+  if (claimDue_ && (updateProvider_ == nullptr || !updateProvider_->holdsJobs())) {
     doJobs();
     return;
   }
@@ -244,6 +257,20 @@ void AgentLoop::buildHeartbeat(Heartbeat& hb) {
     flood_.answeredUnscoped = counts.answeredUnscoped;
     flood_.unanswered = counts.unanswered;
     hb.flood = &flood_;
+  }
+  // The update, last (task p1.15-61; meshmaster.dk's task p4.42-244): the table word this board
+  // can do something with, and the ask in hand with the newest step of its journal. Whatever the
+  // consumer's provider says, and nothing at all when there is none or when it answers false -
+  // which is what a build with no release key answers, because nothing could be signed in a way
+  // it believes. This library knows only that it is an object the provider fills.
+  hb.update = nullptr;
+  updateWritten_ = false;
+  if (updateProvider_ != nullptr) {
+    update_ = HeartbeatUpdate();
+    if (updateProvider_->describeUpdate(update_)) {
+      hb.update = &update_;
+      updateWritten_ = true;
+    }
   }
 }
 
@@ -395,6 +422,18 @@ bool AgentLoop::doHeartbeat() {
   nextHeartbeatAt_ = millis() + static_cast<uint32_t>(pollIntervalS_) * 1000u;
   lastJobsWaiting_ = reply.jobsWaiting;
   if (reply.jobsWaiting) claimDue_ = true;
+  // The update (task p1.15-61). Three things, in this order, and none of them is a decision:
+  // the member that went out was answered 2xx - which is what makes a heartbeat the third
+  // condition of a trial, in the provider's own reckoning and not this library's - then the ask
+  // the reply carried, then the turn a waiting result gets.
+  if (updateProvider_ != nullptr) {
+    if (updateWritten_) updateProvider_->onHeartbeatAnswered(update_);
+    if (reply.hasUpdate) updateProvider_->onUpdateAsk(reply.update);
+    if (reply.updateRefused) {
+      LOG_W("server: the heartbeat reply carried an `update` this agent could not read; it was dropped");
+    }
+    updateResultDue_ = true;
+  }
   LOG_D("server: heartbeat reply: serverTime %s, budget %d/min gap %d s, poll %d s, jobs waiting %s",
         reply.serverTime, reply.budget.maxTransactionsPerMinute, reply.budget.minGapSeconds, reply.pollIntervalS,
         reply.jobsWaiting ? "yes" : "no");
@@ -414,6 +453,32 @@ void AgentLoop::doPendingResults() {
     return;
   }
   // Still there: the same backoff the heartbeat uses, so the buffer is not hammered.
+  noteFailure(server_->lastCall());
+}
+
+void AgentLoop::doUpdateResult() {
+  updateResultDue_ = false;
+  if (updateProvider_ == nullptr) return;
+  long long id = 0;
+  const char* body = nullptr;
+  size_t len = 0;
+  if (!updateProvider_->resultToPost(id, body, len) || body == nullptr || len == 0) return;
+  bool notFound = false;
+  const bool ok = meter_.spend(0, [&] { return server_->postUpdateResult(id, body, len, notFound); });
+  updateProvider_->onResultPosted(id, ok, notFound);
+  if (ok) {
+    LOG_I("update: the result of update %lld was taken by the server", id);
+    succeeded();
+    return;
+  }
+  if (notFound) {
+    // The one 404: an id that is not this exit node's, or is no ask at all. The server has
+    // nothing to record and nothing to wait for, so this is an answer and not a failure - it
+    // earns no backoff.
+    LOG_W("update: the server does not know update %lld; its result is not posted again", id);
+    return;
+  }
+  LOG_W("update: the result of update %lld did not go through; it is posted again at the next heartbeat", id);
   noteFailure(server_->lastCall());
 }
 

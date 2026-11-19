@@ -90,6 +90,10 @@ class AgentClient : public IUplink, private uplink::Transport {
   bool postJobResult(long long jobId, const char* body, size_t len) override;
   bool extendLease(long long jobId, int seconds, uint32_t& leaseUntil) override;
   bool postProgress(long long jobId, const char* body, size_t len) override;
+  // POST /agent/v1/updates/{id}/result (task p1.15-61): the one result of an update meshmaster.dk
+  // asked for. Down the same path every other call goes down - the kept connection, the verified
+  // chain, the one Authorization header - and `notFound` is the one 404.
+  bool postUpdateResult(long long updateId, const char* body, size_t len, bool& notFound) override;
 
   // ---- the firmware routes (task p1.15-59) ---------------------------------------------------
   //
