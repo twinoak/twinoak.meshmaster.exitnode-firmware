@@ -1,5 +1,5 @@
 # The firmware-manifest fixtures of the specification, copied - never edited here.
-# source: twinoak/meshmaster.dk/tests/fixtures/firmware at commit fc94d985de92dab8c18656be7ce55105db7dee1d
+# source: twinoak/meshmaster.dk/tests/fixtures/firmware at commit 28daabd1d3426989a50e579963710d58de7e39cd
 # written by tools/sync-fixtures.ps1; see README.md in this directory
 #
 # sha256                                                           bytes  name
