@@ -150,6 +150,18 @@ jobs:
           python tools/check-sdkconfig.py --self-test
           python tools/check-sdkconfig.py --built ${{ matrix.env }}
 
+      # No function of ours puts more than 1 024 bytes on the stack (task p1.17-65). 0.7.3 did not
+      # start because one of them put 2 864 there inside one that put 5 696 there, on a loop task
+      # that had 8 192, and nothing said so before a board did. The build has already run this
+      # itself (tools/pio/check_frames.py, a `post:` script), so a frame over the limit failed the
+      # step above; this is the self-test - the planted cases the rail must refuse - and the rail
+      # again over the whole build directory, with the twenty largest frames printed for the record.
+      - name: No frame of ours is over 1 024 bytes
+        run: |
+          set -euo pipefail
+          python tools/check-frames.py --self-test
+          python tools/check-frames.py --env ${{ matrix.env }}
+
       # The merged image is what a board out of the box is flashed with, and the partition table
       # it carries is where NVS, SPIFFS (the identity) and the application live. The check holds
       # the table this environment names against the framework's default for the board's flash
@@ -237,6 +249,14 @@ jobs:
           set -euo pipefail
           python tools/check-runners.py --self-test
           python tools/check-runners.py
+
+      # The frame rail's own planted cases (task p1.17-65). The rail itself needs a board build and
+      # runs in the build job; its self-test needs nothing but Python, so it runs here as well -
+      # a rail nobody has tested is a rail that passes because it read nothing.
+      - name: The frame rail refuses what it must
+        run: |
+          set -euo pipefail
+          python tools/check-frames.py --self-test
 
       # The release's rails and the release script's own tests, before anything is installed: the
       # version is in one place and the four files that carry it agree, the changelog's top section

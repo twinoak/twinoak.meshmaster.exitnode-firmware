@@ -483,6 +483,56 @@ TEST(TheSignatureLine, IsRefusedAtCheckOneWhenItIsNotSectionThrees) {
   }
 }
 
+// ------------------------------------------------------------- what a refusal leaves in the info
+
+// **The caller's info is emptied first and filled in place** (task p1.17-65): it is 872 bytes, and
+// a second one of them on the stack beside it was most of a frame the rail does not allow
+// (tools/check-frames.py). So a refusal leaves nothing of a release half read in the info whatever
+// it held before - the same rule an update's record is loaded by.
+TEST(TheReader, ARefusalLeavesNothingOfAReleaseInTheCallersInfo) {
+  const std::vector<uint8_t> manifest = release("manifest.json");
+  const std::string sig = text(release("manifest.json.sig"));
+  const std::vector<TrustedKey> keys = testKeyOnly();
+
+  // The info a board has been carrying: a release it read before, whole.
+  ReleaseInfo info = readFixture("heltec_v3");
+  ASSERT_STRNE("", info.version);
+  ASSERT_GT(info.fileCount, 0u);
+
+  // 1. A signature nobody made: check 1, before anything of the manifest is read.
+  Outcome out = readWith(manifest, sig, someOtherKey(), "heltec_v3", info);
+  ASSERT_FALSE(out.ok);
+  EXPECT_STREQ("", info.product);
+  EXPECT_STREQ("", info.version);
+  EXPECT_STREQ("", info.imageId);
+  EXPECT_EQ(0u, info.fileCount);
+
+  // 2. A manifest that is not JSON: check 2.
+  info = readFixture("heltec_v3");
+  const std::vector<uint8_t> notJson = {'{', 'n', 'o', 't'};
+  out = readWith(notJson, sig, keys, "heltec_v3", info);
+  ASSERT_FALSE(out.ok);
+  EXPECT_STREQ("", info.version);
+  EXPECT_EQ(0u, info.fileCount);
+
+  // 3. A release with no image for this board: check 3, after the whole manifest was read.
+  info = readFixture("heltec_v3");
+  out = readWith(manifest, sig, keys, "a_board_no_release_names", info);
+  ASSERT_FALSE(out.ok);
+  EXPECT_EQ(mm::update::kCheckImage, out.check);
+  EXPECT_STREQ("", info.product) << "nothing of the manifest is left either";
+  EXPECT_STREQ("", info.version);
+  EXPECT_STREQ("", info.board);
+  EXPECT_EQ(0u, info.fileCount);
+
+  // And a read that succeeds still fills it, over whatever was there.
+  info = readFixture("heltec_v4");
+  out = readWith(manifest, sig, keys, "heltec_v3", info);
+  ASSERT_TRUE(out.ok) << out.why;
+  EXPECT_STREQ("heltec_v3", info.board);
+  EXPECT_GT(info.fileCount, 0u);
+}
+
 // --------------------------------------------------------------------- the build with no key
 
 TEST(TrustTable, ABuildWithNoKeyRefusesAtCheckOneAndSaysSo) {

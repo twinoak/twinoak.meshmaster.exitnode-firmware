@@ -200,6 +200,15 @@ class AskTrial {
 // -- what outlives the restarts ----------------------------------------------------------------
 
 struct AskRecord {
+  AskRecord() = default;
+  // **Neither copied nor moved** (task p1.17-65), for the reason `UpdateRecord` is not: 2 700-odd
+  // bytes, most of them the journal, and `loadAsk` used to return one by value into the member
+  // that keeps it - the second half of what made 0.7.3 restart for ever.
+  AskRecord(const AskRecord&) = delete;
+  AskRecord& operator=(const AskRecord&) = delete;
+  AskRecord(AskRecord&&) = delete;
+  AskRecord& operator=(AskRecord&&) = delete;
+
   AskStep step = AskStep::None;
   long long id = 0;
   long long releaseId = 0;
@@ -220,11 +229,17 @@ struct AskRecord {
   bool present() const { return step != AskStep::None; }
   // An ask that has not ended: the steps are still being taken, and no job is claimed.
   bool inHand() const { return step != AskStep::None && step != AskStep::Ended; }
+
+  // Empty again, in place: every field as a fresh record has it, journal and all. This is what
+  // `= AskRecord()` used to be, without the record built beside the one being emptied.
+  void clear();
 };
 
-// The record as the store holds it. A step word that is not one of the six, or a `done` with no
-// outcome, reads as *no ask* - and then nothing else of it is believed.
-AskRecord loadAsk(RecordStore& store);
+// The record as the store holds it, read **into the record it is given** - the object that keeps
+// it, so that nothing of this size is ever on the stack. A step word that is not one of the six,
+// or a `done` with no outcome, reads as *no ask* - and then nothing else of it is believed: every
+// way out but the one that read a whole ask leaves `rec` empty, whatever it held before.
+void loadAsk(RecordStore& store, AskRecord& rec);
 
 // The record, whole. `rec.step == AskStep::None` forgets every one of the fourteen keys. The step
 // is written **last** on the way in and cleared **first** on the way out, so a power cut in the

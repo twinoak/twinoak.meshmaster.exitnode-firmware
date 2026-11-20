@@ -124,6 +124,19 @@ void Updater::begin(const Seams& seams, const char* runningVersion, const char* 
   board_ = board != nullptr ? board : "";
   bootReason_ = bootReason != nullptr ? bootReason : "";
   out_ = out;
+  // And a fresh machine for this boot. On a board `begin()` is called once, in `setup()`; it puts
+  // the per-boot state back here rather than in a fresh object because the record is 2 764 bytes
+  // and is no longer copyable or assignable (task p1.17-65), so `*this = Updater()` is gone.
+  record_.clear();
+  finding_ = BootFinding::Nothing;
+  begun_ = false;
+  onTrial_ = false;
+  pending_ = false;
+  trialStartMs_ = 0;
+  for (size_t i = 0; i < kConditions; i++) {
+    met_[i] = false;
+    metMs_[i] = 0;
+  }
 }
 
 void Updater::say(const char* fmt, ...) {
@@ -187,7 +200,7 @@ bool Updater::switchAndRestart(const char* why, bool postWhatWaits) {
   // what makes a power cut between any two of them leave a board that is still running the image
   // it was running, with a record that the next boot can finish.
   if (!seams_.slots->bootOther()) {
-    record_ = UpdateRecord();
+    record_.clear();
     saveUpdate(*seams_.store, record_);
     say("the framework refused the boot choice, so nothing was switched: %s", seams_.slots->why());
     return false;
@@ -200,7 +213,7 @@ bool Updater::switchAndRestart(const char* why, bool postWhatWaits) {
 
 BootFinding Updater::atBoot() {
   begun_ = true;
-  record_ = loadUpdate(*seams_.store);
+  loadUpdate(*seams_.store, record_);
 
   if (!seams_.slots->available()) {
     finding_ = BootFinding::NoSlots;
@@ -314,7 +327,7 @@ BootFinding Updater::atBoot() {
       break;  // the one switch a boot makes, and it is task p1.15-60's
   }
 
-  record_ = UpdateRecord();
+  record_.clear();
   record_.phase = Phase::Switching;
   snprintf(record_.from, sizeof(record_.from), "%s", version_);
   snprintf(record_.to, sizeof(record_.to), "%s", found.version);
@@ -449,7 +462,7 @@ void Updater::finish(Ended ended, const char* why) {
 }
 
 bool Updater::apply(char* why, size_t cap) {
-  if (!begun_) record_ = loadUpdate(*seams_.store);
+  if (!begun_) loadUpdate(*seams_.store, record_);
 
   if (onTrial_ || record_.inHand()) {
     snprintf(why, cap, "an update is already in hand (%s %s); nothing is switched on top of one",
@@ -479,7 +492,7 @@ bool Updater::apply(char* why, size_t cap) {
   }
 
   const int running = seams_.slots->runningSlot();
-  record_ = UpdateRecord();
+  record_.clear();
   record_.phase = Phase::Switching;
   snprintf(record_.from, sizeof(record_.from), "%s", version_);
   snprintf(record_.to, sizeof(record_.to), "%s", judged.version);
@@ -489,7 +502,7 @@ bool Updater::apply(char* why, size_t cap) {
   journal(kStepSwitching, "%s to %s, %lu bytes, in app%u", version_, judged.version,
           static_cast<unsigned long>(judged.size), static_cast<unsigned>(record_.slot));
   if (!save()) {
-    record_ = UpdateRecord();
+    record_.clear();
     saveUpdate(*seams_.store, record_);
     snprintf(why, cap, "the record of the update could not be written, so nothing is switched");
     return false;
@@ -502,7 +515,7 @@ bool Updater::apply(char* why, size_t cap) {
 }
 
 bool Updater::goBack(const char* elsewhere, char* why, size_t cap) {
-  if (!begun_) record_ = loadUpdate(*seams_.store);
+  if (!begun_) loadUpdate(*seams_.store, record_);
 
   // The console's own two first, because they are what somebody at the window has just started
   // and this machine knows neither: meshmaster.dk's ask in hand, and a fetch running.
@@ -547,7 +560,7 @@ bool Updater::goBack(const char* elsewhere, char* why, size_t cap) {
   }
 
   const int running = seams_.slots->runningSlot();
-  record_ = UpdateRecord();
+  record_.clear();
   record_.phase = Phase::Switching;
   snprintf(record_.from, sizeof(record_.from), "%s", version_);
   snprintf(record_.to, sizeof(record_.to), "%s", found.version);
@@ -558,7 +571,7 @@ bool Updater::goBack(const char* elsewhere, char* why, size_t cap) {
   record_.slot = running == 0 ? 1 : 0;
   journal(kStepSwitching, "back to %s, which lies in app%u", found.version, static_cast<unsigned>(record_.slot));
   if (!save()) {
-    record_ = UpdateRecord();
+    record_.clear();
     saveUpdate(*seams_.store, record_);
     snprintf(why, cap, "the record of the update could not be written, so nothing is switched");
     return false;

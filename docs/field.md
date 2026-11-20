@@ -385,6 +385,44 @@ with a USB cable.
   nor good for the amplifier. Leave `radio.tx` unset unless you know why you
   are changing it.
 
+### The `stack` line, and what a small number means
+
+Since task p1.17-65 the last line of the boot says how much of the loop task's
+stack has never been used, and `status` says it again at any time:
+
+```
+[+2s] I stack: loop task: 16384 bytes, the least ever free 11240
+```
+
+```
+stack     loop task: 16384 bytes, the least ever free 11240
+```
+
+That task is the one `setup()` and `loop()` run on, so it is the one
+**everything** runs on: the console's command, the mesh, the heartbeat, the TLS
+handshake, a release's signature, the fetch of a 1.4 MB image. *The least ever
+free* only falls, and it falls at the deepest moment the board has had so far —
+so the number to read is the one after the board has been online a while, and
+again after an `update fetch`, which is the deepest thing it does.
+
+- **A board that does not reach this line at all** is the shape 0.7.3 had: it
+  restarted for ever after `clock: no time yet`, with *Stack canary watchpoint
+  triggered (loopTask)* in between. Flash the **previous release's plain
+  `.bin`** over USB; it comes back with its key, its token and its WiFi, and
+  the release that did not start is one to withdraw.
+- **Under about 4 000 bytes free** after a fetch is a board with no margin
+  left: say so rather than updating other boards, because the next deep call is
+  the one that does not fit. Nothing on the board can make the stack bigger —
+  it is `CONFIG_ARDUINO_LOOP_STACK_SIZE` in the image — so the answer is a
+  release with a larger one or with less on that task.
+- **Over about 8 000 bytes free** is the figure 16 384 was chosen for: half the
+  task has never been needed.
+- **`nothing measured yet`** means no seam has answered, which cannot happen on
+  a board past `setup()`; on a board it would be a bug worth reporting.
+
+The numbers Thomas reads off a board go into `tasks/phase-1.17/FOLLOWUPS.md`:
+they are the only measurement of what that task really uses.
+
 ### The second application slot, and the one command that writes flash
 
 Since the release of task p1.15-57 the partition table has a second
@@ -661,6 +699,17 @@ told the firmware can be updated**. On a **V3** and on a **V4**, each
 provisioned and running the release before this one, then upgraded with this
 release's plain `.bin`:
 
+- [ ] **⚠ The board starts, and the boot reaches its `stack` line.** The boot
+      passes `clock:` and prints
+      `stack: loop task: 16384 bytes, the least ever free N`. This is the one
+      0.7.3 failed — it restarted for ever instead — so it comes before
+      everything else and before anybody else is told of the release. If the
+      board restarts for ever instead: **0.7.2's plain `.bin`** brings it back,
+      and what it printed is what to report.
+- [ ] **⚠ The least ever free, twice.** `status` after ten minutes online, and
+      again after an `update fetch`: both numbers into
+      `tasks/phase-1.17/FOLLOWUPS.md`. They are the only measurement of what
+      the loop task really uses, and nothing in a session can make them.
 - [ ] **⚠ The word is `one`, and the identity is the same.** `update` says
       `one`; `status` shows the same 64 hex characters it showed before the
       upgrade.

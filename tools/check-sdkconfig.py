@@ -76,6 +76,14 @@ ALLOWED: dict[str, tuple[str | None, str | None, str]] = {
     # (ABORTS) and this firmware takes ALLOWED. tasks/phase-1.15/57-a-second-slot.md asked for it.
     "SPI_FLASH_DANGEROUS_WRITE_ABORTS": ("y", None,
         "the guard that aborts a write landing in the bootloader, the partition table or the running app; the firmware adds a board's second application slot by writing the partition table's own sector, which it refuses"),
+    # Task p1.17-65. The one key that decides whether this firmware starts at all: the Arduino
+    # core's loop task, which is the task setup() and loop() run on and therefore the task the TLS
+    # handshake, a release's signature and a 1.4 MB fetch run on. 0.7.3 overran the core's 8 192 and
+    # restarted for ever. The core takes the number from its own Kconfig.projbuild
+    # (`config ARDUINO_LOOP_STACK_SIZE`, default 8192) and gives it to xTaskCreateUniversal through
+    # the weak getArduinoLoopTaskStackSize() of cores/esp32/main.cpp, in bytes on this port.
+    "ARDUINO_LOOP_STACK_SIZE": ("8192", "16384",
+        "the loop task is the task everything this firmware does runs on, nested - the console's command, the agent's call, the TLS handshake, a release's signature - and 8 192 bytes is what 0.7.3 did not start in; nobody has measured what 16 384 leaves, which is why the boot and `status` now print the least that was ever free (src/platform/LoopStack.h)"),
     "SPI_FLASH_DANGEROUS_WRITE_ALLOWED": (None, "y",
         "the other half of that one choice; what the guard used to do is done instead by three files of src/ and lib/ and no fourth - src/platform/TableFlash.cpp, which holds the address and the length of the partition table's own sector as constants of its own and refuses anything outside it, src/platform/OtaSlot.cpp, which holds the framework's OTA writer and is bounded by the application partition that is not running, and src/platform/BootChoice.cpp, which holds the boot choice and the two rollback marks (task p1.15-60) - and test/test_flash_writes fails the build when one of those calls is anywhere but the file named for it"),
 }
@@ -265,6 +273,9 @@ def self_test() -> int:
     planted = dict(ours)
     planted["MBEDTLS_SSL_OUT_CONTENT_LEN"] = "2048"  # allowed to differ, but not that way
     case("an allowed key with a value other than the listed one is refused", planted, False, "allowed to differ as")
+    planted = dict(ours)
+    planted["ARDUINO_LOOP_STACK_SIZE"] = "8192"  # the core's own, which is what 0.7.3 did not start in
+    case("the loop task's stack back at the core's 8192 is refused", planted, False, "ARDUINO_LOOP_STACK_SIZE")
     planted = dict(ours)
     planted[FORBIDDEN[0]] = "y"
     case("a forbidden key set is refused", planted, False, FORBIDDEN[0])

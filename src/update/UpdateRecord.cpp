@@ -262,10 +262,24 @@ bool readKey(RecordStore& store, const char* key, char* out, size_t cap) {
 
 }  // namespace
 
-UpdateRecord loadUpdate(RecordStore& store) {
-  UpdateRecord rec;
+void UpdateRecord::clear() {
+  phase = Phase::None;
+  from[0] = '\0';
+  to[0] = '\0';
+  sha256hex[0] = '\0';
+  at = 0;
+  slot = 0;
+  ended = Ended::None;
+  why[0] = '\0';
+  journal.clear();
+}
+
+void loadUpdate(RecordStore& store, UpdateRecord& rec) {
+  // The record that is given is emptied first and filled in place: nothing of this size is built
+  // on the stack, and a give-up below leaves it empty whatever it held when it came in.
+  rec.clear();
   char state[16] = {0};
-  if (!readKey(store, kUpdateKeyState, state, sizeof(state))) return rec;
+  if (!readKey(store, kUpdateKeyState, state, sizeof(state))) return;
   if (strcmp(state, kSwitching) == 0) {
     rec.phase = Phase::Switching;
   } else if (strcmp(state, kTrial) == 0) {
@@ -273,7 +287,8 @@ UpdateRecord loadUpdate(RecordStore& store) {
   } else if (strcmp(state, kDone) == 0) {
     rec.phase = Phase::Ended;
   } else {
-    return UpdateRecord();  // not a state this firmware wrote
+    rec.clear();  // not a state this firmware wrote
+    return;
   }
 
   readKey(store, kUpdateKeyFrom, rec.from, sizeof(rec.from));
@@ -296,9 +311,11 @@ UpdateRecord loadUpdate(RecordStore& store) {
   // A `done` with no ending is not an ending, and neither phase nor ending alone is a record:
   // the one state a power cut can leave half written is not believed (the same rule as task
   // 59's record).
-  if (rec.phase == Phase::Ended && rec.ended == Ended::None) return UpdateRecord();
-  if (rec.inHand() && rec.to[0] == '\0') return UpdateRecord();
-  return rec;
+  if (rec.phase == Phase::Ended && rec.ended == Ended::None) {
+    rec.clear();
+    return;
+  }
+  if (rec.inHand() && rec.to[0] == '\0') rec.clear();
 }
 
 bool saveUpdate(RecordStore& store, const UpdateRecord& rec) {

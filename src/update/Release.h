@@ -102,6 +102,10 @@ struct ReleaseInfo {
 // Checks 1, 2 and 3. `manifest` is the bytes of manifest.json exactly as they were signed and
 // `signatureLine` the one line of manifest.json.sig; `board` is what this board calls itself
 // (mm::boardName()). On ok, `out` holds the image for that board.
+//
+// **`out` is emptied first and filled in place**, so a refusal leaves nothing of a release half
+// read in it whatever it held before (task p1.17-65). It is 872 bytes: a second one of them on the
+// stack beside it was most of a frame this reader is not allowed (tools/check-frames.py).
 Outcome readRelease(const uint8_t* manifest, size_t manifestLen, const char* signatureLine,
                     const TrustedKey* keys, size_t keyCount, const char* board, ReleaseInfo& out);
 

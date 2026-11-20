@@ -58,6 +58,7 @@
 #include "net/MqttClient.h"
 #include "net/WifiLink.h"
 #include "observer/Observer.h"
+#include "platform/LoopStack.h"
 #include "platform/BootChoice.h"
 #include "platform/Esp32Platform.h"
 #include "platform/OtaSlot.h"
@@ -76,6 +77,12 @@
 #include "ui/DisplayLines.h"
 #include "ui/Oled.h"
 #include "version.h"
+
+// The Arduino core's handle for the task `setup()` and `loop()` run on. It is a global of
+// cores/esp32/main.cpp and no header of the core declares it, so it is declared here - at file
+// scope, outside the anonymous namespace below, because that is where the core defines it.
+// `readLoopStack` is its one reader (task p1.17-65).
+extern TaskHandle_t loopTaskHandle;
 
 // ---- the objects ----------------------------------------------------------------------------
 // board, radio_driver, rtc_clock, display and user_btn come from MeshCore's variants/heltec_v3
@@ -415,6 +422,21 @@ void formatUptime(char* out, size_t cap) {
                 static_cast<unsigned long>(s % 60));
 }
 
+// The loop task's stack, as the configuration and FreeRTOS know it (src/platform/LoopStack.h).
+// The size is the number the Arduino core gives `xTaskCreateUniversal` for
+// `loopTask` - CONFIG_ARDUINO_LOOP_STACK_SIZE, 16 384 since task p1.17-65 - and the high-water
+// mark is the least that was ever free, in bytes on this port, as the observer's tasks' is
+// (src/net/MqttClient.cpp). `loopTaskHandle` is the core's own handle for that task
+// (cores/esp32/main.cpp), so the answer is the loop task's wherever this is called from.
+mm::platform::LoopStack readLoopStack() {
+  mm::platform::LoopStack s;
+  s.sizeBytes = static_cast<uint32_t>(getArduinoLoopTaskStackSize());
+  if (loopTaskHandle != nullptr) {
+    s.leastEverFree = static_cast<uint32_t>(uxTaskGetStackHighWaterMark(loopTaskHandle));
+  }
+  return s;
+}
+
 void printStatus(Stream& out) {
   // Before anything else, and for as long as it is true: this board's table sector holds no table,
   // so a restart now is a board that needs a cable (task p1.16-63, deliverable 4).
@@ -536,6 +558,14 @@ void printMqttStatus(Stream& out) {
                static_cast<unsigned long>(mm::tlsheap::psramFallbacks()));
   } else {
     out.println("tls       buffers in internal heap (this board has no psram)");
+  }
+  // The loop task first: everything `setup()` and `loop()` do runs on it, the TLS handshake and a
+  // release's signature among them, and a board that restarts for ever is what too little of it
+  // looks like (task p1.17-65). The same line the boot log printed, from the same function.
+  {
+    char stack[96];
+    mm::platform::loopStackLine(stack, sizeof stack);
+    out.printf("stack     %s\r\n", stack);
   }
   const mm::MqttClient* const clients[mm::observer::kSlots] = {&mqttSlot1, &mqttSlot2};
   for (int s = 0; s < observer.slotsOnBoard(); s++) {
@@ -1050,6 +1080,10 @@ void setup() {
   Serial.begin(115200);
   board.begin();
 
+  // Where `status` and the line at the end of this function get the loop task's two numbers from
+  // (src/platform/LoopStack.h). Before anything that could print either.
+  mm::platform::readLoopStackWith(&readLoopStack);
+
   mm::logBeginSerial(&clockForLog);
   if (!settings.begin()) {
     Serial.println("error: NVS could not be opened; settings will not persist");
@@ -1206,6 +1240,15 @@ void setup() {
   // p1.15-61). **After** the fetcher, because an ask at `fetching` begins its fetch again here,
   // and after the updater's own `atBoot`, whose answer is what an ask at `switching` reads.
   asked.atBoot();
+
+  // What `setup()` left of the loop task's stack, which is the task everything above ran on and
+  // everything in `loop()` will run on (task p1.17-65). `status` prints the same line later, from
+  // the same function; this one is the figure at the moment the board is up.
+  {
+    char stack[96];
+    mm::platform::loopStackLine(stack, sizeof stack);
+    LOG_I("stack: %s", stack);
+  }
   board.onBootComplete();
 }
 
