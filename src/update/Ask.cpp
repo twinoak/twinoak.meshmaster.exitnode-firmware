@@ -131,10 +131,29 @@ bool sameVersion(const char* a, const char* b) {
 
 // -- the record --------------------------------------------------------------------------------
 
-AskRecord loadAsk(RecordStore& store) {
-  AskRecord rec;
+void AskRecord::clear() {
+  step = AskStep::None;
+  id = 0;
+  releaseId = 0;
+  version[0] = '\0';
+  base[0] = '\0';
+  sha256hex[0] = '\0';
+  size = 0;
+  from[0] = '\0';
+  to[0] = '\0';
+  outcome = AskOutcome::None;
+  refusal = AskRefusal::None;
+  check = 0;
+  posted = AskPosted::None;
+  journal.clear();
+}
+
+void loadAsk(RecordStore& store, AskRecord& rec) {
+  // The record that is given is emptied first and filled in place: nothing of this size is built
+  // on the stack, and a give-up below leaves it empty whatever it held when it came in.
+  rec.clear();
   char step[16] = {0};
-  if (!readKey(store, kAskKeyStep, step, sizeof(step))) return rec;
+  if (!readKey(store, kAskKeyStep, step, sizeof(step))) return;
   if (strcmp(step, kStepCheck) == 0) {
     rec.step = AskStep::Check;
   } else if (strcmp(step, kStepAddingSlot) == 0) {
@@ -148,7 +167,8 @@ AskRecord loadAsk(RecordStore& store) {
   } else if (strcmp(step, kDone) == 0) {
     rec.step = AskStep::Ended;
   } else {
-    return AskRecord();  // not a step word this firmware wrote
+    rec.clear();  // not a step word this firmware wrote
+    return;
   }
 
   char number[24] = {0};
@@ -190,11 +210,13 @@ AskRecord loadAsk(RecordStore& store) {
 
   // The half-written shapes a power cut can leave, none of which is an ask: an ask with no id or
   // no version to fetch, a `done` with no outcome, and an ended one with no result to account for.
-  if (rec.id == 0 || rec.version[0] == '\0') return AskRecord();
-  if (rec.step == AskStep::Ended && (rec.outcome == AskOutcome::None || rec.posted == AskPosted::None)) {
-    return AskRecord();
+  if (rec.id == 0 || rec.version[0] == '\0') {
+    rec.clear();
+    return;
   }
-  return rec;
+  if (rec.step == AskStep::Ended && (rec.outcome == AskOutcome::None || rec.posted == AskPosted::None)) {
+    rec.clear();
+  }
 }
 
 bool saveAsk(RecordStore& store, const AskRecord& rec) {
@@ -264,6 +286,15 @@ void Asked::begin(const Seams& seams, const char* runningVersion, bool canBeUpda
   version_ = runningVersion != nullptr ? runningVersion : "";
   canBeUpdated_ = canBeUpdated;
   out_ = out;
+  // And a fresh machine for this boot, for the reason `Updater::begin` has one: the record is no
+  // longer copyable or assignable, so `*this = Asked()` is gone (task p1.17-65). `waiting_` is
+  // not touched: nothing reads it unless `pending_` says an ask is waiting for `step()`.
+  record_.clear();
+  begun_ = false;
+  pending_ = false;
+  provedByHeartbeat_ = false;
+  step_[0] = '\0';
+  body_[0] = '\0';
 }
 
 void Asked::say(const char* fmt, ...) {
@@ -323,7 +354,7 @@ void Asked::newestStep(char* out, size_t cap) const {
 
 void Asked::atBoot() {
   begun_ = true;
-  record_ = loadAsk(*seams_.store);
+  loadAsk(*seams_.store, record_);
   if (!record_.present()) return;
   if (record_.step == AskStep::Ended) {
     say("update %lld ended %s; its result %s", record_.id, askOutcomeWord(record_.outcome),
@@ -408,7 +439,7 @@ void Asked::take(const UpdateAsk& ask) {
     return;
   }
 
-  record_ = AskRecord();
+  record_.clear();
   record_.id = ask.id;
   record_.releaseId = ask.releaseId;
   snprintf(record_.version, sizeof(record_.version), "%s", ask.version);

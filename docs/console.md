@@ -19,7 +19,7 @@ test, so it is the session the console accepts, line for line.
 | `set <key> <value>` | store a setting in NVS; it takes effect at once (see below). The value is the rest of the line, trimmed; a WiFi name with spaces is fine |
 | `get <key>` | print one setting. `wifi.pass` and `meshmaster.token` print `set` or `unset` and never the value |
 | `get` | print every setting, one per line, in the order of the table below; an unset key shows its fallback in brackets |
-| `status` | a first line in `!!` while this board's partition-table sector holds no table and the firmware is putting the old one back (`update slot`, below) — and nothing at all there otherwise — then firmware, board and reset reason, the public key, the radio and its frame counters, WiFi, time and where it came from, the server's last answer, the heartbeat, the flood scope and what each shape has earned (task p1.8-32, below), the observer (its two slots and their states, or why it is off, how many packet messages it has made and how many slots are connected), the heap, and the uplink's kept connection with what the last call cost (task p1.8-30, below) |
+| `status` | a first line in `!!` while this board's partition-table sector holds no table and the firmware is putting the old one back (`update slot`, below) — and nothing at all there otherwise — then firmware, board and reset reason, the public key, the radio and its frame counters, WiFi, time and where it came from, the server's last answer, the heartbeat, the flood scope and what each shape has earned (task p1.8-32, below), the observer (its two slots and their states, or why it is off, how many packet messages it has made and how many slots are connected), the heap, the uplink's kept connection with what the last call cost (task p1.8-30, below), and the `stack` lines: the loop task's and the observer's (below) |
 | `mesh` | the adverts heard: how many, how many are waiting to be posted and how many the ring dropped, and the last five with their names, roles, hops, SNR and RSSI |
 | `server` | the exit node's loop: the last heartbeat and the next, the last observation batch, the batch that went out and is still waiting for an answer (`batchid`, when there is one), the job counters, and the four error counters the heartbeat itself carries |
 | `jobs` | the airtime budget in force and what it has spent, how many claims were made, the thirteen job types this firmware advertises, and the last ten jobs with their outcome, their transaction count and when they ended |
@@ -124,6 +124,7 @@ clock and the server call is one line, so a bench walk is reading:
 [+2s] I identity: 7f3a...
 [+2s] I clock: no time yet
 [+2s] I wifi: connecting to Twinoak (attempt 1)
+[+2s] I stack: loop task: 16384 bytes, the least ever free 11240
 [+5s] I wifi: connected, 192.168.1.20, rssi -61 dBm
 [+5s] I clock: sntp started against pool.ntp.org
 [+7s] I server: GET https://meshmaster.dk/agent/v1/config (root: ISRG Root X1)
@@ -144,6 +145,38 @@ see the `uplink` line below), `the root changed`, `the last call failed`,
 kept connection that turns out dead when a request goes over it is
 `uplink: the kept connection was dead under the request; reopened inside the
 call`, and the call is answered on the new connection: nothing the loop sees.
+
+### The `stack` lines, at boot and in `status`
+
+```
+[+2s] I stack: loop task: 16384 bytes, the least ever free 11240
+```
+
+```
+stack     loop task: 16384 bytes, the least ever free 11240
+stack     slot 1 task: 8192 bytes, the least ever free 4712
+stack     slot 2 task: 8192 bytes; nothing measured yet
+```
+
+The **loop task** is the task `setup()` and `loop()` run on, and that means
+everything this firmware does: the console's command, the mesh, the agent's
+call, the TLS handshake, a release's signature, the fetch of a 1.4 MB image. It
+has 16 384 bytes since task p1.17-65 (`CONFIG_ARDUINO_LOOP_STACK_SIZE`), and
+*the least ever free* is how much of them FreeRTOS has never seen touched since
+the board started — so it only ever falls. The line is printed once when
+`setup()` ends, with the same words `status` prints later, and the boot's figure
+is the one at the moment the board came up.
+
+**Why it is there at all.** 0.7.3 did not start: one function put 2 864 bytes on
+that stack inside another that put 5 696 there, on 8 192, and the board
+restarted for ever with *Stack canary watchpoint triggered (loopTask)*. The
+figure is the warning that was missing, and
+[`docs/field.md` §9](field.md#9-updating-a-board-that-is-already-in-the-field)
+says what to do when it is small.
+
+The **slot** lines are the observer's two MQTT tasks, which have 8 192 bytes
+each and are measured when an event arrives on one; *nothing measured yet* is a
+slot that has had none.
 
 ### The `uplink` line of `status`
 

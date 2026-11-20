@@ -24,6 +24,7 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include <agent/TextOut.h>
@@ -210,7 +211,7 @@ class ScriptedTrial final : public mm::update::AskTrial {
       std::snprintf(why, cap, "%s", refuse.c_str());
       return false;
     }
-    rec = UpdateRecord();
+    rec.clear();
     rec.phase = Phase::Switching;
     std::snprintf(rec.from, sizeof(rec.from), "%s", from.c_str());
     std::snprintf(rec.to, sizeof(rec.to), "%s", to.c_str());
@@ -226,7 +227,7 @@ class ScriptedTrial final : public mm::update::AskTrial {
   const UpdateRecord& record() const override { return rec; }
 
   // A boot reads the record back, which is the first thing task 60's own `atBoot` does.
-  void load() { rec = mm::update::loadUpdate(*store); }
+  void load() { mm::update::loadUpdate(*store, rec); }
 
   // What task 60's `atBoot` does for the image that was switched to.
   void beginTrial() {
@@ -363,7 +364,8 @@ struct Board {
   }
 
   Asked& begin() {
-    asked = Asked();
+    // No fresh `Asked`: it holds a record of 2 700-odd bytes that can be neither copied nor moved
+    // (task p1.17-65), and `begin()` is what puts the per-boot state back.
     Asked::Seams seams;
     seams.table = &table;
     seams.fetch = &fetch;
@@ -394,12 +396,19 @@ struct Board {
     for (int i = 0; i < times; i++) asked.step();
   }
 
-  AskRecord record() { return mm::update::loadAsk(store); }
+  // The record as the store holds it. It is read **into this board's own**, because a record
+  // cannot be returned by value any more (task p1.17-65): the caller gets a reference to that one,
+  // which the next call here reads over.
+  AskRecord read;
+  const AskRecord& record() {
+    mm::update::loadAsk(store, read);
+    return read;
+  }
 
   // The journal's steps, oldest first.
   std::vector<std::string> steps() {
     std::vector<std::string> out;
-    const AskRecord rec = record();
+    const AskRecord& rec = record();
     JournalEntry e;
     for (size_t i = 0; rec.journal.entry(i, e); i++) out.push_back(e.step);
     return out;
@@ -424,6 +433,20 @@ struct Board {
     return true;
   }
 };
+
+// One load into a record of these functions' own: a record cannot be returned by value any more
+// (task p1.17-65), so the tests that want one field of one ask it here.
+bool askPresentIn(MapStore& store) {
+  AskRecord rec;
+  mm::update::loadAsk(store, rec);
+  return rec.present();
+}
+
+Phase updatePhaseIn(MapStore& store) {
+  UpdateRecord rec;
+  mm::update::loadUpdate(store, rec);
+  return rec.phase;
+}
 
 std::string contractFixture(const char* name) {
   std::ifstream in(std::string(FIXTURES_DIR) + "/" + name, std::ios::binary);
@@ -483,7 +506,7 @@ TEST(TheWholeWay, WithTheTableTwoAJudgedReleaseAndATrialThatPassesTheResultIsCom
   EXPECT_FALSE(b.asked.inHand());
   EXPECT_FALSE(b.asked.holdsJobs()) << "the claim is free again the moment the ask has ended";
 
-  const AskRecord rec = b.record();
+  const AskRecord& rec = b.record();
   EXPECT_EQ(AskStep::Ended, rec.step);
   EXPECT_EQ(AskOutcome::Committed, rec.outcome);
   EXPECT_EQ(AskRefusal::None, rec.refusal);
@@ -584,7 +607,7 @@ TEST(TheWholeWay, ATableThatIsNotTwoAfterTheRestartEndsTheAskStuck) {
   EXPECT_EQ(AskStep::AddingSlot, b.record().step);
 
   b.boot(kOld);
-  const AskRecord rec = b.record();
+  const AskRecord& rec = b.record();
   EXPECT_EQ(AskStep::Ended, rec.step);
   EXPECT_EQ(AskOutcome::Stuck, rec.outcome);
   EXPECT_EQ(AskRefusal::None, rec.refusal);
@@ -624,7 +647,7 @@ TEST(ASlotThatWasNotAdded, TheTableTheBoardHadIsSaidSoInTheJournalAndNothingRest
   b.hearTheAsk(17);
   b.asked.step();
 
-  const AskRecord rec = b.record();
+  const AskRecord& rec = b.record();
   EXPECT_EQ(AskStep::Ended, rec.step);
   EXPECT_EQ(AskOutcome::Stuck, rec.outcome);
   EXPECT_EQ(AskRefusal::None, rec.refusal);
@@ -657,7 +680,7 @@ TEST(ASlotThatWasNotAdded, ASectorThatHoldsNoTableIsSaidSoInTheJournalAndNothing
   b.hearTheAsk(17);
   b.asked.step();
 
-  const AskRecord rec = b.record();
+  const AskRecord& rec = b.record();
   EXPECT_EQ(AskStep::Ended, rec.step);
   EXPECT_EQ(AskOutcome::Stuck, rec.outcome);
   EXPECT_EQ(0, b.restart.restarts) << "a restart is exactly what this board would not survive";
@@ -681,7 +704,7 @@ TEST(TheRefusals, AnUpdateAlreadyInHandIsInProgressAndNothingIsFetched) {
   b.hearTheAsk(17);
   b.asked.step();
 
-  const AskRecord rec = b.record();
+  const AskRecord& rec = b.record();
   EXPECT_EQ(AskOutcome::Refused, rec.outcome);
   EXPECT_EQ(AskRefusal::InProgress, rec.refusal);
   EXPECT_EQ(0, b.fetch.starts);
@@ -722,7 +745,7 @@ TEST(TheRefusals, ATableThisFirmwareWillNotWriteIsTableAndNothingIsFetched) {
   b.boot(kOld);
   b.hearTheAsk(17);
   b.asked.step();
-  const AskRecord rec = b.record();
+  const AskRecord& rec = b.record();
   EXPECT_EQ(AskOutcome::Refused, rec.outcome);
   EXPECT_EQ(AskRefusal::Table, rec.refusal);
   EXPECT_EQ(0, b.fetch.starts);
@@ -740,7 +763,7 @@ TEST(TheRefusals, TheVersionThatIsRunningIsCurrentAndNothingIsFetched) {
   b.boot(kNew);
   b.hearTheAsk(17, kNew);
   b.asked.step();
-  const AskRecord rec = b.record();
+  const AskRecord& rec = b.record();
   EXPECT_EQ(AskOutcome::Refused, rec.outcome);
   EXPECT_EQ(AskRefusal::Current, rec.refusal);
   EXPECT_EQ(0, b.fetch.starts);
@@ -774,7 +797,7 @@ TEST(TheRefusals, AReleaseThatCannotBeFetchedIsFetchAndNothingIsSwitched) {
   b.asked.step();
   b.fetch.endWith(Ending::Fetch, 0, "there is no such resource");
   b.asked.step();
-  const AskRecord rec = b.record();
+  const AskRecord& rec = b.record();
   EXPECT_EQ(AskOutcome::Refused, rec.outcome);
   EXPECT_EQ(AskRefusal::Fetch, rec.refusal);
   EXPECT_EQ(0, rec.check);
@@ -796,7 +819,7 @@ TEST(TheRefusals, ACheckThatFailedIsCheckWithItsNumberAndNothingIsSwitched) {
     std::snprintf(why, sizeof(why), "the image is not this product for this board");
     b.fetch.endWith(Ending::Check, number, why);
     b.asked.step();
-    const AskRecord rec = b.record();
+    const AskRecord& rec = b.record();
     EXPECT_EQ(AskOutcome::Refused, rec.outcome);
     EXPECT_EQ(AskRefusal::Check, rec.refusal);
     EXPECT_EQ(number, rec.check);
@@ -882,7 +905,7 @@ TEST(TheRefusals, ASwitchThatWasRefusedIsStuck) {
   b.asked.step();
   EXPECT_EQ(1, b.trial.applies);
   EXPECT_EQ(0, b.restart.restarts);
-  const AskRecord rec = b.record();
+  const AskRecord& rec = b.record();
   EXPECT_EQ(AskOutcome::Stuck, rec.outcome);
   std::string body;
   ASSERT_TRUE(b.postTheResult(true, false, &body));
@@ -907,14 +930,14 @@ TEST(ATrialThatFails, IsOneResultRolledBackPostedByTheOldImageWithTheOldVersion)
   b.clock.advance(600);
   b.trial.rollBack("no heartbeat answered in 10 min");
   // The record is **not** finished by the image on trial: the boot after it finishes it.
-  EXPECT_EQ(Phase::OnTrial, mm::update::loadUpdate(b.store).phase);
+  EXPECT_EQ(Phase::OnTrial, updatePhaseIn(b.store));
   b.asked.step();
   EXPECT_EQ(AskStep::Proving, b.record().step) << "the ask waits for the boot that finishes the record";
 
   // ... the bootloader puts the old image back, and its boot ends both records.
   b.clock.advance(20);
   b.bootBack(kOld);
-  const AskRecord rec = b.record();
+  const AskRecord& rec = b.record();
   EXPECT_EQ(AskStep::Ended, rec.step);
   EXPECT_EQ(AskOutcome::RolledBack, rec.outcome);
   EXPECT_EQ(AskRefusal::None, rec.refusal);
@@ -957,7 +980,7 @@ TEST(ATrialThatFails, AndCouldNotBeSentBackIsOneResultStuckWithTheVersionThatRun
   // The restart came back as the same image, and nothing could send the board back.
   b.clock.advance(20);
   b.bootStuck(kNew, "no server: no heartbeat was answered, and the board could not be sent back");
-  const AskRecord rec = b.record();
+  const AskRecord& rec = b.record();
   EXPECT_EQ(AskStep::Ended, rec.step);
   EXPECT_EQ(AskOutcome::Stuck, rec.outcome);
   EXPECT_EQ(AskRefusal::None, rec.refusal);
@@ -1354,7 +1377,188 @@ TEST(TheRecord, TheStepIsWrittenLastOnTheWayInAndClearedFirstOnTheWayOut) {
                           mm::update::kAskKeyPosted, mm::update::kAskKeyJournal}) {
     EXPECT_FALSE(b.store.has(key)) << key;
   }
-  EXPECT_FALSE(mm::update::loadAsk(b.store).present());
+  EXPECT_FALSE(askPresentIn(b.store));
+}
+
+// **The compiler is the first thing that refuses what made 0.7.3 restart for ever** (task
+// p1.17-65). An `AskRecord` is 2 700-odd bytes, most of them its journal, and `loadAsk` used to
+// build one and return it into the member that keeps it - the second of the two loads a boot
+// makes, on a loop task that had 8 192 bytes for both.
+static_assert(!std::is_copy_constructible<AskRecord>::value, "an AskRecord may not be copied");
+static_assert(!std::is_copy_assignable<AskRecord>::value, "an AskRecord may not be assigned");
+static_assert(!std::is_move_constructible<AskRecord>::value, "an AskRecord may not be moved");
+static_assert(!std::is_move_assignable<AskRecord>::value, "an AskRecord may not be move-assigned");
+
+namespace {
+
+// A record with a full journal in it: what is given to a load that must come back empty.
+void fillWithAWholeJournal(AskRecord& rec) {
+  rec.step = AskStep::Proving;
+  rec.id = 99;
+  rec.releaseId = 98;
+  std::snprintf(rec.version, sizeof(rec.version), "0.9.9+ffffff1");
+  std::snprintf(rec.base, sizeof(rec.base), "/agent/v1/firmware/98");
+  std::snprintf(rec.sha256hex, sizeof(rec.sha256hex), "%s", std::string(64, 'b').c_str());
+  rec.size = 1446640;
+  std::snprintf(rec.from, sizeof(rec.from), "0.9.8");
+  std::snprintf(rec.to, sizeof(rec.to), "0.9.9+ffffff1");
+  rec.outcome = AskOutcome::Committed;
+  rec.refusal = AskRefusal::Check;
+  rec.check = 4;
+  rec.posted = AskPosted::Taken;
+  for (int i = 0; i < 40; i++) {
+    char note[64];
+    std::snprintf(note, sizeof(note), "entry %d %s", i, std::string(30, 'x').c_str());
+    rec.journal.add(1795165200u + static_cast<uint32_t>(i), "proving", note);
+  }
+}
+
+// Nothing of a record is left: the fields and the journal both.
+void expectEmpty(const AskRecord& rec) {
+  EXPECT_EQ(AskStep::None, rec.step);
+  EXPECT_FALSE(rec.present());
+  EXPECT_FALSE(rec.inHand());
+  EXPECT_EQ(0, rec.id);
+  EXPECT_EQ(0, rec.releaseId);
+  EXPECT_STREQ("", rec.version);
+  EXPECT_STREQ("", rec.base);
+  EXPECT_STREQ("", rec.sha256hex);
+  EXPECT_EQ(0u, rec.size);
+  EXPECT_STREQ("", rec.from);
+  EXPECT_STREQ("", rec.to);
+  EXPECT_EQ(AskOutcome::None, rec.outcome);
+  EXPECT_EQ(AskRefusal::None, rec.refusal);
+  EXPECT_EQ(0u, rec.check);
+  EXPECT_EQ(AskPosted::None, rec.posted);
+  EXPECT_EQ(0u, rec.journal.count());
+  EXPECT_TRUE(rec.journal.empty());
+  EXPECT_STREQ("", rec.journal.text());
+}
+
+}  // namespace
+
+// **Every way out of a load leaves the record it was given empty** (task p1.17-65, deliverable 3):
+// the three `loadAsk` gives up by, and the empty store before them. The record it is handed is the
+// one a board has been carrying since its boot, with a whole journal in it.
+TEST(TheRecord, EveryWayOutOfALoadLeavesTheRecordEmpty) {
+  // 1. An empty store: no ask was ever made.
+  {
+    MapStore store;
+    AskRecord rec;
+    fillWithAWholeJournal(rec);
+    ASSERT_EQ(40u, rec.journal.count());
+    mm::update::loadAsk(store, rec);
+    expectEmpty(rec);
+  }
+  // 2. A step word this firmware never wrote, with every other key there to be read.
+  {
+    MapStore store;
+    AskRecord whole;
+    fillWithAWholeJournal(whole);
+    ASSERT_TRUE(mm::update::saveAsk(store, whole));
+    store.values[mm::update::kAskKeyStep] = "halfway";
+    AskRecord rec;
+    fillWithAWholeJournal(rec);
+    mm::update::loadAsk(store, rec);
+    expectEmpty(rec);
+  }
+  // 3. An ask with no id, and one with no version to fetch.
+  for (const char* gone : {mm::update::kAskKeyId, mm::update::kAskKeyVersion}) {
+    MapStore store;
+    AskRecord whole;
+    fillWithAWholeJournal(whole);
+    ASSERT_TRUE(mm::update::saveAsk(store, whole));
+    store.values.erase(gone);
+    AskRecord rec;
+    fillWithAWholeJournal(rec);
+    mm::update::loadAsk(store, rec);
+    expectEmpty(rec);
+  }
+  // 4. A `done` with no outcome, and one with no account of its result.
+  for (const char* gone : {mm::update::kAskKeyOutcome, mm::update::kAskKeyPosted}) {
+    MapStore store;
+    AskRecord whole;
+    fillWithAWholeJournal(whole);
+    whole.step = AskStep::Ended;
+    ASSERT_TRUE(mm::update::saveAsk(store, whole));
+    store.values.erase(gone);
+    AskRecord rec;
+    fillWithAWholeJournal(rec);
+    mm::update::loadAsk(store, rec);
+    expectEmpty(rec);
+  }
+}
+
+// And a load that succeeds leaves nothing of what the record held before it.
+TEST(TheRecord, ALoadThatSucceedsOverwritesWhatTheRecordHeld) {
+  MapStore store;
+  AskRecord saved;
+  saved.step = AskStep::Check;
+  saved.id = 17;
+  std::snprintf(saved.version, sizeof(saved.version), "%s", kNew);
+  saved.journal.add(7, "check", "one entry");
+  ASSERT_TRUE(mm::update::saveAsk(store, saved));
+
+  AskRecord rec;
+  fillWithAWholeJournal(rec);
+  mm::update::loadAsk(store, rec);
+  EXPECT_EQ(AskStep::Check, rec.step);
+  EXPECT_EQ(17, rec.id);
+  EXPECT_STREQ(kNew, rec.version);
+  EXPECT_EQ(0, rec.releaseId) << "the release id it held before is gone";
+  EXPECT_STREQ("", rec.base);
+  EXPECT_STREQ("", rec.sha256hex);
+  EXPECT_EQ(0u, rec.size);
+  EXPECT_STREQ("", rec.from);
+  EXPECT_STREQ("", rec.to);
+  EXPECT_EQ(AskOutcome::None, rec.outcome);
+  EXPECT_EQ(AskRefusal::None, rec.refusal);
+  EXPECT_EQ(0u, rec.check);
+  EXPECT_EQ(AskPosted::None, rec.posted);
+  EXPECT_EQ(1u, rec.journal.count()) << "the forty entries it held before are gone";
+  EXPECT_STREQ("7|check|one entry", rec.journal.text());
+}
+
+// **The store holds the bytes it held before this task.** The fourteen keys and their values,
+// written out, for an ask a board could really have: nothing about what is stored moved, so a
+// board updated from 0.7.2 reads its own record back (task p1.17-65, deliverable 3).
+TEST(TheRecord, TheFourteenKeysHoldTheBytesTheyHeldBefore) {
+  MapStore store;
+  AskRecord rec;
+  rec.step = AskStep::Ended;
+  rec.id = 17;
+  rec.releaseId = 9;
+  std::snprintf(rec.version, sizeof(rec.version), "0.7.3+b6d4cfb");
+  std::snprintf(rec.base, sizeof(rec.base), "/agent/v1/firmware/9");
+  std::snprintf(rec.sha256hex, sizeof(rec.sha256hex), "%s", std::string(64, 'a').c_str());
+  rec.size = 1432000;
+  std::snprintf(rec.from, sizeof(rec.from), "0.7.2");
+  std::snprintf(rec.to, sizeof(rec.to), "0.7.2");
+  rec.outcome = AskOutcome::RolledBack;
+  rec.refusal = AskRefusal::Check;
+  rec.check = 4;
+  rec.posted = AskPosted::Waiting;
+  rec.journal.add(1795165200u, "check", "table two, 0.7.2 running");
+  rec.journal.add(1795165240u, "fetching", "0.7.3+b6d4cfb, 1432000 bytes");
+  ASSERT_TRUE(mm::update::saveAsk(store, rec));
+
+  EXPECT_EQ("done", store.value(mm::update::kAskKeyStep));
+  EXPECT_EQ("17", store.value(mm::update::kAskKeyId));
+  EXPECT_EQ("9", store.value(mm::update::kAskKeyRelease));
+  EXPECT_EQ("0.7.3+b6d4cfb", store.value(mm::update::kAskKeyVersion));
+  EXPECT_EQ("/agent/v1/firmware/9", store.value(mm::update::kAskKeyBase));
+  EXPECT_EQ(std::string(64, 'a'), store.value(mm::update::kAskKeySha));
+  EXPECT_EQ("1432000", store.value(mm::update::kAskKeyLength));
+  EXPECT_EQ("0.7.2", store.value(mm::update::kAskKeyFrom));
+  EXPECT_EQ("0.7.2", store.value(mm::update::kAskKeyTo));
+  EXPECT_EQ("rolledBack", store.value(mm::update::kAskKeyOutcome));
+  EXPECT_EQ("check", store.value(mm::update::kAskKeyRefusal));
+  EXPECT_EQ("4", store.value(mm::update::kAskKeyCheck));
+  EXPECT_EQ("waiting", store.value(mm::update::kAskKeyPosted));
+  EXPECT_EQ("1795165200|check|table two, 0.7.2 running"
+            "\n1795165240|fetching|0.7.3+b6d4cfb, 1432000 bytes",
+            store.value(mm::update::kAskKeyJournal));
+  EXPECT_EQ(14u, store.values.size()) << "fourteen keys and no fifteenth";
 }
 
 TEST(TheRecord, AHalfWrittenOneIsNotAnAsk) {
@@ -1364,28 +1568,28 @@ TEST(TheRecord, AHalfWrittenOneIsNotAnAsk) {
   b.hearTheAsk(17);
   b.asked.step();
   const std::map<std::string, std::string> whole = b.store.values;
-  ASSERT_TRUE(mm::update::loadAsk(b.store).present());
+  ASSERT_TRUE(askPresentIn(b.store));
 
   // A step word this firmware never wrote.
   b.store.values = whole;
   b.store.values[mm::update::kAskKeyStep] = "halfway";
-  EXPECT_FALSE(mm::update::loadAsk(b.store).present());
+  EXPECT_FALSE(askPresentIn(b.store));
 
   // An ask with no id, and one with no version to fetch.
   b.store.values = whole;
   b.store.values.erase(mm::update::kAskKeyId);
-  EXPECT_FALSE(mm::update::loadAsk(b.store).present());
+  EXPECT_FALSE(askPresentIn(b.store));
   b.store.values = whole;
   b.store.values.erase(mm::update::kAskKeyVersion);
-  EXPECT_FALSE(mm::update::loadAsk(b.store).present());
+  EXPECT_FALSE(askPresentIn(b.store));
 
   // A `done` with no outcome, and one with no account of its result.
   b.store.values = whole;
   b.store.values.erase(mm::update::kAskKeyOutcome);
-  EXPECT_FALSE(mm::update::loadAsk(b.store).present());
+  EXPECT_FALSE(askPresentIn(b.store));
   b.store.values = whole;
   b.store.values.erase(mm::update::kAskKeyPosted);
-  EXPECT_FALSE(mm::update::loadAsk(b.store).present());
+  EXPECT_FALSE(askPresentIn(b.store));
 }
 
 TEST(TheRecord, RoundTripsThroughTheStore) {
@@ -1403,7 +1607,8 @@ TEST(TheRecord, RoundTripsThroughTheStore) {
   rec.journal.add(1795165200u, "check", "table two, 0.8.0+1111111 running");
   ASSERT_TRUE(mm::update::saveAsk(store, rec));
 
-  const AskRecord back = mm::update::loadAsk(store);
+  AskRecord back;
+  mm::update::loadAsk(store, back);
   ASSERT_TRUE(back.present());
   EXPECT_TRUE(back.inHand());
   EXPECT_EQ(AskStep::Proving, back.step);

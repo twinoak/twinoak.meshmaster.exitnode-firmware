@@ -101,6 +101,15 @@ struct JournalEntry {
 // turns either into a space.
 class Journal {
  public:
+  Journal() = default;
+  // **Neither copied nor moved** (task p1.17-65). This is 2 521 bytes of text, and a copy of the
+  // record it lives in is what made 0.7.3 restart for ever: a journal is read into the object
+  // that keeps it (`readFrom`) and emptied in place (`clear`), never built beside it.
+  Journal(const Journal&) = delete;
+  Journal& operator=(const Journal&) = delete;
+  Journal(Journal&&) = delete;
+  Journal& operator=(Journal&&) = delete;
+
   void clear() {
     text_[0] = '\0';
     len_ = 0;
@@ -144,6 +153,15 @@ class Journal {
 };
 
 struct UpdateRecord {
+  UpdateRecord() = default;
+  // **Neither copied nor moved** (task p1.17-65). The record is 2 764 bytes, 2 521 of them its
+  // journal; `loadUpdate` used to return one by value into the member that keeps it, which put
+  // three of them on the loop task's 8 192 bytes at every boot and is why 0.7.3 did not start.
+  UpdateRecord(const UpdateRecord&) = delete;
+  UpdateRecord& operator=(const UpdateRecord&) = delete;
+  UpdateRecord(UpdateRecord&&) = delete;
+  UpdateRecord& operator=(UpdateRecord&&) = delete;
+
   Phase phase = Phase::None;
   char from[33] = {0};
   char to[33] = {0};
@@ -155,11 +173,18 @@ struct UpdateRecord {
   Journal journal;
 
   bool inHand() const { return phase == Phase::Switching || phase == Phase::OnTrial; }
+
+  // Empty again, in place: every field as a fresh record has it, journal and all. This is what
+  // `= UpdateRecord()` used to be, without the record built beside the one being emptied.
+  void clear();
 };
 
-// The record as the store holds it. A state that is not one of the three words, or a `done` with
-// no ending, reads as *nothing in hand* and then nothing else of it is believed.
-UpdateRecord loadUpdate(RecordStore& store);
+// The record as the store holds it, read **into the record it is given** - the object that keeps
+// it, so that nothing of this size is ever on the stack. A state that is not one of the three
+// words, or a `done` with no ending, reads as *nothing in hand* and then nothing else of it is
+// believed: every way out but the one that read a whole record leaves `rec` empty, whatever it
+// held before.
+void loadUpdate(RecordStore& store, UpdateRecord& rec);
 
 // The record, whole. `rec.phase == Phase::None` forgets every one of the nine keys. The state is
 // written **last** on the way in and cleared **first** on the way out, so a power cut in the

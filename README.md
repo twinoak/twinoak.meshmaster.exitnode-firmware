@@ -786,6 +786,21 @@ reading.
   `Retry-After` is believed to the second, and once WiFi is up and the clock
   came off the network the backoff stops doubling at **two minutes**, because
   then the only thing not answering is the server.
+- **No function of ours puts more than 1 024 bytes on the stack, and the board
+  says how much of the loop task's is left.** Everything `setup()` and `loop()`
+  do runs on one FreeRTOS task — the console's command, the mesh, the agent's
+  call, the TLS handshake, a release's signature, the fetch of a 1.4 MB image —
+  and that task has 16 384 bytes (`CONFIG_ARDUINO_LOOP_STACK_SIZE`,
+  `tools/check-sdkconfig.py` carries the key and the reason). Every board build
+  compiles with `-fstack-usage` and `tools/check-frames.py` reads what the
+  compiler wrote: a frame of ours over the limit fails the build, and so does one
+  the compiler could not bound at all. An exception is a line in that file with
+  today's size as its ceiling and a reason, and `src/update/` may have none.
+  0.7.3 is why: one function there put 2 864 bytes on the stack inside one that
+  put 5 696 there, on the 8 192 the task had, and the board restarted for ever
+  before anything was written. The boot's last line and `status`' `stack` line
+  say the least that was ever free, so the next one of these is read off a window
+  rather than off a panic (`src/platform/LoopStack.h`, `test/test_loop_stack`).
 - **Path hashes are two bytes or more, never one.** Wherever this firmware
   chooses a path-hash width - every flood it originates
   (`AgentMesh::kFloodPathHashSize`), a trace it builds, anything a later task

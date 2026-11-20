@@ -29,6 +29,7 @@
 #include <fstream>
 #include <map>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include <agent/TextOut.h>
@@ -271,7 +272,8 @@ struct Board {
     restart.restarts = 0;
     conditions = ScriptedConditions();
     lines.all.clear();
-    updater = Updater();
+    // No fresh `Updater`: it holds a record of 2 764 bytes that can be neither copied nor moved
+    // (task p1.17-65), and `begin()` is what puts the per-boot state back.
     Updater::Seams seams;
     seams.slots = &slots;
     seams.slot = &slot;
@@ -283,19 +285,26 @@ struct Board {
     return updater;
   }
 
-  UpdateRecord record() { return mm::update::loadUpdate(store); }
+  // The record as the store holds it. It is read **into this board's own**, because a record
+  // cannot be returned by value any more (task p1.17-65): the caller gets a reference to that one,
+  // which the next call here reads over.
+  UpdateRecord read;
+  const UpdateRecord& record() {
+    mm::update::loadUpdate(store, read);
+    return read;
+  }
 
   // The journal's steps, oldest first.
   std::vector<std::string> steps() {
     std::vector<std::string> out;
-    const UpdateRecord rec = record();
+    const UpdateRecord& rec = record();
     JournalEntry e;
     for (size_t i = 0; rec.journal.entry(i, e); i++) out.push_back(e.step);
     return out;
   }
 
   std::string lastNote() {
-    const UpdateRecord rec = record();
+    const UpdateRecord& rec = record();
     JournalEntry e;
     std::string note;
     for (size_t i = 0; rec.journal.entry(i, e); i++) note = e.note;
@@ -433,7 +442,7 @@ TEST(TheSwitch, TheRecordIsWrittenBeforeTheBootChoiceAndTheBootChoiceBeforeTheRe
   const std::vector<std::string> want = {"record:switching", "boot-other", "post-what-waits", "note", "restart"};
   EXPECT_EQ(want, b.order) << "the record, then the boot choice, then what waits in RAM, then the restart";
 
-  const UpdateRecord rec = b.record();
+  const UpdateRecord& rec = b.record();
   EXPECT_EQ(Phase::Switching, rec.phase);
   EXPECT_STREQ(kOldVersion, rec.from);
   EXPECT_STREQ(kNewVersion, rec.to);
@@ -518,7 +527,7 @@ TEST(TheTrial, TheThreeConditionsAtThirtySecondsAreMarkedValidThenAndTheRecordSa
   EXPECT_FALSE(b.updater.onTrial());
   EXPECT_EQ(0, b.restart.restarts) << "a commit restarts nothing";
 
-  const UpdateRecord rec = b.record();
+  const UpdateRecord& rec = b.record();
   EXPECT_EQ(Phase::Ended, rec.phase);
   EXPECT_EQ(Ended::Committed, rec.ended);
   EXPECT_STREQ(kOldVersion, rec.from);
@@ -580,7 +589,7 @@ TEST_P(OneMissingCondition, IsARollbackThatTheOldImagesBootFinishes) {
   // The bootloader chooses the old image.
   b.boot(kOldVersion, 0, SlotState::Valid);
   EXPECT_EQ(BootFinding::RolledBack, b.updater.atBoot());
-  const UpdateRecord rec = b.record();
+  const UpdateRecord& rec = b.record();
   EXPECT_EQ(Phase::Ended, rec.phase);
   EXPECT_EQ(Ended::RolledBack, rec.ended);
   EXPECT_STREQ(kOldVersion, rec.from);
@@ -640,7 +649,7 @@ TEST(TheTrial, ARestartAtFourMinutesEndsTheRecordRolledBackWithTheRestartsReason
   // still pending, boots the old one.
   b.boot(kOldVersion, 0, SlotState::Valid, "Task watchdog reset");
   EXPECT_EQ(BootFinding::RolledBack, b.updater.atBoot());
-  const UpdateRecord rec = b.record();
+  const UpdateRecord& rec = b.record();
   EXPECT_EQ(Ended::RolledBack, rec.ended);
   EXPECT_NE(std::string::npos, std::string(rec.why).find("restarted during the trial")) << rec.why;
   EXPECT_NE(std::string::npos, std::string(rec.why).find("Task watchdog reset")) << rec.why;
@@ -654,7 +663,7 @@ TEST(TheTrial, ASwitchingRecordThatComesBackAsTheSameImageIsNothingTried) {
   // The restart came before the boot choice took, so the first slot is running again.
   b.boot(kOldVersion, 0, SlotState::Valid);
   EXPECT_EQ(BootFinding::SwitchNotTaken, b.updater.atBoot());
-  const UpdateRecord rec = b.record();
+  const UpdateRecord& rec = b.record();
   EXPECT_EQ(Ended::RolledBack, rec.ended);
   EXPECT_NE(std::string::npos, std::string(rec.why).find("never taken")) << rec.why;
   EXPECT_EQ(0, b.slots.boots);
@@ -797,7 +806,7 @@ TEST(AFlashOverUsb, AnUnknownImageOfThisProductInTheFirstSlotIsSwitchedToOnce) {
   EXPECT_EQ(1, b.slots.boots);
   EXPECT_EQ(1, b.restart.restarts);
   EXPECT_EQ(0, b.restart.posts) << "nothing waits in RAM at a boot";
-  const UpdateRecord rec = b.record();
+  const UpdateRecord& rec = b.record();
   EXPECT_EQ(Phase::Switching, rec.phase);
   EXPECT_STREQ(kNewVersion, rec.from);
   EXPECT_STREQ("0.9.0+abcdef1", rec.to);
@@ -911,6 +920,178 @@ TEST(AFlashOverUsb, OnABoardWithNoSecondSlotTheBootFindsNothingToDo) {
 
 // ---- the record and its journal ---------------------------------------------------------------
 
+// **The compiler is the first thing that refuses what made 0.7.3 restart for ever** (task
+// p1.17-65). An `UpdateRecord` is 2 764 bytes, 2 521 of them its journal; `loadUpdate` used to
+// build one and return it into the member that keeps it, which is three of them at once on a loop
+// task that had 8 192 bytes. Neither type can be copied or moved now, so no function of ours can
+// return one or take one by value, and the compiler says so rather than a board.
+static_assert(!std::is_copy_constructible<UpdateRecord>::value, "an UpdateRecord may not be copied");
+static_assert(!std::is_copy_assignable<UpdateRecord>::value, "an UpdateRecord may not be assigned");
+static_assert(!std::is_move_constructible<UpdateRecord>::value, "an UpdateRecord may not be moved");
+static_assert(!std::is_move_assignable<UpdateRecord>::value, "an UpdateRecord may not be move-assigned");
+static_assert(!std::is_copy_constructible<mm::update::Journal>::value, "a Journal may not be copied");
+static_assert(!std::is_copy_assignable<mm::update::Journal>::value, "a Journal may not be assigned");
+static_assert(!std::is_move_constructible<mm::update::Journal>::value, "a Journal may not be moved");
+static_assert(!std::is_move_assignable<mm::update::Journal>::value, "a Journal may not be move-assigned");
+
+namespace {
+
+// One load into a record of this function's own, for the tests that want the phase alone.
+Phase phaseIn(MapStore& store) {
+  UpdateRecord rec;
+  mm::update::loadUpdate(store, rec);
+  return rec.phase;
+}
+
+// A record with a full journal in it: what is given to a load that must come back empty.
+void fillWithAWholeJournal(UpdateRecord& rec) {
+  rec.phase = Phase::OnTrial;
+  std::snprintf(rec.from, sizeof(rec.from), "%s", kOldVersion);
+  std::snprintf(rec.to, sizeof(rec.to), "%s", kNewVersion);
+  std::snprintf(rec.sha256hex, sizeof(rec.sha256hex), "%s", std::string(64, 'b').c_str());
+  rec.at = 1795165200;
+  rec.slot = 1;
+  rec.ended = Ended::Committed;
+  std::snprintf(rec.why, sizeof(rec.why), "something that was there before");
+  for (int i = 0; i < 40; i++) {
+    char note[64];
+    std::snprintf(note, sizeof(note), "entry %d %s", i, std::string(30, 'x').c_str());
+    rec.journal.add(1795165200u + static_cast<uint32_t>(i), "proving", note);
+  }
+}
+
+// Nothing of a record is left: the fields and the journal both.
+void expectEmpty(const UpdateRecord& rec) {
+  EXPECT_EQ(Phase::None, rec.phase);
+  EXPECT_FALSE(rec.inHand());
+  EXPECT_STREQ("", rec.from);
+  EXPECT_STREQ("", rec.to);
+  EXPECT_STREQ("", rec.sha256hex);
+  EXPECT_EQ(0u, rec.at);
+  EXPECT_EQ(0u, rec.slot);
+  EXPECT_EQ(Ended::None, rec.ended);
+  EXPECT_STREQ("", rec.why);
+  EXPECT_EQ(0u, rec.journal.count());
+  EXPECT_TRUE(rec.journal.empty());
+  EXPECT_STREQ("", rec.journal.text());
+}
+
+}  // namespace
+
+// **Every way out of a load leaves the record it was given empty** (task p1.17-65, deliverable 3).
+// The record is no longer built beside the one that keeps it, so a load that gives up has to undo
+// what it read - and the record it is handed is the one a board has been carrying since its boot,
+// with a whole journal in it.
+TEST(TheRecord, EveryWayOutOfALoadLeavesTheRecordEmpty) {
+  // 1. An empty store: no update was ever made.
+  {
+    MapStore store;
+    UpdateRecord rec;
+    fillWithAWholeJournal(rec);
+    ASSERT_EQ(40u, rec.journal.count());
+    mm::update::loadUpdate(store, rec);
+    expectEmpty(rec);
+  }
+  // 2. A state this firmware did not write, with every other key there to be read.
+  {
+    MapStore store;
+    UpdateRecord whole;
+    fillWithAWholeJournal(whole);
+    whole.ended = Ended::None;
+    ASSERT_TRUE(mm::update::saveUpdate(store, whole));
+    store.values[mm::update::kUpdateKeyState] = "halfway";
+    UpdateRecord rec;
+    fillWithAWholeJournal(rec);
+    mm::update::loadUpdate(store, rec);
+    expectEmpty(rec);
+  }
+  // 3. `done` with no ending.
+  {
+    MapStore store;
+    UpdateRecord whole;
+    fillWithAWholeJournal(whole);
+    whole.phase = Phase::Ended;
+    whole.ended = Ended::Committed;
+    ASSERT_TRUE(mm::update::saveUpdate(store, whole));
+    store.values.erase(mm::update::kUpdateKeyEnd);
+    UpdateRecord rec;
+    fillWithAWholeJournal(rec);
+    mm::update::loadUpdate(store, rec);
+    expectEmpty(rec);
+  }
+  // 4. A record in hand with no `to`.
+  {
+    MapStore store;
+    UpdateRecord whole;
+    fillWithAWholeJournal(whole);
+    whole.ended = Ended::None;
+    ASSERT_TRUE(mm::update::saveUpdate(store, whole));
+    store.values.erase(mm::update::kUpdateKeyTo);
+    UpdateRecord rec;
+    fillWithAWholeJournal(rec);
+    mm::update::loadUpdate(store, rec);
+    expectEmpty(rec);
+  }
+}
+
+// And a load that succeeds leaves nothing of what the record held before it: the fields of the
+// one in the store and no others.
+TEST(TheRecord, ALoadThatSucceedsOverwritesWhatTheRecordHeld) {
+  MapStore store;
+  UpdateRecord saved;
+  saved.phase = Phase::Switching;
+  std::snprintf(saved.from, sizeof(saved.from), "%s", kOldVersion);
+  std::snprintf(saved.to, sizeof(saved.to), "%s", kNewVersion);
+  saved.journal.add(7, "switching", "one entry");
+  ASSERT_TRUE(mm::update::saveUpdate(store, saved));
+
+  UpdateRecord rec;
+  fillWithAWholeJournal(rec);
+  mm::update::loadUpdate(store, rec);
+  EXPECT_EQ(Phase::Switching, rec.phase);
+  EXPECT_STREQ(kOldVersion, rec.from);
+  EXPECT_STREQ(kNewVersion, rec.to);
+  EXPECT_STREQ("", rec.sha256hex) << "the hash it held before is gone";
+  EXPECT_EQ(0u, rec.at);
+  EXPECT_EQ(0u, rec.slot);
+  EXPECT_EQ(Ended::None, rec.ended) << "the ending it held before is gone";
+  EXPECT_STREQ("", rec.why);
+  EXPECT_EQ(1u, rec.journal.count()) << "the forty entries it held before are gone";
+  EXPECT_STREQ("7|switching|one entry", rec.journal.text());
+}
+
+// **The store holds the bytes it held before this task.** The nine keys and their values, written
+// out, for a record a board could really have: nothing about what is stored moved, so a board
+// updated from 0.7.2 reads its own record back (task p1.17-65, deliverable 3).
+TEST(TheRecord, TheNineKeysHoldTheBytesTheyHeldBefore) {
+  MapStore store;
+  UpdateRecord rec;
+  rec.phase = Phase::Ended;
+  std::snprintf(rec.from, sizeof(rec.from), "0.7.2");
+  std::snprintf(rec.to, sizeof(rec.to), "0.7.3+b6d4cfb");
+  std::snprintf(rec.sha256hex, sizeof(rec.sha256hex), "%s", std::string(64, 'a').c_str());
+  rec.at = 1795165200;
+  rec.slot = 1;
+  rec.ended = Ended::RolledBack;
+  std::snprintf(rec.why, sizeof(rec.why), "no wifi in 10 min");
+  rec.journal.add(1795165200u, "switching", "0.7.2 to 0.7.3+b6d4cfb, 1432000 bytes, in app1");
+  rec.journal.add(1795165290u, "proving", "on trial for 10 min");
+  ASSERT_TRUE(mm::update::saveUpdate(store, rec));
+
+  EXPECT_EQ("done", store.value(mm::update::kUpdateKeyState));
+  EXPECT_EQ("0.7.2", store.value(mm::update::kUpdateKeyFrom));
+  EXPECT_EQ("0.7.3+b6d4cfb", store.value(mm::update::kUpdateKeyTo));
+  EXPECT_EQ(std::string(64, 'a'), store.value(mm::update::kUpdateKeySha));
+  EXPECT_EQ("1795165200", store.value(mm::update::kUpdateKeyAt));
+  EXPECT_EQ("1", store.value(mm::update::kUpdateKeySlot));
+  EXPECT_EQ("rolledBack", store.value(mm::update::kUpdateKeyEnd));
+  EXPECT_EQ("no wifi in 10 min", store.value(mm::update::kUpdateKeyWhy));
+  EXPECT_EQ("1795165200|switching|0.7.2 to 0.7.3+b6d4cfb, 1432000 bytes, in app1"
+            "\n1795165290|proving|on trial for 10 min",
+            store.value(mm::update::kUpdateKeyJournal));
+  EXPECT_EQ(9u, store.values.size()) << "nine keys and no tenth";
+}
+
 TEST(TheRecord, RoundTripsAndSaysNothingInHandWhenItIsCleared) {
   MapStore store;
   UpdateRecord rec;
@@ -923,7 +1104,8 @@ TEST(TheRecord, RoundTripsAndSaysNothingInHandWhenItIsCleared) {
   rec.journal.add(1795165200, "switching", "0.0.0-old to 0.0.0-test");
   ASSERT_TRUE(mm::update::saveUpdate(store, rec));
 
-  const UpdateRecord back = mm::update::loadUpdate(store);
+  UpdateRecord back;
+  mm::update::loadUpdate(store, back);
   EXPECT_EQ(Phase::OnTrial, back.phase);
   EXPECT_TRUE(back.inHand());
   EXPECT_STREQ(kOldVersion, back.from);
@@ -945,7 +1127,7 @@ TEST(TheRecord, RoundTripsAndSaysNothingInHandWhenItIsCleared) {
                           mm::update::kUpdateKeyEnd, mm::update::kUpdateKeyWhy, mm::update::kUpdateKeyJournal}) {
     EXPECT_FALSE(store.has(key)) << key;
   }
-  EXPECT_EQ(Phase::None, mm::update::loadUpdate(store).phase);
+  EXPECT_EQ(Phase::None, phaseIn(store));
 }
 
 TEST(TheRecord, AHalfWrittenOneIsNotARecord) {
@@ -955,17 +1137,19 @@ TEST(TheRecord, AHalfWrittenOneIsNotARecord) {
   rec.ended = Ended::Committed;
   std::snprintf(rec.to, sizeof(rec.to), "%s", kNewVersion);
   ASSERT_TRUE(mm::update::saveUpdate(store, rec));
-  ASSERT_EQ(Ended::Committed, mm::update::loadUpdate(store).ended);
+  UpdateRecord read;
+  mm::update::loadUpdate(store, read);
+  ASSERT_EQ(Ended::Committed, read.ended);
 
   // A `done` with no ending, a state nothing here wrote, and an `in hand` with nothing to go to.
   store.values[mm::update::kUpdateKeyEnd] = "";
   store.values.erase(mm::update::kUpdateKeyEnd);
-  EXPECT_EQ(Phase::None, mm::update::loadUpdate(store).phase);
+  EXPECT_EQ(Phase::None, phaseIn(store));
   store.values[mm::update::kUpdateKeyState] = "halfway";
-  EXPECT_EQ(Phase::None, mm::update::loadUpdate(store).phase);
+  EXPECT_EQ(Phase::None, phaseIn(store));
   store.values[mm::update::kUpdateKeyState] = "trial";
   store.values.erase(mm::update::kUpdateKeyTo);
-  EXPECT_EQ(Phase::None, mm::update::loadUpdate(store).phase);
+  EXPECT_EQ(Phase::None, phaseIn(store));
 }
 
 TEST(TheRecord, TheStateIsWrittenLastOnTheWayInAndClearedFirstOnTheWayOut) {
@@ -1195,7 +1379,7 @@ TEST(TheWayBack, SwitchesToWhatTheOtherSlotHoldsAndThatImageIsOnTrialLikeAnyOthe
   EXPECT_EQ(std::vector<std::string>({"record:switching", "boot-other", "post-what-waits", "note", "restart"}),
             std::vector<std::string>(b.order.end() - 5, b.order.end()));
 
-  const UpdateRecord rec = b.record();
+  const UpdateRecord& rec = b.record();
   EXPECT_EQ(Phase::Switching, rec.phase);
   EXPECT_STREQ(kNewVersion, rec.from);
   EXPECT_STREQ(kOldVersion, rec.to);
@@ -1210,7 +1394,7 @@ TEST(TheWayBack, SwitchesToWhatTheOtherSlotHoldsAndThatImageIsOnTrialLikeAnyOthe
   b.clock.advanceMs(4000);
   b.updater.step();
   EXPECT_EQ(1, b.slots.valids);
-  const UpdateRecord done = b.record();
+  const UpdateRecord& done = b.record();
   EXPECT_EQ(Ended::Committed, done.ended);
   EXPECT_STREQ(kNewVersion, done.from);
   EXPECT_STREQ(kOldVersion, done.to);
@@ -1232,7 +1416,7 @@ TEST(TheWayBack, ATrialThatFailsEndsInTheImageTheCommandWasTypedIn) {
   // ... and that boot is B again, which finishes the record.
   b.boot(kNewVersion, 1, SlotState::Valid);
   EXPECT_EQ(BootFinding::RolledBack, b.updater.atBoot());
-  const UpdateRecord rec = b.record();
+  const UpdateRecord& rec = b.record();
   EXPECT_EQ(Ended::RolledBack, rec.ended);
   EXPECT_NE(std::string::npos, std::string(rec.why).find("no wifi")) << rec.why;
   EXPECT_STREQ(kNewVersion, rec.from) << "B is what the command was typed in, and B is what runs";
@@ -1428,7 +1612,7 @@ TEST(ARollbackTheFrameworkRefuses, TheSameImageAgainWithNoWayBackIsStuckAndNotRo
   b.boot(kNewVersion, 1, SlotState::New, "Software reset");
   b.slots.bootOtherWorks = false;
   EXPECT_EQ(BootFinding::Stuck, b.updater.atBoot());
-  const UpdateRecord rec = b.record();
+  const UpdateRecord& rec = b.record();
   EXPECT_EQ(Ended::Stuck, rec.ended);
   EXPECT_STREQ("stuck", mm::update::endedWord(rec.ended));
   EXPECT_STREQ(kNewVersion, rec.to) << "the version that runs, which is the one that failed";
@@ -1455,7 +1639,7 @@ TEST(ARollbackTheFrameworkRefuses, OnABootloaderThatDoesNotUndoABootChoiceThatRe
   b.updater.step();
 
   EXPECT_EQ(0, b.restart.restarts) << "there is nowhere to restart to";
-  const UpdateRecord rec = b.record();
+  const UpdateRecord& rec = b.record();
   EXPECT_EQ(Ended::Stuck, rec.ended) << "the image that failed is what runs: that is not rolled back";
   EXPECT_NE(std::string::npos, std::string(rec.why).find("could not be sent back")) << rec.why;
 }

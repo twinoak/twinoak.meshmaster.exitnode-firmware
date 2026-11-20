@@ -336,6 +336,13 @@ const ReleaseFile* fileWithUse(const ReleaseInfo& info, const char* use) {
 
 Outcome readRelease(const uint8_t* manifest, size_t manifestLen, const char* signatureLine,
                     const TrustedKey* keys, size_t keyCount, const char* board, ReleaseInfo& out) {
+  // The caller's info is **emptied first and filled in place**: it is 872 bytes, and a second one
+  // of them beside it was 872 bytes of this function's frame, over the rail's limit all by itself
+  // (task p1.17-65, tools/check-frames.py). Nothing of a release half read is left in it either
+  // way - every way out of this function but the one that read a whole image leaves it empty,
+  // which is the same rule an update's record is loaded by.
+  memset(&out, 0, sizeof(out));
+
   // 1.
   const Outcome signature = checkSignature(manifest, manifestLen, signatureLine, keys, keyCount);
   if (!signature.ok) return signature;
@@ -402,28 +409,28 @@ Outcome readRelease(const uint8_t* manifest, size_t manifestLen, const char* sig
                     static_cast<unsigned>(files.size()), static_cast<unsigned>(kMaxFilesPerImage));
     }
 
-    ReleaseInfo read;
-    memset(&read, 0, sizeof(read));
     const bool fits =
-        copyString(read.product, sizeof(read.product), doc["product"].as<const char*>()) &&
-        copyString(read.version, sizeof(read.version), doc["version"].as<const char*>()) &&
-        copyString(read.tag, sizeof(read.tag), doc["tag"].as<const char*>()) &&
-        copyString(read.commit, sizeof(read.commit), doc["commit"].as<const char*>()) &&
-        copyString(read.imageId, sizeof(read.imageId), image["id"].as<const char*>()) &&
-        copyString(read.role, sizeof(read.role), image["role"].as<const char*>()) &&
-        copyString(read.board, sizeof(read.board), image["board"].as<const char*>()) &&
-        copyString(read.band, sizeof(read.band), image["band"].as<const char*>()) &&
-        copyString(read.mcu, sizeof(read.mcu), image["mcu"].as<const char*>());
+        copyString(out.product, sizeof(out.product), doc["product"].as<const char*>()) &&
+        copyString(out.version, sizeof(out.version), doc["version"].as<const char*>()) &&
+        copyString(out.tag, sizeof(out.tag), doc["tag"].as<const char*>()) &&
+        copyString(out.commit, sizeof(out.commit), doc["commit"].as<const char*>()) &&
+        copyString(out.imageId, sizeof(out.imageId), image["id"].as<const char*>()) &&
+        copyString(out.role, sizeof(out.role), image["role"].as<const char*>()) &&
+        copyString(out.board, sizeof(out.board), image["board"].as<const char*>()) &&
+        copyString(out.band, sizeof(out.band), image["band"].as<const char*>()) &&
+        copyString(out.mcu, sizeof(out.mcu), image["mcu"].as<const char*>());
     if (!fits) {
+      memset(&out, 0, sizeof(out));
       return refuse(kCheckImage, "the image for %s says more about itself than this reader holds",
                     board);
     }
-    read.linkMajor = static_cast<uint8_t>(link["major"].as<int>());
-    read.linkMinor = static_cast<uint8_t>(link["minor"].as<int>());
+    out.linkMajor = static_cast<uint8_t>(link["major"].as<int>());
+    out.linkMinor = static_cast<uint8_t>(link["minor"].as<int>());
     for (JsonObjectConst file : files) {
-      ReleaseFile& entry = read.files[read.fileCount];
+      ReleaseFile& entry = out.files[out.fileCount];
       if (!copyString(entry.use, sizeof(entry.use), file["use"].as<const char*>()) ||
           !copyString(entry.name, sizeof(entry.name), file["name"].as<const char*>())) {
+        memset(&out, 0, sizeof(out));
         return refuse(kCheckImage, "a file of the image for %s is named at more length than this "
                                    "reader holds",
                       board);
@@ -432,19 +439,20 @@ Outcome readRelease(const uint8_t* manifest, size_t manifestLen, const char* sig
       parseHex(file["sha256"].as<const char*>(), sizeof(entry.sha256), entry.sha256);
       entry.hasLoadAddress = file["load_address"].is<const char*>() &&
                              parseLoadAddress(file["load_address"].as<const char*>(), entry.loadAddress);
-      read.fileCount++;
+      out.fileCount++;
     }
-    out = read;
-    return accept("%s %s: the image %s, %u file(s)", read.product, read.version, read.imageId,
-                  static_cast<unsigned>(read.fileCount));
+    return accept("%s %s: the image %s, %u file(s)", out.product, out.version, out.imageId,
+                  static_cast<unsigned>(out.fileCount));
   }
   return refuse(kCheckImage, "this release has no image for %s", board);
 }
 
 bool findOneDescriptor(const ReleaseBytes& bytes, Descriptor& out, uint32_t& offset, size_t& count) {
-  // A window that always holds a whole descriptor and overlaps the last one by 95 bytes, so a
-  // descriptor that straddles two reads is still seen whole. 1 kB of stack, read once.
-  static const uint32_t kWindow = 1024;
+  // A window that always holds a whole descriptor and overlaps the last one by 92 bytes, so a
+  // descriptor that straddles two reads is still seen whole. **512 bytes and not 1 024** since
+  // task p1.17-65: a kilobyte of window was a frame of 1 168 bytes, over the rail's limit, and the
+  // only cost of halving it is twice as many reads of a medium this already reads whole.
+  static const uint32_t kWindow = 512;
   const uint32_t total = bytes.size();
   count = 0;
   if (total < kDescriptorLength) return false;
