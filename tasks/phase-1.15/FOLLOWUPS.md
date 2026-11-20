@@ -2,13 +2,15 @@
 
 Review findings, tagged with the task that must pick them up. Only the reviewer ticks an item.
 
-- [ ] **[next pile] The fixtures of tasks 56 and 61 wait in `tests/fixtures/contracts-ahead/`.**
+- [x] **[next pile] The fixtures of tasks 56 and 61 wait in `tests/fixtures/contracts-ahead/`.**
   Six files, written from the lines in the tasks: `NeighboursResultTotal.json`,
   `HeartbeatUpdate.json`, `UpdateAsk.json`, `UpdateResult.json`, `AgentHeartbeatUpdate.json`,
   `HeartbeatReplyUpdate.json`. Once meshmaster.dk's tasks 239 and 244 are on its master:
   `tools/sync-fixtures.ps1 -Commit master`, compare each with the copied file byte for byte,
   point the tests at the copied tree and remove the waiting ones. A difference is a wire
   that does not match and is found before any release.
+  *Done in pile 1.16, task 62 (19 November):* the six are read from the copied tree, the waiting
+  directory holds its README alone, and `master` is green again (#68).
 - [ ] **[later] Neither half has read a release the other made.** Task 58 tests against the
   specification's fixtures and a release of its own tooling; meshmaster.dk's task 243 tests
   against a release of its own making. The first real release imported there is the first
@@ -50,7 +52,9 @@ Review findings, tagged with the task that must pick them up. Only the reviewer 
   repeater's count and is still not the whole list. meshmaster.dk's task 239 counts different
   neighbours for that reason. Whether another `order_by` (`runNeighbours`, the request's
   fifth byte) holds still during a read is for the repeater firmware's source to say.
-- [ ] **[later] Piles 1.9 to 1.13 are not reviewed.**
+- [x] **[later] Piles 1.9 to 1.13 are not reviewed.**
+  *Reviewed lightly on 19 November*, by their reports and what is in service as v0.7.2: pile
+  1.16's follow-ups.
 
 ## The review of 56–61 (19 November)
 
@@ -75,7 +79,7 @@ new tables add `app1` and move nothing; a board build's trust table holds the on
 and the release's gate looks for the test key in the images' bytes. The first two findings
 should be settled before a release of this pile reaches a board that is not on a desk.
 
-- [ ] **[next pile, before the first release of this pile] 57, 61: a write of the table that
+- [x] **[next pile, before the first release of this pile] 57, 61: a write of the table that
   fails is not tried again, and the board then runs on with no table until its next reset.**
   `addSecondSlot` (`PartitionTable.cpp` ~L104–170) erases the sector and writes the new table
   once. When the erase (~L125), the write (~L131) or the read-back fails, it returns a sentence
@@ -88,6 +92,10 @@ should be settled before a release of this pile reaches a board that is not on a
   and only when neither holds say what is true then, that the sector is no table and the board
   must not lose power. Tests with a scripted sector that fails its first write, and one that
   fails every write of the new table.
+  *Done in pile 1.16, task 63 (19 November):* `addSecondSlot` tries the new table three times,
+  puts the old one back as many times and ends in one of three words; with no table
+  `TableKeeper` puts the old one back once a minute, and `update` and `status` say not to cut
+  the power (#69). Read: `PartitionTable.cpp` ~L38–57 and ~L150–227.
 - [ ] **[Thomas, before a board that is not on a desk is asked] 57, 61: the first update of a
   board writes its partition table with nobody there.** As decided on 18 November: the last
   flash over USB is the plain `.bin`, and the firmware adds the slot. In the field that means a
@@ -100,7 +108,7 @@ should be settled before a release of this pile reaches a board that is not on a
   `CONFIG_SPI_FLASH_DANGEROUS_WRITE_ALLOWED` has been built and never exercised. meshmaster.dk's
   confirm page says in its Help that the board *adds a second application slot of its own*, and
   nothing about that moment (its pile 4.42's follow-ups).
-- [ ] **[next pile] 60: after an update from A to B, flashing A over USB does nothing, and
+- [x] **[next pile] 60: after an update from A to B, flashing A over USB does nothing, and
   nothing says so.** *A flash over USB still wins* looks at the first slot at boot when the
   board runs from the second, and switches to an image there that the record does not know
   (`Trial.cpp` ~L263–285; `recordKnows` ~L156–162). After an update the record's `from` is A,
@@ -113,22 +121,28 @@ should be settled before a release of this pile reaches a board that is not on a
   what lies in the other slot when the framework would load it and it is this product for this
   board, on trial like any other; and a sentence at boot when the first slot holds something
   that is not switched to.
-- [ ] **[next pile, small] 60: `rollBack()` stays in the image that failed when the framework
+  *Done in pile 1.16, task 64 (19 November):* `update back` (`Trial.cpp`, `goBack` ~L504), and
+  the boot says why it did not switch (~L310) (#70).
+- [x] **[next pile, small] 60: `rollBack()` stays in the image that failed when the framework
   refuses the rollback call.** For a pending image it calls `markInvalidAndRestart()`; when that
   returns (`ESP_ERR_OTA_ROLLBACK_FAILED`) it journals *could not be sent back* and finishes the
   record as `rolledBack` (`Trial.cpp` ~L366–383), with the failed image still running and still
   pending. A plain restart is what the header of `Trial.h` says undoes a pending image: the
   bootloader marks it aborted and chooses the other. So restart there. And a result should not
   say `rolledBack` of a board that is not back.
+  *Done in pile 1.16, task 64:* a refused rollback of a pending image restarts (`rollBack`
+  ~L408–439), and a board that cannot be sent back ends `stuck` and not `rolledBack`.
 - [ ] **[Thomas, at the bench] Which bootloader a board in the field has is not known here.** A
   board upgraded with the plain `.bin` keeps the bootloader of its last merged image. `Trial.h`
   covers one built without the rollback (*this bootloader leaves it …, not pending: this
   firmware undoes it*), except for an image that crashes before it has counted its ten minutes:
   nothing undoes that one. The journal of the first trial on a board says which it has; read it
   on one board of each generation in service before the others are asked.
-- [ ] **[later] `docs/field.md` ~L204–206 says a `one` board is refused with `table`, and in the
+- [x] **[later] `docs/field.md` ~L204–206 says a `one` board is refused with `table`, and in the
   same sentence that the firmware adds the slot at the first ask.** The second is what `Ask.cpp`
   does; `table` is the refusal of `other` alone.
+  *Done in pile 1.16, task 63:* `docs/field.md` ~L204 says `table` is the refusal of `other`
+  alone.
 - [ ] **[Thomas to decide] Nothing on the board refuses an older release.** It refuses `current`
   and takes any other version that is signed; that a release is newer is meshmaster.dk's rule.
   A server that asked for an old signed release would be obeyed. Going back from the page may be
@@ -144,3 +158,25 @@ should be settled before a release of this pile reaches a board that is not on a
   characters, read as the Walter's workflow reads it; `keys/release-keys.txt` names the one
   release key of the three firmwares). The remote branch `task/p1.15-61-the-server-asks` is
   still there: the driver could not delete it.
+
+## 0.7.3 does not boot (20 November)
+
+- [ ] **[next pile, first] 60 and 61: the update's record is passed by value, and three of them
+  do not fit the loop task's stack.** Thomas flashed 0.7.3+b6d4cfb over USB onto his own board
+  (FD9B, `heltec_v3`) on 20 November. It restarts for ever: *Stack canary watchpoint triggered
+  (loopTask)*, straight after `clock: no time yet`. 0.7.2's plain `.bin` brings it back.
+  The backtrace, named from this clone's `.pio/build/heltec_v3/firmware.elf` (task 64's build,
+  not the release's own): the ROM's `memset` of 2 764 bytes, in `loadUpdate` (a frame of 2 864
+  bytes), in `Updater::atBoot` (5 696), in `setup` (672). That is 9 232 bytes on a stack of
+  8 192 (`CONFIG_ARDUINO_LOOP_STACK_SIZE`, `sdkconfig.heltec_v3` ~L165; the V4's is the same).
+  `UpdateRecord` is 2 764 bytes, 2 521 of them its `Journal` (`UpdateRecord.h` ~L141–156).
+  `loadUpdate` builds one and returns it by value through four `return`s (`UpdateRecord.cpp`
+  ~L265–301), and its callers assign the result to a member (`Trial.cpp` ~L203, ~L452, ~L505).
+  `loadAsk` and `AskRecord` have the same shape (`Ask.cpp` ~L134, ~L326) and run next in
+  `setup`. Every board, at every boot, before anything is written.
+  Report 60 says of the journal *nothing of this is on the stack*: true of the buffer it reads
+  into, not of the record around it. The review of 56–61 did not look at stack use. No test
+  boots an image: the native tests run on a PC's stack.
+  Wanted with the cure: a build that refuses a large frame in `src/` (`build_src_flags` is
+  `-Werror` already, `platformio.ini` ~L150), and the stack's low-water mark where a person
+  can read it.
