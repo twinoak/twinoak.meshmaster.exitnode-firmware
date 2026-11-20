@@ -330,6 +330,7 @@ memory    heltec_v4 opens 2 slot(s) while free heap >= 45528 (one slot 19468 + t
 nbr: next in 22h 41m, last ok 1h 18m ago, 7 neighbours, 5 responded
 uplink    0 memory failure(s) so far, 41 call(s); the last 121304 free before, lowest 115724 during, 121180 after
 tls       buffers of 4096 bytes and over in psram: 9 allocation(s) routed there, 0 fell back to internal heap
+stack     loop task: 16384 bytes, the least ever free 11240
 stack     slot 1 task: 6144 bytes, the least ever free 2328
 stack     slot 2 task: 6144 bytes, the least ever free 2312
 ```
@@ -358,7 +359,7 @@ asks:
 | `nbr: …` | the neighbour report ([*Neighbours*](#neighbours)): when the next cycle runs (`next in 22h 41m`; `running (discovery, 42 s left)` or `running (query 3 of 7)` while one does; `due, waiting for a slot` when it is time but no broker is connected; `off (mqtt.neighbors off)`), how the last report went and how long ago (`ok`, `skipped (heap)`, `failed` — no slot took it — `no slot`, or `none yet`), how many repeaters are in the table now and how many of the last cycle's answered. `discover.scopes` prints the table itself |
 | `uplink  …` | how often the uplink's call has failed for want of memory, how many calls it has made, and what the last one cost (`status`'s `uplink` line has the same, with the kept connection) |
 | `tls  …` | where the TLS buffers are: PSRAM on a V4 (with how many allocations went there and how many had to fall back to internal heap - a V4 with fallbacks is a V4 whose PSRAM is full, which should not happen), the internal heap on a V3 |
-| `stack  …` | each slot's task stack and the least of it that was ever free since the slot opened, read on the task itself; the bench's figure for whether the stack could be smaller |
+| `stack  …` | the **loop task** first — the same line the boot and `status` print, there for scale — and then each slot's task stack and the least of it that was ever free since the slot opened, read on the task itself; the bench's figure for whether the stack could be smaller ([`console.md`](console.md#the-stack-lines-and-the-command-each-one-is-in)) |
 
 A slot's state is one of `off`, `waiting-for-wifi`, `waiting-for-clock` (a token
 carries an issue time; nothing is sent before SNTP or the server set the clock),

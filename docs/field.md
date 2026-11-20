@@ -422,11 +422,16 @@ with a USB cable.
 ### The `stack` line, and what a small number means
 
 Since task p1.17-65 the last line of the boot says how much of the loop task's
-stack has never been used, and `status` says it again at any time:
+stack has never been used:
 
 ```
 [+2s] I stack: loop task: 16384 bytes, the least ever free 11240
 ```
+
+and since task p1.18-67 **`status`** says it again at any time, in the same
+words (in 0.7.4 that line was in `get mqtt.status` alone, which is where the
+observer's two broker tasks' own `stack` lines still are —
+[`console.md`](console.md#the-stack-lines-and-the-command-each-one-is-in)):
 
 ```
 stack     loop task: 16384 bytes, the least ever free 11240
