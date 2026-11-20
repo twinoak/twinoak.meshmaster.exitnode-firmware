@@ -7,11 +7,12 @@
 // sdkconfig.defaults), and nobody had ever measured what is left of them. So the board says:
 //
 //   * one line of the boot log, when `setup()` ends;
-//   * a `stack` line in `status`, beside the ones the observer's two tasks have.
+//   * the `stack` line of `status`;
+//   * the first `stack` line of `get mqtt.status`, above the observer's two tasks' own.
 //
-// **Both are this one function's words.** The two numbers come from a seam - the configuration and
-// FreeRTOS's own high-water mark on a board (src/main.cpp), a test's own figures on a host - so
-// that the line a person reads at the window is the line a test holds.
+// **All three are this one function's words.** The two numbers come from a seam - the
+// configuration and FreeRTOS's own high-water mark on a board (src/main.cpp), a test's own
+// figures on a host - so that the line a person reads at the window is the line a test holds.
 //
 // Portable and host-tested (test/test_loop_stack). Nothing here is a secret and nothing here is
 // overheard: two byte counts of this board's own RAM.

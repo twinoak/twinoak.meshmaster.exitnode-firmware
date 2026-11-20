@@ -526,6 +526,13 @@ void printStatus(Stream& out) {
                static_cast<unsigned long>(ESP.getMaxAllocPsram()));
   }
   out.print("\r\n");
+  // The loop task's stack, in the same words the boot log used and from the same function
+  // (src/platform/LoopStack.h): everything `setup()` and `loop()` do runs on that task, and the
+  // least that was ever free of it only falls. `get mqtt.status` prints this line too, with the
+  // observer's own two tasks' lines beside it, which are the observer's business and stay there
+  // (task p1.18-67).
+  mm::platform::loopStackLine(line, sizeof line);
+  out.printf("stack     %s\r\n", line);
   // The kept connection and what a call costs (task p1.8-30): the figures task 31 sets the
   // observer's gate from.
   server.describeUplink(line, sizeof line);
@@ -550,7 +557,8 @@ void printKeyNote(const mm::KeyDef& key, Stream& out) {
 // `get mqtt.status`: one line per broker slot - preset or host, state, since, published,
 // dropped, last error - and the memory rule the slots live under: this board's figures (task
 // p1.8-31, src/observer/Board.h), what the uplink has done to the heap, where the TLS buffers
-// are, and the least stack the clients' tasks ever had.
+// are, and the least stack the clients' tasks ever had, under the loop task's own line for
+// scale. `status` has that loop task line too (task p1.18-67); the slots' are only here.
 void printMqttStatus(Stream& out) {
   char line[400];
   observer.describe(line, sizeof line);
@@ -582,7 +590,8 @@ void printMqttStatus(Stream& out) {
   }
   // The loop task first: everything `setup()` and `loop()` do runs on it, the TLS handshake and a
   // release's signature among them, and a board that restarts for ever is what too little of it
-  // looks like (task p1.17-65). The same line the boot log printed, from the same function.
+  // looks like (task p1.17-65). The same line the boot log and `status` print, from the same
+  // function; it is here as well because the slots' own lines below are read against it.
   {
     char stack[96];
     mm::platform::loopStackLine(stack, sizeof stack);
