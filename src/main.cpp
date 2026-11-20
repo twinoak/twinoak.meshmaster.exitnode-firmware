@@ -54,6 +54,7 @@
 #include "console/Console.h"
 #include "console/StreamOut.h"
 #include "mesh/AgentMesh.h"
+#include "mesh/Receiver.h"
 #include "net/Clock.h"
 #include "net/MqttClient.h"
 #include "net/WifiLink.h"
@@ -324,6 +325,9 @@ bool jobOpen() { return jobs.openJob() != nullptr; }
 // firmware's own line, since the observer firmware publishes whatever the ADC says.
 void fillBoardStats(mm::BoardStats& s) {
   if (!radio_ok) return;
+  // A floor of 0 is a receiver whose sampling was started again by an AGC reset and not a level
+  // (task p1.18-66, src/mesh/Receiver.h); src/observer/Dialect.cpp leaves the member out for it,
+  // and the raw figure is handed on so that one file holds that rule.
   s.noiseFloor = radio_driver.getNoiseFloor();
   s.txAirSecs = static_cast<int>(the_mesh.getTotalAirTime() / 1000);
   s.rxAirSecs = static_cast<int>(the_mesh.getReceiveAirTime() / 1000);
@@ -342,6 +346,17 @@ void applyRadioSettings() {
   radio_driver.setParams(freq, bw, static_cast<uint8_t>(sf), static_cast<uint8_t>(cr));
   radio_driver.setTxPower(static_cast<int8_t>(tx));
   LOG_I("radio: %.3f MHz, bw %.1f kHz, sf %d, cr %d, tx %d dBm", static_cast<double>(freq), static_cast<double>(bw), sf, cr, tx);
+}
+
+// `agc.reset.interval`: how often MeshCore's dispatcher puts the radio's receiver back
+// (task p1.18-66, src/mesh/Receiver.h). The one place the setting is read; the mesh asks
+// src/mesh/Receiver.h for it on every loop, so this takes effect at once and no reboot is part
+// of changing it. Re-read on every `set agc.*` and on `erase confirm`.
+void applyAgcSettings() {
+  mm::setAgcResetSeconds(static_cast<int>(settings.number(*mm::findKey("agc.reset.interval"))));
+  char phrase[48];
+  mm::agcResetPhrase(phrase, sizeof phrase);
+  LOG_I("radio: %s", phrase);
 }
 
 // What the heartbeat says about this board (agent/AgentLoop.h): the version, the board, the
@@ -459,19 +474,25 @@ void printStatus(Stream& out) {
 
   if (radio_ok) {
     const mm::MeshCounters& c = the_mesh.counters();
-    out.printf("radio     %.3f MHz, bw %.1f kHz, sf %d, cr %d, tx %d dBm; companion role, no repeat\r\n",
+    // How often the receiver is put back, and whether the floor is a reading at all: both are
+    // src/mesh/Receiver.h's words, because both are the one timer's (task p1.18-66).
+    char receiver[48];
+    char floor[48];
+    mm::agcResetPhrase(receiver, sizeof receiver);
+    mm::noiseFloorPhrase(radio_driver.getNoiseFloor(), floor, sizeof floor);
+    out.printf("radio     %.3f MHz, bw %.1f kHz, sf %d, cr %d, tx %d dBm; companion role, no repeat; %s\r\n",
                static_cast<double>(settings.number(*mm::findKey("radio.freq"))),
                static_cast<double>(settings.number(*mm::findKey("radio.bw"))),
                static_cast<int>(settings.number(*mm::findKey("radio.sf"))),
                static_cast<int>(settings.number(*mm::findKey("radio.cr"))),
-               static_cast<int>(settings.number(*mm::findKey("radio.tx"))));
+               static_cast<int>(settings.number(*mm::findKey("radio.tx"))), receiver);
     out.printf("frames    rx %" PRIu32 " (advert %" PRIu32 ", grp-txt %" PRIu32 ", txt %" PRIu32 ", ack %" PRIu32
-               ", path %" PRIu32 ", trace %" PRIu32 ", other %" PRIu32 "), tx %" PRIu32 ", noise floor %d dBm, frame log %s\r\n",
+               ", path %" PRIu32 ", trace %" PRIu32 ", other %" PRIu32 "), tx %" PRIu32 ", %s, frame log %s\r\n",
                c.rx, c.rxByType[PAYLOAD_TYPE_ADVERT], c.rxByType[PAYLOAD_TYPE_GRP_TXT], c.rxByType[PAYLOAD_TYPE_TXT_MSG],
                c.rxByType[PAYLOAD_TYPE_ACK], c.rxByType[PAYLOAD_TYPE_PATH], c.rxByType[PAYLOAD_TYPE_TRACE],
                c.rx - c.rxByType[PAYLOAD_TYPE_ADVERT] - c.rxByType[PAYLOAD_TYPE_GRP_TXT] - c.rxByType[PAYLOAD_TYPE_TXT_MSG] -
                    c.rxByType[PAYLOAD_TYPE_ACK] - c.rxByType[PAYLOAD_TYPE_PATH] - c.rxByType[PAYLOAD_TYPE_TRACE],
-               c.tx, radio_driver.getNoiseFloor(), the_mesh.frameLog() ? "on" : "off");
+               c.tx, floor, the_mesh.frameLog() ? "on" : "off");
   } else {
     out.println("radio     init failed: no identity, nothing received");
   }
@@ -1010,6 +1031,8 @@ void onSettingChanged(const mm::KeyDef& key) {
     applyLogSettings();
   } else if (std::strncmp(key.name, "display.", 8) == 0) {
     applyDisplaySettings();
+  } else if (std::strncmp(key.name, "agc.", 4) == 0) {
+    applyAgcSettings();  // the dispatcher reads the new interval on its next loop (task p1.18-66)
   } else if (std::strncmp(key.name, "flood.", 6) == 0) {
     applyFloodSettings();  // the mesh's key and the runner's rule, re-read together
   } else if (std::strncmp(key.name, "mqtt", 4) == 0) {
@@ -1020,6 +1043,7 @@ void onSettingChanged(const mm::KeyDef& key) {
 void onErased() {
   applyLogSettings();
   applyDisplaySettings();
+  applyAgcSettings();
   applyFloodSettings();
   observer.reconfigure();
   server.reconfigure();
@@ -1113,6 +1137,9 @@ void setup() {
     SPIFFS.begin(true);
     setUpIdentity();
     applyRadioSettings();
+    // Before the dispatcher's first loop, so the receiver is on its timer from the first packet
+    // (task p1.18-66).
+    applyAgcSettings();
     the_mesh.begin();
     if (identity_ok) mesh::Utils::toHex(public_key_hex, the_mesh.self_id.pub_key, PUB_KEY_SIZE);
     LOG_I("identity: %s", public_key_hex[0] != 0 ? public_key_hex : "none");

@@ -213,7 +213,10 @@ The status message, which MeshView showed with *—* for battery, noise floor an
 TX/RX, now carries `noise_floor` from the radio, `tx_air_secs` and `rx_air_secs`
 from the dispatcher's air-time counters, and `battery_mv` from the board's ADC
 when it reads a volt or more (a board on USB with nothing on that pin reads
-noise, which is left out).
+noise, which is left out). `noise_floor` is left out for the moment after an AGC
+reset while the radio is sampling the floor again, because what MeshCore answers
+then is `0` and that is not a level (task p1.18-66,
+[`console.md`](console.md#the-radio-and-frames-lines-of-status)).
 
 ## TLS
 

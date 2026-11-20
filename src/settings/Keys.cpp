@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "mesh/Receiver.h"
 #include "mesh/TransportScope.h"
 #include "observer/Board.h"
 #include "observer/Presets.h"
@@ -40,6 +41,12 @@ const KeyDef kKeys[kKeyCount] = {
     {"radio.sf", "radio_sf", ValueKind::Int, "8", 5, 12, 0, 0, "spreading factor, 5..12"},
     {"radio.cr", "radio_cr", ValueKind::Int, "8", 5, 8, 0, 0, "coding rate, 5..8"},
     {"radio.tx", "radio_tx", ValueKind::Int, MESHMASTER_TX_DBM_DEFAULT, -9, 22, 0, 0, "transmit power in dBm, -9..22"},
+    // How often MeshCore's dispatcher puts the radio's receiver back (task p1.18-66,
+    // src/mesh/Receiver.h). The name is the repeaters' own for the same setting, the four seconds
+    // are what the standard profile gives them, and the fallback below is the number
+    // kAgcResetDefaultSeconds names - test/test_console_parser holds the two together.
+    {"agc.reset.interval", "agc_reset_int", ValueKind::Int, "4", kAgcResetMinSeconds, kAgcResetMaxSeconds, 0, 0,
+     "seconds between resets of the radio's receiver, 0..3600; 0 never resets it"},
     {"log.level", "log_level", ValueKind::Level, "info", 0, 0, 0, 0, "error | warn | info | debug"},
     {"log.frames", "log_frames", ValueKind::OnOff, "off", 0, 0, 0, 0, "on | off: one line per received frame, header only, never the payload"},
     {"display.timeout", "disp_timeout", ValueKind::Int, "0", 0, 86400, 0, 0, "seconds the OLED stays lit after a button press, 0..86400; 0 never turns it off, 300 is what this firmware did before"},

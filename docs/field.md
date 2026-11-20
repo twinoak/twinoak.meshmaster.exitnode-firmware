@@ -351,6 +351,40 @@ hand on it. On the seventh day, with a cable:
   there has no region map yet. `none` climbing is a repeater nobody can reach in
   either shape, and `discover` on its page is the next step.
 
+### A board that stopped hearing
+
+**The symptom.** The board sends and is heard, and almost nothing it asks for
+comes back. Every read through it ends *no reply (direct)*, hour after hour,
+from repeaters that are still in `mesh` and still hear it; the repeaters' own
+charts on meshmaster.dk show holes where that exit node's reads should be, and
+another exit node on the same mesh is fine. On `status`, `frames rx` has stopped
+rising while `tx` goes on.
+
+**What was seen.** From the evening of 19 November 2026 until it was restarted
+the next morning, the exit node at Risskov did exactly that: 10 of 12 hours
+without a reply for one repeater, 11 of 12 for another, and its first try at the
+repeater standing beside it failed every hour from 20:00 to 06:00 UTC. A
+repeater heard *it* at the same -96 dBm in the middle of that night as by day.
+The two nights before were clean; a restart cured it. Two repeaters had stood
+beside the board for days, heard at -41 and -53 dBm, and were handled and moved
+that afternoon.
+
+**What to do.** `reboot` ends it at once, and that is still the answer if it
+happens. Since task p1.18-66 the firmware should end it by itself: MeshCore's
+dispatcher resets the radio's receiver every `agc.reset.interval` seconds — four
+unless you set it — so a receiver that has gone deaf is put back within one
+interval and nothing of it reaches the server's charts. `status`' `radio` line
+says the interval it is running with, and `set agc.reset.interval <seconds>`
+changes it without a reboot (`0` turns the timer off;
+[`console.md`](console.md#the-radio-and-frames-lines-of-status)). `noise floor
+being measured` on the `frames` line is a floor that is being sampled again
+after one of those resets, and is a number again a moment later.
+
+**It is not proven.** Nothing the server keeps says what an exit node's receiver
+was doing that night, and the state cannot be brought on at will. The reset is
+what MeshCore has for it and what the repeaters run with; a week of quiet nights
+is the only evidence there will be.
+
 ## 9. Updating a board that is already in the field
 
 By flashing, and by nothing else

@@ -64,6 +64,7 @@ the same key: redacted on echo, `set` or `unset` in `get`.
 | `radio.sf` | 5..12 | 8 |
 | `radio.cr` | 5..8 | 8 |
 | `radio.tx` | dBm, -9..22 | 22 |
+| `agc.reset.interval` | seconds between resets of the radio's receiver, 0..3600; `0` never resets it. Whole seconds, taken by MeshCore's own dispatcher, in force from the moment it is set ([the `radio` line](#the-radio-and-frames-lines-of-status) below) | `4`, the seconds the standard profile gives the repeaters |
 | `log.level` | `error`, `warn`, `info`, `debug` | `info` |
 | `log.frames` | `on`, `off`: one log line per frame, both directions. A frame of a job in flight - the login, the request, a CLI line and its reply, a trace - is printed as hex, header, path and payload; a login that carries a password, and the `password` line of a rotation and the reply that echoes it, are printed with their encrypted bodies as one `*` per byte, which is the .NET agent's redaction of `CMD_SEND_LOGIN` and of a sensitive CLI line; an advert and the mesh's own chat are the header line only, never their bytes | `off` |
 | `display.timeout` | seconds, 0..86400: how long the OLED stays lit after a button press | `0`: it never turns off. `300` is the five minutes this firmware did before task p1.2-09 |
@@ -85,7 +86,8 @@ the same key: redacted on echo, `set` or `unset` in `get`.
 The radio's fallbacks are the Danish MeshCore channel, the one the field
 repeaters run; the ranges are MeshCore's own. A `set` takes effect at once:
 `wifi.*` drops the link and rejoins, `meshmaster.*` starts the server loop
-again (and forgets a 401), `radio.*` reprograms the SX1262, `log.*` changes
+again (and forgets a 401), `radio.*` reprograms the SX1262,
+`agc.reset.interval` is the next interval the dispatcher arms, `log.*` changes
 what is printed, `display.timeout` restarts the panel's timer, `mqtt.*` and
 `mqttN.*` make the observer read its settings again — a slot whose broker,
 sign-in or topics changed closes and connects again with the new ones, the other
@@ -121,6 +123,7 @@ clock and the server call is one line, so a bench walk is reading:
 [+1s] I meshmaster-agent 0.0.0-dev on MeshCore companion-v1.18.0
 [+1s] I board: heltec_v3, Power-on reset
 [+2s] I radio: 869.618 MHz, bw 62.5 kHz, sf 8, cr 8, tx 22 dBm
+[+2s] I radio: receiver reset every 4 s
 [+2s] I identity: 7f3a...
 [+2s] I clock: no time yet
 [+2s] I wifi: connecting to Twinoak (attempt 1)
@@ -145,6 +148,38 @@ see the `uplink` line below), `the root changed`, `the last call failed`,
 kept connection that turns out dead when a request goes over it is
 `uplink: the kept connection was dead under the request; reopened inside the
 call`, and the call is answered on the new connection: nothing the loop sees.
+
+### The `radio` and `frames` lines of `status`
+
+```
+radio     869.618 MHz, bw 62.5 kHz, sf 8, cr 8, tx 22 dBm; companion role, no repeat; receiver reset every 4 s
+frames    rx 32 (advert 23, grp-txt 6, txt 0, ack 0, path 0, trace 0, other 3), tx 3, noise floor -112 dBm, frame log off
+```
+
+**`receiver reset every 4 s`** is `agc.reset.interval`, and `receiver never
+reset` is what the line says at `0`. MeshCore's dispatcher puts the radio's
+receiver back on a timer of this length — a warm sleep of the SX1262, which
+resets its analog frontend — and the timer is the firmware's to turn on: it is
+off in MeshCore unless an application asks for it, and this firmware asked for
+it in task p1.18-66. Four seconds is what the standard profile gives the
+repeaters, and the number is yours to change; it is in force from the moment it
+is set, with no reboot.
+
+**Why.** From the evening of 19 November 2026 until it was restarted the next
+morning, the exit node at Risskov got no reply to most of what it asked, from
+repeaters that were there and heard it at the same -96 dBm all night. A receiver
+that stops hearing until its radio is restarted is what the reset is for, and
+with the timer on, a night like that one ends within one interval instead of
+lasting until somebody notices. If a board does go quiet, `reboot` still ends it
+at once — [`field.md` §8](field.md#8-the-week-at-the-window) is what to look at.
+
+**`noise floor being measured`** is the `frames` line where the number usually
+is. Every reset starts the floor's sampling again from nothing, and MeshCore
+answers `0` until it has converged — which is not a level, so it is printed as
+what it is and the observer's status message leaves its `noise_floor` out for
+that moment ([`observer.md`](observer.md)). On a board with the timer on it is
+what `status` says for a moment now and then; it should be a number again by the
+next `status`.
 
 ### The `stack` lines, at boot and in `status`
 

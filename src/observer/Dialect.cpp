@@ -7,6 +7,8 @@
 #include <agent/Iso8601.h>
 #include <agent/JsonWriter.h>
 
+#include "mesh/Receiver.h"
+
 namespace mm {
 namespace observer {
 
@@ -225,7 +227,11 @@ size_t formatStatus(const StatusFields& f, char* out, size_t cap) {
   // MQTTPayloadBuilder.cpp:218-224: the object exists when any one of its fields is known.
   const bool connHealth = f.mqttSlotsUp >= 0 || f.mqttSlotsTotal >= 0 || f.mqttOutageSecs >= 0 || f.heapLargest >= 0 ||
                           f.mqttConnectFailures > 0 || f.mqttSlotsBreaker > 0;
-  const bool anyStat = f.batteryMv >= 0 || f.uptimeSecs >= 0 || f.errors >= 0 || f.queueLen >= 0 || f.noiseFloor > -999 ||
+  // A noise floor of 0 is not a level: it is a receiver whose sampling an AGC reset started
+  // again, and it is left out as an unknown one is (task p1.18-66, src/mesh/Receiver.h) - here as
+  // well as below, so that a board with nothing else to say publishes no empty `stats` for it.
+  const bool anyStat = f.batteryMv >= 0 || f.uptimeSecs >= 0 || f.errors >= 0 || f.queueLen >= 0 ||
+                       noiseFloorIsReading(f.noiseFloor) ||
                        f.txAirSecs >= 0 || f.rxAirSecs >= 0 || f.recvErrors >= 0 || f.internalHeap >= 0 ||
                        f.packetsSent >= 0 || f.packetsReceived >= 0 || connHealth;
   if (anyStat) {
@@ -237,7 +243,7 @@ size_t formatStatus(const StatusFields& f, char* out, size_t cap) {
     statIfKnown(w, "packets_received", f.packetsReceived, 0);
     statIfKnown(w, "errors", f.errors, 0);
     statIfKnown(w, "queue_len", f.queueLen, 0);
-    statIfKnown(w, "noise_floor", f.noiseFloor, -998);
+    if (noiseFloorIsReading(f.noiseFloor)) statIfKnown(w, "noise_floor", f.noiseFloor, -998);
     statIfKnown(w, "tx_air_secs", f.txAirSecs, 0);
     statIfKnown(w, "rx_air_secs", f.rxAirSecs, 0);
     statIfKnown(w, "recv_errors", f.recvErrors, 0);

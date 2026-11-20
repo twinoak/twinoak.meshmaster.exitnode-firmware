@@ -41,7 +41,7 @@
 //   repeat            "on" | "off"; left out when null. Always "off" here                            MQTTPayloadBuilder.cpp:214-216; MQTTBridge.cpp:4104
 //   stats             left out entirely when nothing below is known                                  MQTTPayloadBuilder.cpp:218-254
 //     battery_mv, uptime_secs, packets_sent, packets_received, errors, queue_len (each when >= 0),
-//     noise_floor (when > -999), tx_air_secs, rx_air_secs, recv_errors, internal_heap, heap_largest,
+//     noise_floor (when it is a reading: not -999 and not 0 - src/mesh/Receiver.h), tx_air_secs, rx_air_secs, recv_errors, internal_heap, heap_largest,
 //     mqtt_slots_up, mqtt_slots_total (each when >= 0), mqtt_outage_secs (when >= 0),
 //     mqtt_connect_failures, mqtt_slots_breaker (each when > 0) - integers, in this order
 //
@@ -122,6 +122,8 @@ struct StatusFields {
   int packetsReceived = -1;
   int errors = -1;
   int queueLen = -1;
+  // -999 is *not measured*; 0 is what MeshCore leaves behind an AGC reset until the sampling has
+  // converged again, and is left out of the message too (task p1.18-66, src/mesh/Receiver.h).
   int noiseFloor = -999;
   int txAirSecs = -1;
   int rxAirSecs = -1;
