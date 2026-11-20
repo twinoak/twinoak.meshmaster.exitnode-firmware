@@ -317,6 +317,34 @@ TEST(Status, TheTimestampIsUtcWithSixDigitsAndAnExplicitOffset) {
   EXPECT_STREQ("1970-01-01T00:00:00.000000+00:00", out);
 }
 
+// A noise floor of 0 is not a level: MeshCore leaves it there after an AGC reset until the
+// sampling has converged again (task p1.18-66, src/mesh/Receiver.h). It is left out of `stats`
+// exactly as an unmeasured one is - and a board with nothing else to say publishes no `stats` at
+// all for it, rather than an empty object. A real floor is carried as it always was.
+TEST(Status, AFloorBeingMeasuredIsNoReading) {
+  StatusFields f;
+  f.noiseFloor = 0;
+  char out[kStatusMessageCap];
+  ASSERT_GT(formatStatus(f, out, sizeof out), 0u);
+  EXPECT_EQ(std::string::npos, std::string(out).find("noise_floor")) << out;
+  EXPECT_EQ(std::string::npos, std::string(out).find("stats")) << out;
+
+  f.noiseFloor = -109;
+  ASSERT_GT(formatStatus(f, out, sizeof out), 0u);
+  EXPECT_NE(std::string(out).find("\"stats\":{\"noise_floor\":-109}"), std::string::npos) << out;
+
+  // -999 is *nothing measured at all*, and was left out before this task as it is after it.
+  f.noiseFloor = -999;
+  ASSERT_GT(formatStatus(f, out, sizeof out), 0u);
+  EXPECT_EQ(std::string::npos, std::string(out).find("noise_floor")) << out;
+
+  // The one figure beside it goes out whatever the floor is: a 0 takes nothing else down.
+  f.noiseFloor = 0;
+  f.uptimeSecs = 41;
+  ASSERT_GT(formatStatus(f, out, sizeof out), 0u);
+  EXPECT_NE(std::string(out).find("\"stats\":{\"uptime_secs\":41}"), std::string::npos) << out;
+}
+
 TEST(Status, RepeatLeftOutWhenNullAndOfflineIsAString) {
   StatusFields f;
   f.status = "offline";

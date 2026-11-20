@@ -42,6 +42,7 @@
 #include <agent/ReplyCodec.h>
 
 #include "mesh/MeshCoreHeaders.h"
+#include "mesh/Receiver.h"
 #include "mesh/TransportScope.h"
 #include "observer/Neighbours.h"
 
@@ -205,6 +206,12 @@ class AgentMesh : public mesh::Mesh, public IMesh, public observer::NeighbourLin
   uint8_t floodPathHashSize() const override { return kFloodPathHashSize; }
 
  protected:
+  // The receiver is put back on MeshCore's own timer (task p1.18-66, src/mesh/Receiver.h). This
+  // is the whole of it: the dispatcher arms its timer from this answer and calls the radio's
+  // `resetAGC()` itself, so no line of this firmware ever resets a radio and there is no second
+  // timer of ours. 0 - MeshCore's own default - is never.
+  int getAGCResetInterval() const override { return agcResetIntervalMs(); }
+
   mesh::DispatcherAction onRecvPacket(mesh::Packet* pkt) override;
   bool allowPacketForward(const mesh::Packet*) override { return false; }
   void onAdvertRecv(mesh::Packet* pkt, const mesh::Identity& id, uint32_t timestamp, const uint8_t* app_data,

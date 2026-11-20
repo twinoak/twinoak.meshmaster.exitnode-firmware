@@ -313,7 +313,7 @@ from nothing:
 firmware  meshmaster-agent 0.0.0-dev on MeshCore companion-v1.18.0 (81dbae59)
 board     heltec_v3, Power-on reset, up 0d 00:00:41
 identity  7f3a9c02e1b44d9a0f6c2b7d8e9a1c3f5d7b9e0a2c4e6f8a0b1c2d3e4f5a6b7c
-radio     869.618 MHz, bw 62.5 kHz, sf 8, cr 8, tx 22 dBm; companion role, no repeat
+radio     869.618 MHz, bw 62.5 kHz, sf 8, cr 8, tx 22 dBm; companion role, no repeat; receiver reset every 4 s
 frames    rx 3 (advert 2, grp-txt 1, txt 0, ack 0, path 0, trace 0, other 0), tx 0, noise floor -112 dBm, frame log off
 wifi      off, wifi.ssid is unset
 time      no time (sntp not started, no wifi)
@@ -342,6 +342,7 @@ radio.bw unset (62.5)
 radio.sf unset (8)
 radio.cr unset (8)
 radio.tx unset (22)
+agc.reset.interval unset (4)
 log.level unset (info)
 log.frames unset (off)
 display.timeout unset (0)
@@ -373,7 +374,7 @@ error: meshmaster.url: the scheme must be https://
 firmware  meshmaster-agent 0.0.0-dev on MeshCore companion-v1.18.0 (81dbae59)
 board     heltec_v3, Power-on reset, up 0d 00:03:10
 identity  7f3a9c02e1b44d9a0f6c2b7d8e9a1c3f5d7b9e0a2c4e6f8a0b1c2d3e4f5a6b7c
-radio     869.618 MHz, bw 62.5 kHz, sf 8, cr 8, tx 22 dBm; companion role, no repeat
+radio     869.618 MHz, bw 62.5 kHz, sf 8, cr 8, tx 22 dBm; companion role, no repeat; receiver reset every 4 s
 frames    rx 32 (advert 23, grp-txt 6, txt 0, ack 0, path 0, trace 0, other 3), tx 3, noise floor -112 dBm, frame log off
 wifi      connected to Twinoak, 192.168.1.20, rssi -61 dBm (1 connects, 0 drops)
 time      2026-09-28T12:03:14Z (sntp)

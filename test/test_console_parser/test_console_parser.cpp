@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "console/Parser.h"
+#include "mesh/Receiver.h"
 #include "observer/Board.h"
 #include "settings/Keys.h"
 
@@ -43,13 +44,15 @@ std::string setReply(const mm::KeyDef& key) {
 
 // ---- the keys -------------------------------------------------------------------------------
 
-TEST(Keys, TheTableHasTheThirtyTwoKeysTheTasksAskFor) {
-  // The twelve of phase 1, the two of the flood scope (task p1.8-32), the sixteen of the
-  // observer (task p1.7-26) and the two of its neighbour report (task p1.8-33), in `get`'s order.
+TEST(Keys, TheTableHasTheThirtyThreeKeysTheTasksAskFor) {
+  // The twelve of phase 1, the receiver's timer (task p1.18-66), the two of the flood scope
+  // (task p1.8-32), the sixteen of the observer (task p1.7-26) and the two of its neighbour
+  // report (task p1.8-33), in `get`'s order.
   const char* expected[] = {"wifi.ssid",      "wifi.pass",      "meshmaster.url",  "meshmaster.token", "radio.freq",
-                            "radio.bw",       "radio.sf",       "radio.cr",        "radio.tx",         "log.level",
-                            "log.frames",     "display.timeout", "flood.scope",    "flood.unscoped",   "mqtt.origin",
-                            "mqtt.iata",      "mqtt.owner",     "mqtt.email",      "mqtt.neighbors",   "mqtt.neighbors.interval",
+                            "radio.bw",       "radio.sf",       "radio.cr",        "radio.tx",         "agc.reset.interval",
+                            "log.level",      "log.frames",     "display.timeout", "flood.scope",      "flood.unscoped",
+                            "mqtt.origin",    "mqtt.iata",      "mqtt.owner",      "mqtt.email",       "mqtt.neighbors",
+                            "mqtt.neighbors.interval",
                             "mqtt1.preset",   "mqtt1.server",   "mqtt1.audience",  "mqtt1.topic",      "mqtt1.username",
                             "mqtt1.password", "mqtt2.preset",   "mqtt2.server",    "mqtt2.audience",   "mqtt2.topic",
                             "mqtt2.username", "mqtt2.password"};
@@ -129,6 +132,7 @@ TEST(Keys, EveryKeyAcceptsAValidValueAndSetIsAcceptedForIt) {
       {"radio.sf", "8"},
       {"radio.cr", "8"},
       {"radio.tx", "22"},
+      {"agc.reset.interval", "4"},
       {"log.level", "debug"},
       {"log.frames", "on"},
       {"display.timeout", "300"},
@@ -563,6 +567,34 @@ TEST(Set, ASlotTheBoardHasNoMemoryForTakesNoPresetButNone) {
   EXPECT_TRUE(parseLine("set mqtt2.preset custom").ok);
   mm::observer::useBoardProfile(nullptr);
   EXPECT_EQ(2, mm::observer::boardProfile().slots) << "the host builds with the V4's profile";
+}
+
+// `agc.reset.interval`: how often MeshCore's dispatcher puts the radio's receiver back
+// (task p1.18-66, src/mesh/Receiver.h). Whole seconds, 0 never, 4 while the key is unset - and
+// the fallback in the table is the number src/mesh/Receiver.h names, so the two cannot drift.
+TEST(Set, TheReceiversTimerIsWholeSecondsFromZeroToAnHour) {
+  const mm::KeyDef& key = *mm::findKey("agc.reset.interval");
+  EXPECT_STREQ("4", key.fallback) << "four seconds, as the standard profile gives the repeaters";
+  EXPECT_EQ(std::to_string(mm::kAgcResetDefaultSeconds), std::string(key.fallback))
+      << "the table's fallback and src/mesh/Receiver.h's default are one number";
+  EXPECT_EQ(static_cast<int>(key.min), mm::kAgcResetMinSeconds);
+  EXPECT_EQ(static_cast<int>(key.max), mm::kAgcResetMaxSeconds);
+  EXPECT_EQ("agc.reset.interval unset (4)", describe(key, nullptr));
+  EXPECT_EQ("agc.reset.interval 0", describe(key, "0"));
+
+  for (const char* good : {"0", "1", "4", "3600"}) {
+    const std::string line = std::string("set agc.reset.interval ") + good;
+    const ParseResult r = parseLine(line.c_str());
+    EXPECT_TRUE(r.ok) << line << ": " << r.error;
+    EXPECT_STREQ("agc.reset.interval", r.command.key->name) << line;
+  }
+  for (const char* bad : {"-1", "3601", "2.5", "4s", "", "four"}) {
+    const std::string line = std::string("set agc.reset.interval ") + bad;
+    EXPECT_FALSE(parseLine(line.c_str()).ok) << line << " was accepted";
+  }
+  EXPECT_STREQ("agc.reset.interval: out of range, 0..3600", parseLine("set agc.reset.interval -1").error);
+  EXPECT_STREQ("agc.reset.interval: out of range, 0..3600", parseLine("set agc.reset.interval 3601").error);
+  EXPECT_STREQ("agc.reset.interval: not a whole number", parseLine("set agc.reset.interval 2.5").error);
 }
 
 // `set flood.scope` takes a region name the firmware's own region names allow, `*`, or nothing

@@ -9,6 +9,10 @@
 // are typed once, kept in NVS, and printed by no command - `get` says "set" or "unset" for them
 // and never the value (README.md, "Rails that hold in every task").
 //
+// Since task p1.18-66 it holds `agc.reset.interval`: how often the dispatcher puts the radio's
+// receiver back, in whole seconds, 0 being never. The name is the repeaters' own for the same
+// setting, and what it means is src/mesh/Receiver.h.
+//
 // Since task p1.8-32 it holds the two flood-scope keys, `flood.scope` and `flood.unscoped`
 // (meshmaster.dk's D-47): what region every flood of this board carries, and whether a flooded
 // transaction's second try drops it. The names are this firmware's own - the .NET agent's two
@@ -63,7 +67,7 @@ struct KeyDef {
 // The longest value any key accepts, and the buffer size a caller needs for one.
 constexpr size_t kMaxValueLen = 128;
 
-constexpr int kKeyCount = 32;
+constexpr int kKeyCount = 33;
 extern const KeyDef kKeys[kKeyCount];
 
 // The key called `name`, or nullptr. Exact, case-sensitive match - and one alias: `wifi.pwd`, the
