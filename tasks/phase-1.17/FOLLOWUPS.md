@@ -41,13 +41,15 @@ the rest of `tools/check-frames.py`, the words. Nothing found. It has not run on
   `Observer::reportNeighbours` (1 888) and `observer::makeToken` (1 296). Both were in 0.7.2.
 - [ ] **[none] `begin()` of the updater and of the ask now put the per-boot state back.** It is
   called once on a board; the tests call it again on one object.
-- [ ] **[next, small] The loop task's `stack` line is in `get mqtt.status`, and the words say
+- [x] **[next, small] The loop task's `stack` line is in `get mqtt.status`, and the words say
   `status`.** Found on 20 November, when Thomas typed `status` on Aarhus C (0.7.4) and it had no
   such line. The task was wrong about where the observer's `stack` lines are: it said
   `printStatus`, and they are in `printMqttStatus` (`main.cpp` ~L533–577). The session put the
   new line beside them (~L567), as the task also said, and wrote *in `status`* in
   `docs/console.md` (~L149) and `docs/field.md`. Either `status` prints the line too, or the
   words name the command it is in. The boot's line is right.
+  *Done in pile 1.18, task 67: `status` prints it too, and the words name both commands. In
+  the release after v0.7.5.*
 - [ ] **[none] The first reading (Aarhus C, `heltec_v3`, 0.7.4+a3bc485, 20 November):**
   `stack     loop task: 16384 bytes, the least ever free 10112`, some minutes after a power-on,
   both observer slots connected and five calls to the server answered. So the loop task had
@@ -67,7 +69,7 @@ the rest of `tools/check-frames.py`, the words. Nothing found. It has not run on
 
 ## A night Risskov did not hear (19 to 20 November)
 
-- [ ] **[next, Thomas to decide] The exit node never resets its radio's receiver.** MeshCore's
+- [x] **[next, Thomas to decide] The exit node never resets its radio's receiver.** MeshCore's
   dispatcher resets the AGC every `getAGCResetInterval()` and that is 0, *disabled by default*
   (`Dispatcher.h` ~L172, `Dispatcher.cpp` ~L130–135 at this firmware's pin); upstream's
   companion and repeater turn it on from a setting (`examples/companion_radio/MyMesh.h` ~L133),
@@ -88,3 +90,5 @@ the rest of `tools/check-frames.py`, the words. Nothing found. It has not run on
   is not shown; nothing the server keeps says what the board's receiver did. A reset on a
   timer, as upstream has it, costs a moment of deafness each time and would have ended this
   within one interval.
+  *Done in pile 1.18, task 66: reset every `agc.reset.interval` seconds, 4 unless set; in
+  v0.7.5. Whether it ends such a night is for the nights to show.*
