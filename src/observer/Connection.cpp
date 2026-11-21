@@ -57,6 +57,7 @@ const char* slotStateName(SlotState s) {
     case SlotState::WaitingForLink: return "waiting-for-wifi";
     case SlotState::WaitingForClock: return "waiting-for-clock";
     case SlotState::WaitingForHeap: return "waiting-for-heap";
+    case SlotState::StandingDown: return "standing-down";
     case SlotState::Connecting: return "connecting";
     case SlotState::Connected: return "connected";
     case SlotState::BackingOff: return "backing-off";
@@ -188,7 +189,9 @@ void Connections::configure(const ObserverSettings& settings, bool enabled, cons
     s.lastError[0] = '\0';
     s.queueSize = 0;
     if (r.active) {
-      enter(s, SlotState::WaitingForLink);
+      // A `set mqtt*` while a release is being fetched does not open what the fetch closed: the
+      // new settings take effect when the fetch has ended, like everything else of the slots.
+      enter(s, fetching_ ? SlotState::StandingDown : SlotState::WaitingForLink);
       report(LogLevel::Info, "observer: slot %d %s: %s, %s, topics %s", i + 1, r.name, r.serverUrl, authName(r.auth),
              s.topicPackets);
     } else {
@@ -201,11 +204,13 @@ void Connections::configure(const ObserverSettings& settings, bool enabled, cons
 void Connections::setLinkUp(bool up) { linkUp_ = up; }
 
 void Connections::stopAll() {
+  fetching_ = false;
   for (int i = 0; i < kSlots; i++) {
     Slot& s = slots_[i];
     if (s.state == SlotState::Connecting || s.state == SlotState::Connected) clients_[i]->close();
     s.queueSize = 0;
     s.configHash = 0;
+    s.holdUntil = 0;
     enter(s, SlotState::Off);
   }
 }
@@ -329,6 +334,69 @@ void Connections::onUplinkCall(uint32_t freeBefore, uint32_t lowest, uint32_t fr
   std::snprintf(logWhy, sizeof logWhy, "the MeshMaster call dipped to %lu free, under the floor of %lu",
                 static_cast<unsigned long>(lowest), static_cast<unsigned long>(kHeapFloorBytes));
   yieldHighest(why, logWhy);
+}
+
+// ---- standing down for a fetch (task p1.19-68) -----------------------------------------------
+
+void Connections::standDownForFetch() {
+  if (fetching_) return;
+  fetching_ = true;
+  const uint32_t now = env_.millis != nullptr ? env_.millis() : 0;
+  int closed = 0;
+  for (int i = 0; i < kSlots; i++) {
+    Slot& s = slots_[i];
+    if (s.state == SlotState::Off) continue;  // a preset of `none` stays off through all of it
+    if (s.state == SlotState::Connected || s.state == SlotState::Connecting) {
+      clients_[i]->close();
+      closed++;
+    }
+    // No hold and no *gave way*: the slot is standing down, not losing. What was left of a
+    // backoff is kept in nextAttemptAt and honoured when the slots come back.
+    s.holdUntil = 0;
+    s.lastHeapCheckAt = now;
+    copyText(s.lastError, sizeof s.lastError, "standing down while a release is fetched");
+    enter(s, SlotState::StandingDown);
+  }
+  report(LogLevel::Warn, "observer: a release is being fetched: %d slot(s) closed, none opens until it has ended",
+         closed);
+}
+
+void Connections::standUpAfterFetch(bool aSwitchFollows) {
+  if (!fetching_) return;
+  fetching_ = false;
+  const uint32_t now = env_.millis != nullptr ? env_.millis() : 0;
+  for (int i = 0; i < kSlots; i++) {
+    Slot& s = slots_[i];
+    if (s.state != SlotState::StandingDown) continue;
+    if (aSwitchFollows) {
+      s.holdUntil = now + kFetchedStandDownMs;
+      copyText(s.lastError, sizeof s.lastError, "standing down: the fetched image is switched to next");
+      continue;
+    }
+    s.holdUntil = 0;
+    s.lastHeapCheckAt = 0;
+    s.lastError[0] = '\0';
+    // Their ordinary rule: a slot that had a backoff still to wait out goes back to waiting it
+    // out, and every other goes round the gate from the top in this same pass of loop().
+    if (s.backoffMs != 0 && !reached(now, s.nextAttemptAt)) {
+      enter(s, SlotState::BackingOff);
+    } else {
+      enter(s, SlotState::WaitingForLink);
+    }
+  }
+  if (aSwitchFollows) {
+    report(LogLevel::Warn, "observer: the release was fetched: the slots stay down for the switch (%lu min at most)",
+           static_cast<unsigned long>(kFetchedStandDownMs / 60000));
+  } else {
+    report(LogLevel::Warn, "observer: the fetch has ended: the slots open again by their ordinary rule");
+  }
+}
+
+bool Connections::allSlotsDown() const {
+  for (const Slot& s : slots_) {
+    if (s.state == SlotState::Connected || s.state == SlotState::Connecting) return false;
+  }
+  return true;
 }
 
 // ---- the token -------------------------------------------------------------------------------
@@ -546,6 +614,19 @@ void Connections::loop() {
   for (int i = 0; i < kSlots; i++) {
     Slot& s = slots_[i];
     if (s.state == SlotState::Off) continue;
+    // Standing down for a fetch: nothing at all, not even WiFi going away and coming back, moves
+    // a slot out of it. standUpAfterFetch() is the one way out, and the hold a *fetched* ending
+    // leaves behind is the other.
+    if (s.state == SlotState::StandingDown) {
+      if (!fetching_ && s.holdUntil != 0 && reached(now, s.holdUntil)) {
+        s.holdUntil = 0;
+        s.lastError[0] = '\0';
+        enter(s, SlotState::WaitingForLink);
+        report(LogLevel::Info, "observer: slot %d %s: no switch came of the fetch; opening again", i + 1, s.cfg.name);
+        tryToOpen(i);
+      }
+      continue;
+    }
 
     if (!linkUp_) {
       if (s.state == SlotState::Connecting || s.state == SlotState::Connected) {
@@ -565,6 +646,8 @@ void Connections::loop() {
       case SlotState::WaitingForClock:
         if (env_.epoch() != 0) tryToOpen(i);
         break;
+      case SlotState::StandingDown:
+        break;  // handled above, before the WiFi check
       case SlotState::WaitingForHeap:
         if (s.holdUntil != 0 && !reached(now, s.holdUntil)) break;
         s.holdUntil = 0;
@@ -733,6 +816,8 @@ SlotView Connections::view(int slot) const {
   v.stats = s.stats;
   if (s.state == SlotState::BackingOff) {
     v.waitMs = reached(now, s.nextAttemptAt) ? 0 : s.nextAttemptAt - now;
+  } else if (s.state == SlotState::StandingDown) {
+    if (s.holdUntil != 0 && !reached(now, s.holdUntil)) v.waitMs = s.holdUntil - now;
   } else if (s.state == SlotState::WaitingForHeap) {
     if (s.holdUntil != 0 && !reached(now, s.holdUntil)) {
       v.waitMs = s.holdUntil - now;
@@ -777,6 +862,14 @@ void Connections::describe(int slot, char* out, size_t cap) const {
     case SlotState::WaitingForHeap:
       std::snprintf(state, sizeof state, "waiting for heap since %s, next look in %lu s", since,
                     static_cast<unsigned long>((v.waitMs + 999) / 1000));
+      break;
+    case SlotState::StandingDown:
+      if (v.waitMs != 0) {
+        std::snprintf(state, sizeof state, "standing down since %s for a release being fetched, up again in %lu s",
+                      since, static_cast<unsigned long>((v.waitMs + 999) / 1000));
+      } else {
+        std::snprintf(state, sizeof state, "standing down since %s for a release being fetched", since);
+      }
       break;
     case SlotState::WaitingForClock:
       std::snprintf(state, sizeof state, "waiting for the clock since %s", since);

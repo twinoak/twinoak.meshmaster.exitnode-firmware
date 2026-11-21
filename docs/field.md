@@ -559,8 +559,9 @@ other     holds 0.8.0+1a2b3c4, 1446640 bytes, sha 4f2a91c0b7d2e5a8..., fetched f
   release was had and refused: 1 the signature, 2 the manifest, 3 no image for
   this board, 4 the size or the hash of what was written, 5 what the image says
   inside itself. `fetch` — the release could not be had: no link, a 404, a
-  redirect, or three failures. `slot` — this board has no second application
-  slot; `update slot` adds one.
+  redirect, three requests in a row that brought nothing, or a file that cost
+  all the requests one file gets (*A range that stopped short* below). `slot` —
+  this board has no second application slot; `update slot` adds one.
 - **Anything but `fetched` leaves the slot unbootable**, by erasing its first
   sector. There is never half an image waiting to be switched to.
 - **A restart does not continue a fetch**; it begins again. The record of a
@@ -568,6 +569,66 @@ other     holds 0.8.0+1a2b3c4, 1446640 bytes, sha 4f2a91c0b7d2e5a8..., fetched f
 - **Nothing here erases or writes anything the board needs.** The settings, the
   identity, the token, the WiFi and the running application are all outside the
   slot being written.
+
+### The observers stand down for a fetch
+
+Since the release of task p1.19-68 **every broker slot is closed before a fetch
+asks for its first byte, and none opens again until the fetch has ended.** It
+happens whether meshmaster.dk's *Update* started the fetch or you typed
+`update fetch` at the console, and `get mqtt.status` says so while it runs:
+
+```
+> get mqtt.status
+observer  AAR, 2 slot(s) configured, 0 connected, origin MeshMaster-A1B2
+slot 1 meshview (wss://mqtt.meshview.dk:443/mqtt): standing down since 12:03:11 for a release being fetched; 413 published, 0 dropped, 0 queued; 1 connects, 0 refusal(s), 0 error(s), 0 renewal(s), gave way 0 time(s); last error: standing down while a release is fetched
+slot 2 meshmapper (wss://mqtt.meshmapper.net:443/mqtt): standing down since 12:03:11 for a release being fetched; 409 published, 4 dropped, 0 queued; 1 connects, 0 refusal(s), 0 error(s), 0 renewal(s), gave way 0 time(s); last error: standing down while a release is fetched
+```
+
+`gave way` does **not** move: nothing went wrong, and the slots stood down for
+the update rather than losing to it. When the fetch is refused they open again at
+once, with no ten minutes to wait out; when it is fetched a switch follows and
+the board restarts, so they stay down over it. A slot whose preset is `none`
+stays off through all of it.
+
+Why: a release is 1.5 MB over the same TLS a slot uses, and each open slot holds
+a 16 KB buffer for every record in flight. On 20 November Aarhus C, the one board
+with both slots connected, could not finish a single range of 0.7.5; Risskov,
+with one slot, took the same release in a minute.
+
+### A range that stopped short, and what its line says
+
+A fetch of twenty-three ranges can lose one and carry on. **A range that stopped
+short and brought bytes that were kept is asked on from where it stopped and
+costs the fetch nothing**; only a request that brought *nothing at all* is a
+failure, and three of those **in a row** end the fetch. The line says which, and
+since task p1.19-68 it says why:
+
+```
+[12:03:19] I fetch: range 131072-196607 stopped at 48208 of 65536 bytes: client -5, tls -0x7f00, block 47092, no memory; asking on from 179280 (179280 of 1515024 held)
+[12:03:21] E update: fetch: range 196608-262143 brought nothing: client -5, tls -0x7f00, block 47092, no memory (3 failure(s), which is all this fetch gets)
+```
+
+The same sentence is the last line of the journal on the board's *Firmware* tab
+when meshmaster.dk asked for the update, so this is readable without a cable.
+Four words, and what each one means:
+
+| word | what it is | what to do |
+|---|---|---|
+| `client N` | what the HTTP client itself returned where the body stopped: the bytes it moved, or one of its own negative codes — `-5` the connection was lost, `-11` the read timed out, `-9` the slot refused the bytes | with `-5` or `-11`, the link or the memory below. Anything else is worth sending on |
+| `tls -0xNNNN` | mbedtls's own error for that moment, in the notation its header uses. `-0x7f00` is *could not allocate*, which is the memory case; `-0x7280` and its neighbours are the link's | `-0x7f00` is the memory row below |
+| `block N` | the largest single allocation the heap could still make. A TLS record needs **17 408** bytes of it | under about 20 000 the board had no room for the next record: the memory row below |
+| `no memory` | the firmware's own reading of the two above, and it is counted with the uplink's memory failures (`get mqtt.status`'s `uplink` line) | the memory row below |
+
+And what to do:
+
+| the line says | what it is | what to do |
+|---|---|---|
+| `no memory`, or a `block` under about 20 000 | the board could not take a TLS record's buffer while the fetch ran | the observers already stand down for a fetch, so something else is holding the heap. `get mqtt.status`'s `memory` line and `status`'s `heap` line, both **after** the fetch, are the figures to send on. As a way through now: `set mqtt.preset none` and `set mqtt2.preset none`, `reboot`, fetch, then set them back — or the release's plain `.bin` over USB |
+| `client -11` with a healthy `block` | the read timed out: the WiFi link, not the board | §6, and try again when the window is better. A fetch that is asked again begins from zero |
+| `brought nothing` three times in a row | three requests in a row brought no byte at all | the two rows above, by what they say. A range that brought *some* bytes never ends a fetch |
+| `cost N request(s) for M range(s), which is all one file gets` | every range brought a handful of bytes and the file was getting nowhere — twice the file's ranges plus three is the bound | the link: it is up but delivering almost nothing. §6 |
+| `no reply` | no status line came back at all | §6: the board cannot reach the server |
+| `http 404` | there is no such release, or this board may not see it | the release on meshmaster.dk, not the board |
 
 ### Switching to it, and the ten minutes that decide
 

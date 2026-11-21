@@ -557,7 +557,11 @@ void Asked::watchTheFetch() {
       end(AskOutcome::Refused, AskRefusal::Check, r.check, "check %u: %.80s", static_cast<unsigned>(r.check), r.why);
       return;
     case Ending::Fetch:
-      end(AskOutcome::Refused, AskRefusal::Fetch, 0, "%.90s", r.why);
+      // All of it that a journal note holds (task p1.19-68): since 68 the fetch's refusal says
+      // why a range stopped - what the client returned, the TLS error, the largest free block -
+      // and that reason stands at the front of the sentence, so what a note cannot hold is the
+      // count of failures at its end and never the reason.
+      end(AskOutcome::Refused, AskRefusal::Fetch, 0, "%.*s", static_cast<int>(kMaxNoteLen), r.why);
       return;
     case Ending::Slot:
       end(AskOutcome::Stuck, AskRefusal::None, 0, "%.90s", r.why);

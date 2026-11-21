@@ -112,6 +112,15 @@ class AgentClient : public IUplink, private uplink::Transport {
     char etag[update::kMaxEtagLen + 1] = {0};  // the strong ETag: the quoted SHA-256 of the content
     char contentRange[update::kMaxContentRangeLen + 1] = {0};  // `bytes a-b/length`, the value only
     char error[128] = {0};
+    // Why a body stopped (task p1.19-68): what HTTPClient::writeToStream() returned, the TLS
+    // layer's error for the same moment, this side's reading of the two, and the largest free
+    // block then. update/Fetch.h's HttpAnswer carries them on into the fetch's own line, and
+    // nothing here decides anything from them - a 206 whose body stopped short is still a 206.
+    int32_t bodyReturn = 0;
+    bool bodyReturnKnown = false;
+    int tlsError = 0;
+    bool outOfMemory = false;
+    uint32_t largestFreeBlock = 0;
   };
 
   // `endpoint` is a path (`/agent/v1/firmware/7/manifest.json`); `rangeHeader` is the value of a
@@ -172,6 +181,12 @@ class AgentClient : public IUplink, private uplink::Transport {
     const char* ifRange = nullptr;
     char etag[update::kMaxEtagLen + 1] = {0};
     char contentRange[update::kMaxContentRangeLen + 1] = {0};
+    // What the body did, for a range that stopped short (task p1.19-68).
+    int32_t bodyReturn = 0;
+    bool bodyReturnKnown = false;
+    int bodyTlsError = 0;
+    bool bodyOutOfMemory = false;
+    uint32_t largestFreeBlock = 0;
   };
 
   // What a firmware route adds to a call, in and out (task p1.15-59). nullptr for every other
@@ -183,6 +198,11 @@ class AgentClient : public IUplink, private uplink::Transport {
     const char* ifRange = nullptr;
     char etag[update::kMaxEtagLen + 1] = {0};
     char contentRange[update::kMaxContentRangeLen + 1] = {0};
+    int32_t bodyReturn = 0;
+    bool bodyReturnKnown = false;
+    int bodyTlsError = 0;
+    bool bodyOutOfMemory = false;
+    uint32_t largestFreeBlock = 0;
   };
 
   // One request, under KeepAlive's rules. `method` is "GET" or "POST"; `requestBody` is nullptr

@@ -69,6 +69,7 @@
 #include "settings/Store.h"
 #include "update/Ask.h"
 #include "update/Fetch.h"
+#include "update/FetchObservers.h"
 #include "update/FetchSeams.h"
 #include "update/ImageDescriptor.h"
 #include "update/SlotRecord.h"
@@ -111,6 +112,9 @@ mm::MqttClient mqttSlot2;
 mm::ServerRoutes releaseRoutes(server);
 mm::SettingsRecord slotRecordStore(settings);
 mm::update::Fetcher fetcher;
+// The observer's slots, as the fetch sees them (task p1.19-68): every one of them is closed
+// before the first request of a fetch and opens again when it has ended.
+mm::update::ConnectionObservers fetchObservers(observer.connections());
 bool fetcherReady = false;
 // Switching to a judged image, and the ten minutes it then has to prove itself (task p1.15-60).
 // The machine is portable; its four seams are the three small classes below and the board's
@@ -1266,6 +1270,9 @@ void setup() {
   // through, the other application slot over the ESP-IDF's OTA writer, and the record in NVS.
   fetcher.begin(releaseRoutes, mm::otherApplicationSlot(), slotRecordStore, mm::update::trustedKeys(),
                 mm::update::trustedKeyCount(), mm::boardName(), &fetchLog);
+  // And the fourth seam (task p1.19-68): an exit node stops all its observers before it tries to
+  // update, so no broker slot is connected while a release is fetched.
+  fetcher.setObservers(&fetchObservers);
   fetcherReady = true;
   {
     char held[200];
