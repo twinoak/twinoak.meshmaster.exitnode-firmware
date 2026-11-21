@@ -101,6 +101,9 @@ class Observer : public RxTap, public observer::StatusSource, public IHeartbeatO
   const observer::ObserverSettings& settings() const { return view_; }
   observer::Signer& signer() { return signer_; }
   const observer::Connections& connections() const { return link_; }
+  // The slots a fetch stands down (task p1.19-68): main.cpp wraps these in a
+  // update::ConnectionObservers and hands it to the fetcher.
+  observer::Connections& connections() { return link_; }
 
   // RxTap: a received frame, after MeshCore accepted it. Formats it when enabled; counts always.
   void onRxFrame(const RxFrame& frame) override;

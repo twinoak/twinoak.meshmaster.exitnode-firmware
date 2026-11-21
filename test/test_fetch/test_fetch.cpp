@@ -5,7 +5,9 @@
 //   ScriptedServer   meshmaster.dk's four routes of `docs/dev/unit-protocol.md` §4 over a map of
 //                    files, with a log of every request it was asked - the path, the Range, the
 //                    If-Range and the Authorization header - and a per-request *twist*: a status
-//                    of its own, no reply at all, a body that stops halfway, a range it ignores.
+//                    of its own, no reply at all, a body that stops halfway (with what the client
+//                    returned, the TLS error and the largest free block of that moment, task
+//                    p1.19-68), a range it ignores.
 //                    **It answers 401 to a request with no Authorization header**, which is what
 //                    makes every green test below a test that the token went with the request.
 //   FakeSlot         a slot that keeps what is written to it, counts its erases and restarts, and
@@ -34,10 +36,17 @@
 #include <agent/TextOut.h>
 #include <ed_25519.h>
 
+#include "observer/Board.h"
+#include "observer/Config.h"
+#include "observer/Connection.h"
+#include "observer/Dialect.h"
+#include "observer/Token.h"
 #include "update/Fetch.h"
+#include "update/FetchObservers.h"
 #include "update/Release.h"
 #include "update/SlotRecord.h"
 #include "update/Trust.h"
+#include "update/UpdateRecord.h"  // kMaxNoteLen: what an ask's journal note holds
 
 #ifndef RELEASE_FIXTURES_DIR
 #error "RELEASE_FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
@@ -162,9 +171,17 @@ class ScriptedServer final : public mm::update::ReleaseHttp {
     int status = 0;                 // answer with this status and no body
     bool noReply = false;           // no status line at all: a connection that was refused
     uint32_t deliver = 0;           // deliver only this many bytes of the range, then stop
+    bool deliverNothing = false;    // the body stops before its first byte: a request that brought nothing
     bool ignoreRange = false;       // answer 200 with the whole file, as a multi-range is answered
     std::string contentRange;       // a Content-Range of its own
     std::string etag;               // an ETag of its own
+    // What the transport read of a body that stopped (task p1.19-68): what the client returned,
+    // the TLS layer's error, the largest free block then, and the transport's own reading of it.
+    bool bodyReturnKnown = false;
+    int32_t bodyReturn = 0;
+    int tlsError = 0;
+    bool outOfMemory = false;
+    uint32_t largestFreeBlock = 0;
   };
 
   std::map<std::string, std::vector<uint8_t>> files;  // by full path
@@ -241,7 +258,17 @@ class ScriptedServer final : public mm::update::ReleaseHttp {
       out.status = 200;
     }
 
+    out.bodyReturnKnown = t.bodyReturnKnown;
+    out.bodyReturn = t.bodyReturn;
+    out.tlsError = t.tlsError;
+    out.outOfMemory = t.outOfMemory;
+    out.largestFreeBlock = t.largestFreeBlock;
+
     if (!body.begin(out)) return true;
+    if (t.deliverNothing) {
+      out.bodyLen = 0;
+      return true;
+    }
     uint32_t deliver = t.deliver != 0 && t.deliver < len ? t.deliver : len;
     // In pieces, as a socket hands them over, so that a sink which stops mid-answer is exercised.
     uint32_t at = 0;
@@ -369,7 +396,8 @@ struct Bench {
   std::string otaPath;
   std::vector<uint8_t> ota;
 
-  explicit Bench(const char* board = "heltec_v3", uint32_t rangeBytes = 1024, uint32_t tries = 3) {
+  explicit Bench(const char* board = "heltec_v3", uint32_t rangeBytes = 1024, uint32_t tries = 3,
+                 mm::update::Observers* observers = nullptr) {
     const std::vector<uint8_t> manifest = release("manifest.json");
     server.files[std::string(kBase) + "/manifest.json"] = manifest;
     server.files[std::string(kBase) + "/manifest.json.sig"] = release("manifest.json.sig");
@@ -380,6 +408,7 @@ struct Bench {
 
     fetcher.begin(server, slot, record, mm::update::trustedKeys(), mm::update::trustedKeyCount(), board,
                   &out);
+    if (observers != nullptr) fetcher.setObservers(observers);
     Fetcher::Limits limits;
     limits.rangeBytes = rangeBytes;
     limits.tries = tries;
@@ -553,7 +582,10 @@ TEST(Ranges, AConnectionThatDropsAtHalfTheFileResumesFromTheSlotsOwnCountWithIfR
 
   const FetchResult& r = b.run();
   ASSERT_EQ(Ending::Fetched, r.ending) << static_cast<int>(r.check) << ": " << r.why;
-  EXPECT_EQ(1u, r.failures) << "the range that stopped halfway, counted once";
+  // Task p1.19-68, deliverable 5: it brought 2 048 bytes that were kept, so it is a short range
+  // and not a failure, and it used up no try.
+  EXPECT_EQ(0u, r.failures);
+  EXPECT_EQ(1u, r.shortRanges);
   EXPECT_EQ(2u, r.fileRequests);
   EXPECT_EQ(2048u, r.resumedFrom);
   EXPECT_EQ(b.ota, b.slot.bytes) << "and the result is the file";
@@ -579,7 +611,7 @@ TEST(Ranges, ATwoHundredToARangeWritesTheSlotAgainFromZero) {
   EXPECT_EQ(b.ota, b.slot.bytes);
 }
 
-TEST(Ranges, ATwoHundredThatStopsHalfwayIsAFailureAndTheSlotStartsAgain) {
+TEST(Ranges, ATwoHundredThatStopsHalfwayStartsTheSlotAgainAndIsCarriedOn) {
   Bench b("heltec_v3", 4096);
   ScriptedServer::Twist shortWhole;
   shortWhole.ignoreRange = true;
@@ -588,9 +620,27 @@ TEST(Ranges, ATwoHundredThatStopsHalfwayIsAFailureAndTheSlotStartsAgain) {
 
   const FetchResult& r = b.run();
   ASSERT_EQ(Ending::Fetched, r.ending) << static_cast<int>(r.check) << ": " << r.why;
-  EXPECT_EQ(1u, r.failures);
+  // The 200 restarted the slot and then brought 1 000 of 4 096 bytes: kept, so no try was spent
+  // (task p1.19-68, deliverable 5) and the next range asks on from 1 000.
+  EXPECT_EQ(0u, r.failures);
+  EXPECT_EQ(1u, r.shortRanges);
   EXPECT_EQ(1u, r.restarts);
   EXPECT_EQ(b.ota, b.slot.bytes);
+  ASSERT_EQ(4u, b.server.log.size());
+  EXPECT_EQ("bytes=1000-4095", b.server.log[3].range);
+}
+
+TEST(Ranges, ARangeThatBroughtNothingIsTheOneThatCostsATry) {
+  Bench b("heltec_v3", 4096);
+  ScriptedServer::Twist nothing;
+  nothing.deliverNothing = true;
+  b.server.byFileRequest[0] = nothing;
+
+  const FetchResult& r = b.run();
+  ASSERT_EQ(Ending::Fetched, r.ending) << static_cast<int>(r.check) << ": " << r.why;
+  EXPECT_EQ(1u, r.failures);
+  EXPECT_EQ(0u, r.shortRanges);
+  EXPECT_EQ(2u, r.fileRequests);
 }
 
 TEST(Ranges, AContentRangeThatIsNotWhatWasAskedForIsAFailure) {
@@ -1140,4 +1190,567 @@ TEST(TheWords, AreTheOnesTaskSixtyOneWillPost) {
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Why a range stopped, and what a failure is (task p1.19-68, deliverables 4 and 5)
+// ---------------------------------------------------------------------------------------------
+
+// Aarhus C's own shape, at the size the server counted: 262 144 bytes in ranges of 64 kB, the
+// third of them stopping at 48 208 - three TLS records to the byte - with an error from the
+// client and 47 092 as the largest free block, which is what that board had at rest on
+// 20 November. Nothing of the fixture release is 262 kB, so the manifest's `ota` entry is
+// rewritten to a file this test makes and signed again with the published test key: checks 1 to
+// 4 pass over it and the descriptor refuses it at the end, which is not what this test is about.
+struct BigBench {
+  ScriptedServer server;
+  FakeSlot slot;
+  FakeRecord record;
+  CapturedText out;
+  Fetcher fetcher;
+  std::vector<uint8_t> file;
+  std::string sha;
+  std::string path;
+
+  static const uint32_t kSize = 4u * 65536u;  // 262 144: the bytes the server counted for Aarhus C
+
+  BigBench() {
+    file.resize(kSize);
+    uint32_t x = 0x1a2b3c4du;
+    for (size_t i = 0; i < file.size(); i++) {
+      x = x * 1664525u + 1013904223u;
+      file[i] = static_cast<uint8_t>(x >> 24);
+    }
+    sha = sha256Hex(file);
+
+    std::string manifest = text(release("manifest.json"));
+    const std::string oldSha = sha256Hex(release("meshmaster-agent-heltec_v3-v0.0.0-test.bin"));
+    const size_t at = manifest.find(oldSha);
+    EXPECT_NE(std::string::npos, at);
+    manifest.replace(at, oldSha.size(), sha);
+    // The `ota` entry's size, which is the first "size": 4096 of the file above it.
+    const size_t sizeAt = manifest.find("\"size\": 4096");
+    EXPECT_NE(std::string::npos, sizeAt);
+    manifest.replace(sizeAt, std::strlen("\"size\": 4096"), "\"size\": " + std::to_string(kSize));
+    serveManifest(server, manifest);
+
+    path = std::string(kBase) + "/files/" + sha;
+    server.files[path] = file;
+    fetcher.begin(server, slot, record, mm::update::trustedKeys(), mm::update::trustedKeyCount(), "heltec_v3",
+                  &out);
+    Fetcher::Limits limits;
+    limits.rangeBytes = 65536;
+    fetcher.setLimits(limits);
+  }
+
+  const FetchResult& run() {
+    fetcher.start(kBase, 1000);
+    for (int i = 0; i < 400 && fetcher.running(); i++) fetcher.step(1000 + 10 * (i + 1));
+    EXPECT_FALSE(fetcher.running()) << "the fetch never ended";
+    return fetcher.result();
+  }
+};
+
+TEST(WhyARangeStopped, TheLineNamesTheReasonAndTheNextRequestAsksFromTheByteAfterTheLastKept) {
+  BigBench b;
+  ScriptedServer::Twist stop;
+  stop.deliver = 48208;
+  stop.bodyReturnKnown = true;
+  stop.bodyReturn = -5;        // HTTPC_ERROR_CONNECTION_LOST
+  stop.tlsError = -0x7F00;     // MBEDTLS_ERR_SSL_ALLOC_FAILED
+  stop.outOfMemory = true;
+  stop.largestFreeBlock = 47092;
+  b.server.byFileRequest[2] = stop;
+
+  const FetchResult& r = b.run();
+
+  // Deliverable 4: the line says what the client returned, the TLS layer's own error and the
+  // largest free block of that moment - all three of which Aarhus C's journal could not say.
+  EXPECT_NE(std::string::npos, b.out.all.find("stopped at 48208 of 65536 bytes")) << b.out.all;
+  EXPECT_NE(std::string::npos, b.out.all.find("client -5")) << b.out.all;
+  EXPECT_NE(std::string::npos, b.out.all.find("tls -0x7f00")) << b.out.all;
+  EXPECT_NE(std::string::npos, b.out.all.find("block 47092")) << b.out.all;
+  EXPECT_NE(std::string::npos, b.out.all.find("no memory")) << b.out.all;
+
+  // Deliverable 5: it brought bytes that were kept, so the tries are where they were, and the
+  // next request asks from the byte after the last one kept - 131 072 + 48 208.
+  EXPECT_EQ(0u, r.failures);
+  EXPECT_EQ(0u, r.failuresInARow);
+  EXPECT_EQ(1u, r.shortRanges);
+  ASSERT_LE(6u, b.server.log.size());
+  EXPECT_EQ("bytes=131072-196607", b.server.log[4].range);
+  EXPECT_EQ("bytes=179280-244815", b.server.log[5].range) << "from 131072 + 48208";
+  EXPECT_EQ(179280u, r.resumedFrom);
+}
+
+TEST(WhyARangeStopped, TenShortRangesInARowStillFetchTheFileAndJudgeIt) {
+  // Every range stops at a fifth of what was asked for and brings it: ten of them in a row, and
+  // the file is fetched and judged all the same. Ranges of 512 over the fixture's 4 096 bytes,
+  // delivering 400 at a time, is eleven requests and no failure at all.
+  Bench b("heltec_v3", 512);
+  ScriptedServer::Twist bitAtATime;
+  bitAtATime.deliver = 400;
+  for (uint32_t i = 0; i < 10; i++) b.server.byFileRequest[i] = bitAtATime;
+
+  const FetchResult& r = b.run();
+  ASSERT_EQ(Ending::Fetched, r.ending) << static_cast<int>(r.check) << ": " << r.why;
+  EXPECT_EQ(0u, r.failures) << "not one of them brought nothing";
+  EXPECT_EQ(10u, r.shortRanges);
+  EXPECT_EQ(b.ota, b.slot.bytes) << "and what the slot holds is the file";
+  EXPECT_EQ(1, b.slot.finished);
+  EXPECT_TRUE(mm::update::loadRecord(b.record).judged);
+}
+
+TEST(WhyARangeStopped, ThreeRequestsInARowThatBringNothingEndTheFetchAndTheSentenceSaysThree) {
+  Bench b;
+  ScriptedServer::Twist nothing;
+  nothing.deliverNothing = true;
+  nothing.bodyReturnKnown = true;
+  nothing.bodyReturn = -11;  // HTTPC_ERROR_READ_TIMEOUT
+  nothing.largestFreeBlock = 47092;
+  for (uint32_t i = 0; i < 3; i++) b.server.byFileRequest[i] = nothing;
+
+  const FetchResult& r = b.run();
+  EXPECT_EQ(Ending::Fetch, r.ending);
+  EXPECT_EQ(3u, r.failures);
+  EXPECT_EQ(3u, r.failuresInARow);
+  EXPECT_EQ(3u, r.fileRequests);
+  EXPECT_NE(nullptr, std::strstr(r.why, "brought nothing")) << r.why;
+  EXPECT_NE(nullptr, std::strstr(r.why, "client -11")) << r.why;
+  EXPECT_NE(nullptr, std::strstr(r.why, "block 47092")) << r.why;
+  EXPECT_NE(nullptr, std::strstr(r.why, "(3 failure(s), which is all this fetch gets)")) << r.why;
+  // And all of the reason fits the 96 characters an ask's journal note is, with the count of
+  // failures at the end being what a long one loses rather than the reason itself.
+  const char* const block = std::strstr(r.why, "block 47092");
+  ASSERT_NE(nullptr, block);
+  EXPECT_GE(mm::update::kMaxNoteLen, static_cast<size_t>(block - r.why) + std::strlen("block 47092"))
+      << "the reason must be inside a journal note's bound: " << r.why;
+  EXPECT_EQ(1, b.slot.spoiled);
+}
+
+TEST(WhyARangeStopped, AFailureThatARangeBroughtBytesAfterDoesNotCountTowardsTheThree) {
+  // Nothing, bytes, nothing, bytes, nothing: five failures would have ended three fetches under
+  // the old rule, and here the run is cleared twice and the file is fetched.
+  Bench b("heltec_v3", 1024);
+  ScriptedServer::Twist nothing;
+  nothing.deliverNothing = true;
+  b.server.byFileRequest[0] = nothing;
+  b.server.byFileRequest[2] = nothing;
+  b.server.byFileRequest[4] = nothing;
+  b.server.byFileRequest[6] = nothing;
+
+  const FetchResult& r = b.run();
+  ASSERT_EQ(Ending::Fetched, r.ending) << static_cast<int>(r.check) << ": " << r.why;
+  EXPECT_EQ(4u, r.failures) << "four requests brought nothing, over the whole fetch";
+  EXPECT_EQ(0u, r.failuresInARow) << "and never three of them in a row";
+  EXPECT_EQ(b.ota, b.slot.bytes);
+}
+
+TEST(WhyARangeStopped, TheBoundOnOneFilesRequestsEndsAFetchThatIsGettingNowhere) {
+  // One byte a range, for ever: no request brings nothing, so no try is ever spent, and the only
+  // thing that ends it is deliverable 5's bound - twice the file's ranges plus the tries. The
+  // fixture is 4 096 bytes in ranges of 1 024: four ranges, so eight plus three is eleven.
+  Bench b("heltec_v3", 1024);
+  ScriptedServer::Twist oneByte;
+  oneByte.deliver = 1;
+  for (uint32_t i = 0; i < 40; i++) b.server.byFileRequest[i] = oneByte;
+
+  const FetchResult& r = b.run();
+  EXPECT_EQ(Ending::Fetch, r.ending) << r.why;
+  EXPECT_EQ(11u, r.fileRequestBound);
+  EXPECT_EQ(11u, r.fileRequests);
+  EXPECT_EQ(0u, r.failures);
+  EXPECT_NE(nullptr, std::strstr(r.why, "cost 11 request(s) for 4 range(s)")) << r.why;
+  EXPECT_NE(nullptr, std::strstr(r.why, "all one file gets")) << r.why;
+  EXPECT_EQ(1, b.slot.spoiled) << "and what is in the slot will not boot";
+}
+
+TEST(WhyARangeStopped, DescribeStopSaysTheThreeNumbersAndNothingWhenThereAreNone) {
+  char line[112];
+  mm::update::HttpAnswer a;
+  mm::update::describeStop(a, line, sizeof(line));
+  EXPECT_STREQ("nothing said why", line);
+
+  a.bodyReturnKnown = true;
+  a.bodyReturn = -5;
+  a.tlsError = -0x7F00;
+  a.largestFreeBlock = 47092;
+  a.outOfMemory = true;
+  mm::update::describeStop(a, line, sizeof(line));
+  EXPECT_STREQ("client -5, tls -0x7f00, block 47092, no memory", line);
+
+  mm::update::HttpAnswer plain;
+  plain.largestFreeBlock = 100000;
+  mm::update::describeStop(plain, line, sizeof(line));
+  EXPECT_STREQ("block 100000", line);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The observers stand down for a fetch (task p1.19-68, deliverables 1, 2 and 3)
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+// The seam as a counter, for the order of things.
+class CountedObservers final : public mm::update::Observers {
+ public:
+  int downs = 0;
+  int ups = 0;
+  bool lastSwitchFollowed = false;
+  bool down = false;
+  mutable uint32_t stillUpFor = 0;  // this many looks answer "not yet"
+  int requestsWhenDown = -1;        // the server's request count at standDown()
+  const ScriptedServer* server = nullptr;
+
+  void standDown() override {
+    downs++;
+    down = true;
+    if (server != nullptr) requestsWhenDown = static_cast<int>(server->log.size());
+  }
+  bool allDown() const override {
+    if (stillUpFor > 0) {
+      stillUpFor--;
+      return false;
+    }
+    return down;
+  }
+  void standUp(bool aSwitchFollows) override {
+    ups++;
+    lastSwitchFollowed = aSwitchFollows;
+    down = false;
+  }
+};
+
+}  // namespace
+
+TEST(TheObserversStandDown, TheyAreClosedBeforeTheFirstRequestAndOpenAgainAtTheEnd) {
+  CountedObservers obs;
+  Bench b("heltec_v3", 1024, 3, &obs);
+  obs.server = &b.server;
+
+  const FetchResult& r = b.run();
+  ASSERT_EQ(Ending::Fetched, r.ending) << r.why;
+  EXPECT_EQ(1, obs.downs);
+  EXPECT_EQ(0, obs.requestsWhenDown) << "not one request had left when the slots were told to go";
+  EXPECT_EQ(1, obs.ups);
+  EXPECT_TRUE(obs.lastSwitchFollowed) << "a fetched ending is the one a switch follows";
+  EXPECT_NE(std::string::npos, b.out.all.find("the observer's slots stand down before the first request"))
+      << b.out.all;
+}
+
+TEST(TheObserversStandDown, ARefusedFetchOpensThemAgainWithNoSwitchToWaitFor) {
+  CountedObservers obs;
+  Bench b("heltec_v3", 1024, 3, &obs);
+  b.server.files.erase(std::string(kBase) + "/manifest.json");
+
+  EXPECT_EQ(Ending::Fetch, b.run().ending);
+  EXPECT_EQ(1, obs.downs);
+  EXPECT_EQ(1, obs.ups);
+  EXPECT_FALSE(obs.lastSwitchFollowed);
+  EXPECT_NE(std::string::npos, b.out.all.find("open again by their ordinary rule")) << b.out.all;
+}
+
+TEST(TheObserversStandDown, TheFirstRequestWaitsForTheSessionsToBeGone) {
+  CountedObservers obs;
+  obs.stillUpFor = 3;  // three passes of the loop before the sessions are really gone
+  Bench b("heltec_v3", 1024, 3, &obs);
+  obs.server = &b.server;
+
+  b.fetcher.start(kBase, 1000);
+  EXPECT_EQ(1, obs.downs);
+  EXPECT_TRUE(b.fetcher.running());
+  for (int i = 0; i < 3; i++) {
+    b.fetcher.step(1000 + 10 * (i + 1));
+    EXPECT_TRUE(b.server.log.empty()) << "a request left while a slot was still up, at pass " << i;
+  }
+  b.fetcher.step(1040);
+  EXPECT_EQ(1u, b.server.log.size()) << "and the manifest is asked for the moment they are gone";
+  for (int i = 0; i < 200 && b.fetcher.running(); i++) b.fetcher.step(1050 + 10 * i);
+  EXPECT_EQ(Ending::Fetched, b.fetcher.result().ending);
+  EXPECT_EQ(40u, b.fetcher.result().standDownMs) << "what the wait cost, in the result";
+}
+
+TEST(TheObserversStandDown, SlotsThatWillNotGoDoNotHoldAFetchUpForEver) {
+  CountedObservers obs;
+  obs.stillUpFor = 0xFFFFFFFFu;  // a client that never closes
+  Bench b("heltec_v3", 1024, 3, &obs);
+
+  b.fetcher.start(kBase, 0);
+  for (int i = 0; i < 400 && b.fetcher.running(); i++) b.fetcher.step(100u * static_cast<uint32_t>(i + 1));
+  EXPECT_EQ(Ending::Fetched, b.fetcher.result().ending) << "a release that can be had is had";
+  EXPECT_LE(mm::update::kStandDownMs, b.fetcher.result().standDownMs);
+  EXPECT_NE(std::string::npos, b.out.all.find("were still up after")) << b.out.all;
+}
+
+TEST(TheObserversStandDown, AFetchThatWouldNotEvenBeginStandsNobodyDown) {
+  CountedObservers obs;
+  Bench b("heltec_v3", 1024, 3, &obs);
+  EXPECT_FALSE(b.fetcher.start("not-a-path", 1000));
+  EXPECT_EQ(0, obs.downs);
+  EXPECT_EQ(0, obs.ups);
+}
+
+// ---- and the same, with the observer's own two slots and their scripted clients ---------------
+
+namespace {
+
+using mm::observer::ClientEvent;
+using mm::observer::ErrorKind;
+using mm::observer::SlotState;
+
+uint32_t g_slotMillis = 1000;
+uint32_t g_slotMillisNow() { return g_slotMillis; }
+uint32_t g_slotEpoch() { return 1793016000u; }
+uint32_t g_slotFree() { return 200u * 1024u; }
+uint32_t g_slotLargest() { return 100u * 1024u; }
+uint32_t g_slotRandom() { return 0; }
+
+// test/test_connection's fake, cut down to what these four tests read: a client that opens and
+// closes when it is told to and reports what the test says the broker did.
+class FakeMqtt final : public mm::observer::Client {
+ public:
+  int opens = 0;
+  int closes = 0;
+  bool isOpen = false;
+  bool accepted = false;
+
+  bool open(const mm::observer::ClientConfig&, char*, size_t) override {
+    opens++;
+    isOpen = true;
+    return true;
+  }
+  void close() override {
+    if (isOpen) closes++;
+    isOpen = false;
+    accepted = false;
+  }
+  bool publish(const char*, const char*, size_t, uint8_t, bool) override { return isOpen; }
+  ClientEvent takeEvent(ErrorKind& kind, char* reason, size_t cap) override {
+    kind = ErrorKind::Other;
+    if (cap > 0) reason[0] = '\0';
+    if (accepted) {
+      accepted = false;
+      return ClientEvent::Connected;
+    }
+    return ClientEvent::None;
+  }
+  size_t outboxBytes() override { return 0; }
+  void accept() { accepted = true; }
+};
+
+struct FixedSigner final : public mm::observer::Signer {
+  uint8_t pub[32];
+  uint8_t prv[64];
+  FixedSigner() {
+    uint8_t seed[32];
+    for (int i = 0; i < 32; i++) seed[i] = static_cast<uint8_t>(0x5A ^ (i * 7));
+    ed25519_create_keypair(pub, prv, seed);
+  }
+  bool sign(const uint8_t* msg, size_t len, uint8_t sig[mm::observer::kSignatureSize]) override {
+    ed25519_sign(sig, msg, len, pub, prv);
+    return true;
+  }
+  std::string pubHex() const {
+    char hex[65];
+    mm::observer::hexUpper(pub, 32, hex, sizeof hex);
+    return hex;
+  }
+};
+
+struct FixedSlotStatus final : public mm::observer::StatusSource {
+  size_t formatStatus(const char* status, char* out, size_t cap) override {
+    return static_cast<size_t>(std::snprintf(out, cap, "{\"status\":\"%s\"}", status));
+  }
+};
+
+// A fetch over the real slots: both of them connected, then started and driven one pass at a
+// time with the slots' own loop() running before each step, as src/main.cpp runs them.
+struct SlotsBench {
+  FakeMqtt client[mm::observer::kSlots];
+  FixedSigner signer;
+  FixedSlotStatus status;
+  mm::observer::Connections link;
+  mm::observer::ObserverSettings settings;
+  std::string pubHex;
+  mm::update::ConnectionObservers observers{link};
+  Bench fetch;
+
+  explicit SlotsBench(const char* secondPreset = "meshview")
+      : fetch("heltec_v3", 1024, 3, &observers) {
+    g_slotMillis = 1000;
+    pubHex = signer.pubHex();
+    mm::observer::Client* const clients[mm::observer::kSlots] = {&client[0], &client[1]};
+    mm::observer::Environment env;
+    env.millis = &g_slotMillisNow;
+    env.epoch = &g_slotEpoch;
+    env.freeHeap = &g_slotFree;
+    env.largestBlock = &g_slotLargest;
+    env.random = &g_slotRandom;
+    env.caPem = "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n";
+    env.board = &mm::observer::kHeltecV3;
+    link.begin(clients, env, signer, status, nullptr, nullptr);
+
+    settings.iata = "AAR";
+    settings.owner = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    settings.email = "owner@example.dk";
+    settings.origin = "MeshMaster-TEST";
+    settings.slot[0].preset = "meshview";
+    settings.slot[1].preset = secondPreset;
+    link.configure(settings, mm::observer::observerEnabled(settings, nullptr, 0), pubHex.c_str(), "meshcore/test");
+    link.setLinkUp(true);
+  }
+
+  SlotState state(int i) const { return link.view(i).state; }
+
+  // Both slots up, as Aarhus C had them on 20 November. One handshake at a time is this board's
+  // rule, so slot 2 waits out a heap re-check before it gets its turn.
+  void connectBoth() {
+    link.loop();                       // slot 1 opens
+    client[0].accept();
+    link.loop();                       // slot 1 connected; slot 2 is waiting for its handshake
+    g_slotMillis += mm::observer::kHeapRecheckMs + 1000;
+    link.loop();                       // slot 2 opens
+    client[1].accept();
+    link.loop();                       // slot 2 connected
+  }
+};
+
+}  // namespace
+
+TEST(TheSlotsThemselves, BothAreClosedBeforeTheFirstRequestAndSayTheirOwnWord) {
+  SlotsBench b;
+  b.connectBoth();
+  ASSERT_EQ(SlotState::Connected, b.state(0));
+  ASSERT_EQ(SlotState::Connected, b.state(1));
+
+  b.fetch.fetcher.start(kBase, 1000);
+  EXPECT_TRUE(b.fetch.server.log.empty()) << "nothing has been asked for yet";
+  EXPECT_EQ(SlotState::StandingDown, b.state(0));
+  EXPECT_EQ(SlotState::StandingDown, b.state(1));
+  EXPECT_EQ(1, b.client[0].closes);
+  EXPECT_EQ(1, b.client[1].closes);
+  EXPECT_TRUE(b.link.allSlotsDown());
+  EXPECT_TRUE(b.link.standingDownForFetch());
+
+  // Deliverable 2: a word of its own, and `get mqtt.status` prints it.
+  EXPECT_STREQ("standing-down", mm::observer::slotStateName(b.state(0)));
+  char line[400];
+  b.link.describe(0, line, sizeof line);
+  EXPECT_NE(nullptr, std::strstr(line, "standing down")) << line;
+  EXPECT_NE(nullptr, std::strstr(line, "a release being fetched")) << line;
+  // And not *gave way*: nothing went wrong.
+  EXPECT_EQ(0u, b.link.view(0).stats.heapYields);
+  EXPECT_EQ(0u, b.link.view(1).stats.heapYields);
+}
+
+TEST(TheSlotsThemselves, NoSlotOpensWhileTheFetchRuns) {
+  SlotsBench b;
+  b.connectBoth();
+  const int opens0 = b.client[0].opens;
+  const int opens1 = b.client[1].opens;
+
+  b.fetch.fetcher.start(kBase, 1000);
+  for (int i = 0; i < 200 && b.fetch.fetcher.running(); i++) {
+    b.link.loop();  // src/main.cpp runs the observer before the fetch's step, every pass
+    g_slotMillis += 10;
+    b.fetch.fetcher.step(1000 + 10u * static_cast<uint32_t>(i + 1));
+    if (b.fetch.fetcher.running()) {
+      EXPECT_EQ(SlotState::StandingDown, b.state(0)) << "pass " << i;
+      EXPECT_EQ(SlotState::StandingDown, b.state(1)) << "pass " << i;
+    }
+  }
+  ASSERT_EQ(Ending::Fetched, b.fetch.fetcher.result().ending) << b.fetch.fetcher.result().why;
+  EXPECT_EQ(opens0, b.client[0].opens) << "slot 1 never opened during the fetch";
+  EXPECT_EQ(opens1, b.client[1].opens) << "slot 2 never opened during the fetch";
+}
+
+TEST(TheSlotsThemselves, ARefusedFetchOpensThemBothAgainWithoutWaitingOutAHold) {
+  SlotsBench b;
+  b.connectBoth();
+  const int opens0 = b.client[0].opens;
+  b.fetch.server.files.erase(std::string(kBase) + "/manifest.json");
+
+  b.fetch.fetcher.start(kBase, 1000);
+  for (int i = 0; i < 200 && b.fetch.fetcher.running(); i++) {
+    b.link.loop();
+    g_slotMillis += 10;
+    b.fetch.fetcher.step(1000 + 10u * static_cast<uint32_t>(i + 1));
+  }
+  ASSERT_EQ(Ending::Fetch, b.fetch.fetcher.result().ending);
+  EXPECT_FALSE(b.link.standingDownForFetch());
+
+  // At once: the next pass of the slots' own loop opens slot 1, with no ten minutes to wait out.
+  b.link.loop();
+  EXPECT_EQ(SlotState::Connecting, b.state(0));
+  EXPECT_EQ(opens0 + 1, b.client[0].opens);
+  b.client[0].accept();
+  b.link.loop();
+  EXPECT_EQ(SlotState::Connected, b.state(0));
+  // And slot 2 after it, by the same one-handshake-at-a-time rule it opened under the first time.
+  g_slotMillis += mm::observer::kHeapRecheckMs + 1000;
+  b.link.loop();
+  ASSERT_EQ(SlotState::Connecting, b.state(1));
+  b.client[1].accept();
+  b.link.loop();
+  EXPECT_EQ(SlotState::Connected, b.state(1));
+  // And neither gave way: the slots stood down, they did not lose.
+  EXPECT_EQ(0u, b.link.view(0).stats.heapYields);
+  EXPECT_EQ(0u, b.link.view(1).stats.heapYields);
+}
+
+TEST(TheSlotsThemselves, AFetchedReleaseAndTheSwitchThatFollowsOpensNothing) {
+  SlotsBench b;
+  b.connectBoth();
+  const int opens0 = b.client[0].opens;
+  const int opens1 = b.client[1].opens;
+
+  b.fetch.fetcher.start(kBase, 1000);
+  for (int i = 0; i < 200 && b.fetch.fetcher.running(); i++) {
+    b.link.loop();
+    g_slotMillis += 10;
+    b.fetch.fetcher.step(1000 + 10u * static_cast<uint32_t>(i + 1));
+  }
+  ASSERT_EQ(Ending::Fetched, b.fetch.fetcher.result().ending) << b.fetch.fetcher.result().why;
+
+  // The switch is the next pass or two of the loop and then the board restarts. Nothing opens in
+  // the meantime: a session the restart would throw away is not worth a handshake.
+  for (int i = 0; i < 50; i++) {
+    b.link.loop();
+    g_slotMillis += 100;
+    EXPECT_EQ(SlotState::StandingDown, b.state(0)) << "pass " << i;
+    EXPECT_EQ(SlotState::StandingDown, b.state(1)) << "pass " << i;
+  }
+  EXPECT_EQ(opens0, b.client[0].opens);
+  EXPECT_EQ(opens1, b.client[1].opens);
+
+  // And a board whose switch never came has them back a minute later rather than needing a reboot.
+  g_slotMillis += mm::observer::kFetchedStandDownMs;
+  b.link.loop();
+  EXPECT_EQ(SlotState::Connecting, b.state(0));
+}
+
+TEST(TheSlotsThemselves, ASlotWhosePresetIsNoneStaysOffThroughAllOfIt) {
+  SlotsBench b("none");
+  b.link.loop();
+  b.client[0].accept();
+  b.link.loop();
+  ASSERT_EQ(SlotState::Connected, b.state(0));
+  ASSERT_EQ(SlotState::Off, b.state(1));
+
+  b.fetch.fetcher.start(kBase, 1000);
+  EXPECT_EQ(SlotState::StandingDown, b.state(0));
+  EXPECT_EQ(SlotState::Off, b.state(1)) << "off is off: a fetch does not stand down what is not up";
+  for (int i = 0; i < 200 && b.fetch.fetcher.running(); i++) {
+    b.link.loop();
+    g_slotMillis += 10;
+    b.fetch.fetcher.step(1000 + 10u * static_cast<uint32_t>(i + 1));
+    EXPECT_EQ(SlotState::Off, b.state(1)) << "pass " << i;
+  }
+  ASSERT_EQ(Ending::Fetched, b.fetch.fetcher.result().ending);
+  for (int i = 0; i < 20; i++) {
+    b.link.loop();
+    g_slotMillis += 10000;
+    EXPECT_EQ(SlotState::Off, b.state(1)) << "after, pass " << i;
+  }
+  EXPECT_EQ(0, b.client[1].opens);
 }

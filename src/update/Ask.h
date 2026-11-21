@@ -178,7 +178,8 @@ class AskFetch {
   virtual ~AskFetch() {}
   // Whether a fetch could reach the server at all now: the board started up, the server is
   // configured and the link is up. A fetch begun without it would spend its three tries in three
-  // passes of the loop and end the ask for nothing, which is exactly what a board resuming an
+  // passes of the loop - they are three in a row, and with the link down nothing brings a byte to
+  // clear the run - and end the ask for nothing, which is exactly what a board resuming an
   // interrupted fetch at its own boot would do.
   virtual bool ready() const = 0;
   // Start a fetch of `base`. False when it did not start at all, and then `result()` says why.

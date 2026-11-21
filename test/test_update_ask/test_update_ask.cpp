@@ -809,6 +809,44 @@ TEST(TheRefusals, AReleaseThatCannotBeFetchedIsFetchAndNothingIsSwitched) {
   EXPECT_NE(std::string::npos, body.find("there is no such resource")) << body;
 }
 
+TEST(TheRefusals, AFetchThatWasRefusedCarriesWhyARangeStoppedInItsJournalsLastLine) {
+  // Task p1.19-68, deliverable 4: the reason a range stopped - what the client returned, the TLS
+  // layer's own error and the largest free block of that moment - is in the fetch's own sentence,
+  // and so in the last line of the journal the server reads. Aarhus C's refusal of 20 November
+  // said only `range 145570-211105 stopped at 48208 of 65536 bytes`; this is that line as 68
+  // writes it, and the reason has to survive the journal's note bound rather than be cut off it.
+  Board b;
+  b.boot(kOld);
+  b.hearTheAsk(17);
+  b.asked.step();
+  b.fetch.endWith(Ending::Fetch, 0,
+                  "range 145570-211105 brought nothing: client -5, tls -0x7f00, block 47092, "
+                  "no memory (3 failure(s), which is all this fetch gets)");
+  b.asked.step();
+
+  const AskRecord& rec = b.record();
+  EXPECT_EQ(AskOutcome::Refused, rec.outcome);
+  EXPECT_EQ(AskRefusal::Fetch, rec.refusal);
+
+  JournalEntry last;
+  const size_t n = rec.journal.count();
+  ASSERT_LT(0u, n);
+  ASSERT_TRUE(rec.journal.entry(n - 1, last));
+  EXPECT_STREQ("refused", last.step);
+  const std::string note = last.note;
+  EXPECT_NE(std::string::npos, note.find("range 145570-211105 brought nothing")) << note;
+  EXPECT_NE(std::string::npos, note.find("client -5")) << note;
+  EXPECT_NE(std::string::npos, note.find("tls -0x7f00")) << note;
+  EXPECT_NE(std::string::npos, note.find("block 47092")) << note;
+  EXPECT_NE(std::string::npos, note.find("no memory")) << note;
+  EXPECT_LE(note.size(), mm::update::kMaxNoteLen) << "and inside the bound the journal sets";
+
+  // And it goes out to the server with the result, which is the line a person reads there.
+  std::string body;
+  ASSERT_TRUE(b.postTheResult(true, false, &body));
+  EXPECT_NE(std::string::npos, body.find("block 47092")) << body;
+}
+
 TEST(TheRefusals, ACheckThatFailedIsCheckWithItsNumberAndNothingIsSwitched) {
   for (uint8_t number = 1; number <= 5; number++) {
     Board b;

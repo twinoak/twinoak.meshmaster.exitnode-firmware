@@ -256,8 +256,23 @@ uplink::Attempt AgentClient::exchange(Root root) {
       std::snprintf(head.contentRange, sizeof head.contentRange, "%s", p.contentRange);
       if (p.sink->begin(head)) {
         SinkStream out(*p.sink);
-        http_->writeToStream(&out);
+        // **What the client returns is read** (task p1.19-68). Before 68 it was thrown away, and
+        // a range that stopped short - three of Aarhus C's did on 20 November - said nothing at
+        // all of why. writeToStream() answers with the bytes it moved, or one of HTTPClient's own
+        // negative codes; the TLS layer's error for the same moment is the client's, and has to be
+        // read before end() stops the socket.
+        const int wrote = http_->writeToStream(&out);
         p.bodyLen = out.length();
+        p.bodyReturn = static_cast<int32_t>(wrote);
+        p.bodyReturnKnown = true;
+        if (wrote < 0) {
+          char reason[96] = {0};
+          p.bodyTlsError = client_->lastError(reason, sizeof reason);
+          // The same reading as a call that got no reply at all: mbedtls said an allocation
+          // failed, or the largest free block can no longer hold a TLS content buffer.
+          p.bodyOutOfMemory = failedForMemory(p.bodyTlsError);
+        }
+        p.largestFreeBlock = ESP.getMaxAllocHeap();
       }
       tlsheap::sample();
       p.retryAfterS = parseRetryAfter(http_->header("Retry-After"));
@@ -343,6 +358,11 @@ int AgentClient::request(Root root, const char* method, const char* path, const 
   if (extras != nullptr) {
     std::snprintf(extras->etag, sizeof extras->etag, "%s", pending_.etag);
     std::snprintf(extras->contentRange, sizeof extras->contentRange, "%s", pending_.contentRange);
+    extras->bodyReturn = pending_.bodyReturn;
+    extras->bodyReturnKnown = pending_.bodyReturnKnown;
+    extras->bodyTlsError = pending_.bodyTlsError;
+    extras->bodyOutOfMemory = pending_.bodyOutOfMemory;
+    extras->largestFreeBlock = pending_.largestFreeBlock;
   }
   if (pending_.error[0] != '\0') std::snprintf(out.error, sizeof out.error, "%s", pending_.error);
   return a.code;
@@ -407,6 +427,15 @@ bool AgentClient::call(const char* method, const char* endpoint, const char* req
     memoryFailures_++;
     LOG_W("server: the call failed for want of memory (tls %d, largest free block %lu); %lu such failure(s)", tlsError,
           static_cast<unsigned long>(ESP.getMaxAllocHeap()), static_cast<unsigned long>(memoryFailures_));
+  } else if (extras != nullptr && extras->bodyOutOfMemory) {
+    // Task p1.19-68, deliverable 4: a range whose body stopped for want of memory. The status
+    // line came back, so the call "went through" and nothing above sees it - and the range still
+    // ended where mbedtls could not take a record's buffer. It is counted here, with every other
+    // memory failure of the uplink, which is what the observer's slots watch.
+    memoryFailures_++;
+    LOG_W("server: a streamed body stopped for want of memory (client %ld, tls %d, largest free block %lu); %lu such failure(s)",
+          static_cast<long>(extras->bodyReturn), extras->bodyTlsError,
+          static_cast<unsigned long>(extras->largestFreeBlock), static_cast<unsigned long>(memoryFailures_));
   }
   // A firmware route does **not** become "the server's last answer": `lastCall()` is what the
   // agent loop reads of its own call a line later (agent/ServerPolicy.h decides whether to halt
@@ -434,6 +463,11 @@ bool AgentClient::getStreamed(const char* endpoint, const char* rangeHeader, con
   std::snprintf(out.etag, sizeof out.etag, "%s", extras.etag);
   std::snprintf(out.contentRange, sizeof out.contentRange, "%s", extras.contentRange);
   std::snprintf(out.error, sizeof out.error, "%s", c.error);
+  out.bodyReturn = extras.bodyReturn;
+  out.bodyReturnKnown = extras.bodyReturnKnown;
+  out.tlsError = extras.bodyTlsError;
+  out.outOfMemory = extras.bodyOutOfMemory;
+  out.largestFreeBlock = extras.largestFreeBlock;
   // The path is logged and the headers are not: one of them carries the token, and no line of
   // this firmware ever holds it (agent/Log.h).
   LOG_D("server: GET %s%s -> http %d, %lu bytes", endpoint, rangeHeader != nullptr ? " (a range)" : "", out.status,

@@ -269,6 +269,22 @@ So:
   `get mqtt.status`'s `memory` line prints the whole sum and which dip is in
   force.
 - Two slots never open at once: the second waits for the first's handshake.
+- **A fetch of a release closes every slot, and nothing opens while it runs.**
+  Before the first request of a fetch leaves — whether meshmaster.dk's *Update*
+  started it or `update fetch` at the console — every slot that is up or opening
+  is closed, and none opens again until the fetch has ended. Their state is
+  `standing-down`, and it is **not** counted as `gave way`: nothing went wrong.
+  An exit node stops all its observers before it tries to update, because a
+  release is 1.5 MB fetched over the same TLS as a slot's own and each open slot
+  holds a 16 KB content buffer whenever a record is in flight. On 20 November
+  Aarhus C — the one board of the fleet with both slots connected — could not
+  finish a single range of 0.7.5, and Risskov, with one slot, took the same
+  release in a minute. When the fetch is **refused** the slots open again at
+  once, by the ordinary rule above and with no ten minutes to wait out; when it
+  is **fetched** a switch follows within a pass or two and the board restarts, so
+  they stay down over it rather than opening a session the restart would throw
+  away. A board whose switch never came has them back a minute later rather than
+  needing a reboot.
 - **The gate keeps watching.** Every MeshMaster call's lowest free heap is read
   (task p1.8-30 measures it); a call that **dipped under the floor** while a slot
   was up - it went through, but nearly did not - closes the **highest slot for
@@ -363,9 +379,10 @@ asks:
 
 A slot's state is one of `off`, `waiting-for-wifi`, `waiting-for-clock` (a token
 carries an issue time; nothing is sent before SNTP or the server set the clock),
-`waiting-for-heap`, `connecting`, `connected`, `backing-off` (a refused sign-in,
+`waiting-for-heap`, `standing-down` (a release is being fetched: the bullet above),
+`connecting`, `connected`, `backing-off` (a refused sign-in,
 a failed handshake or a lost connection: 5 s, doubled each time to ten minutes,
-with the reason). **Those seven words are a contract**, not a display string:
+with the reason). **Those eight words are a contract**, not a display string:
 the heartbeat carries each slot's state and meshmaster.dk shows it, so renaming
 one here changes what the Observer card says
 (`test/test_connection` holds them).

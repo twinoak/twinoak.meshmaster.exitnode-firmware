@@ -60,10 +60,28 @@ namespace update {
 // WiFi. The bench's own `update fetch` is what settles it (tasks/phase-1.15/FOLLOWUPS.md).
 static const uint32_t kRangeBytes = 64u * 1024u;
 
-// How many times a file may fail before the fetch does - **three in all**, not three per range:
-// a link that drops three times during one file is a link that is not working, and the next
-// `update fetch` begins again.
+// How many requests that brought **nothing** may follow one another before the fetch ends -
+// three in a row, over the whole of it: a link that answers three times with no byte at all is a
+// link that is not working, and the next `update fetch` begins again. Since task p1.19-68 a
+// request that brought bytes which were kept is not one of them: it moved the file forward, so it
+// clears the run and uses up no try (Aarhus C's fetch of 20 November was ended by three ranges
+// that between them brought 262 kB of a 1.5 MB file).
 static const uint32_t kFileTries = 3;
+
+// And a bound on the requests one file may cost in all, so that ranges which each bring a
+// handful of bytes cannot go on for ever now that they cost no try: twice the ranges the file
+// needs, plus the tries. Risskov's fetch of 20 November was sent 1.6 MB for a file of 1.5 MB -
+// 24 requests for 23 ranges, 1.04 a range - so twice the ranges is about double the worst a fetch
+// of ours has ever cost, and the only fetch it ends is one that is getting nowhere.
+static const uint32_t kFileRequestsPerRange = 2;
+
+// How long the first request of a fetch waits for the observer's slots to be gone (task
+// p1.19-68, deliverable 1). Closing a slot is synchronous on the board - esp_mqtt_client_destroy
+// stops the client's task, joins it and frees its TLS context before it returns
+// (src/net/MqttClient.cpp) - so `allDown()` is true on the first look and this is never reached;
+// it is here so that an implementation which one day closes a slot in the background cannot hold
+// a fetch up for ever.
+static const uint32_t kStandDownMs = 5000;
 
 // The manifest and its signature are the only two things read into RAM. Our manifest with two
 // boards and two files each is about 1.6 kB; four kilobytes is room for twice that and a bound
@@ -104,6 +122,26 @@ struct HttpAnswer {
   // When !reachable: what the transport said, never a secret. The same length as a Call's error
   // (agent/IUplink.h), which is where the board's implementation copies it from.
   char error[128] = {0};
+
+  // Why a body stopped (task p1.19-68). On 20 November three of Aarhus C's ranges stopped short
+  // and nothing said why, because the transport hands the body to the HTTP client and did not read
+  // what the client returned. These are what it returned, and this engine prints them and decides
+  // nothing from them but the sentence:
+  //
+  //   bodyReturn       what the client's own writer returned: bytes written, or its negative
+  //                    error code. `bodyReturnKnown` is false where the transport has no such
+  //                    number to give (a host's scripted server, unless it says one).
+  //   tlsError         the TLS layer's own error for the same moment, 0 where it has none.
+  //   outOfMemory      the transport's own reading of the two: this stop was for want of memory.
+  //                    The board counts such a stop where it counts a call that got no reply for
+  //                    the same reason (src/agent/AgentClient.cpp, memoryFailures).
+  //   largestFreeBlock the largest allocation the heap could still make at that moment; 0 is
+  //                    *not known*, which is what a host build is.
+  int32_t bodyReturn = 0;
+  bool bodyReturnKnown = false;
+  int tlsError = 0;
+  bool outOfMemory = false;
+  uint32_t largestFreeBlock = 0;
 };
 
 // Where an answer's bytes go as they arrive.
@@ -124,6 +162,28 @@ class ReleaseHttp {
  public:
   virtual ~ReleaseHttp() {}
   virtual bool get(const HttpRequest& req, HttpAnswer& out, HttpBody& body) = 0;
+};
+
+// The observer's broker slots, as a fetch sees them (task p1.19-68). An exit node stops all its
+// observers before it tries to update: a fetch of 1.5 MB is the heaviest thing this firmware does
+// to the heap, every open slot is a TLS session of its own holding a content buffer of 16 kB when
+// a record is in flight, and on 20 November Aarhus C - the one board of the fleet with both slots
+// connected - could not finish a single range. Thomas, 21 November. nullptr is a board with no
+// observer, and then a fetch asks for its first range straight away.
+class Observers {
+ public:
+  virtual ~Observers() {}
+  // Close every slot that is up or opening and let none open again until standUp(). Called once,
+  // before the first request of a fetch; calling it while already stood down does nothing.
+  virtual void standDown() = 0;
+  // Whether every slot's session is really gone: none connected, none in a handshake. The first
+  // request waits for this, and kStandDownMs bounds the wait.
+  virtual bool allDown() const = 0;
+  // The fetch has ended. `aSwitchFollows` is true for a *fetched* ending, which an ask switches
+  // to in the next pass or two of the loop and the board then restarts - so the slots stay down
+  // over it rather than opening a session the restart would throw away. Every other ending opens
+  // them again at once, by their ordinary rule and with no hold: nothing went wrong.
+  virtual void standUp(bool aSwitchFollows) = 0;
 };
 
 // The application slot that is not running. Offsets are implicit: bytes go in in order, and
@@ -166,7 +226,8 @@ class SlotSink {
 enum class Ending : uint8_t {
   Running = 0,  // not an ending: a fetch is still going
   Fetched = 1,  // the slot holds a judged image
-  Fetch = 2,    // the release could not be had: no link, a 404, a redirect, three failures
+  Fetch = 2,    // the release could not be had: no link, a 404, a redirect, three requests in a
+                // row that brought nothing, or all the requests one file gets
   Check = 3,    // the release was had and refused: `check` is 1 to 5
   Slot = 4,     // this board has no second application slot; nothing was asked for
 };
@@ -186,7 +247,11 @@ struct FetchResult {
   // What a person reads at the end of `update fetch`, and what a report is written from.
   uint32_t requests = 0;      // every request this fetch made
   uint32_t fileRequests = 0;  // of those, requests for a file
-  uint32_t failures = 0;      // attempts that failed and were counted against kFileTries
+  uint32_t failures = 0;      // requests that brought nothing at all, over the whole fetch
+  uint32_t failuresInARow = 0;  // of those, how many in a row: kFileTries of them end the fetch
+  uint32_t shortRanges = 0;   // ranges that stopped short and brought bytes that were kept
+  uint32_t fileRequestBound = 0;  // what kFileRequestsPerRange came to for this file, once known
+  uint32_t standDownMs = 0;   // how long the first request waited for the observer's slots
   uint32_t restarts = 0;      // times a `200` to a range sent the slot back to zero
   uint32_t resumedFrom = 0;   // what the slot held when the first retry asked again
   int lastStatus = 0;
@@ -213,6 +278,11 @@ class Fetcher {
 
   void setLimits(const Limits& limits) { limits_ = limits; }
 
+  // The observer's slots, which stand down for the whole of a fetch (task p1.19-68). Not part of
+  // begin() because a board without an observer, and most of test/test_fetch, has none: nullptr
+  // is "nothing to stand down" and the first request goes out at once.
+  void setObservers(Observers* observers) { observers_ = observers; }
+
   // Start a fetch of `base` (`/agent/v1/firmware/7`). False when it did not start at all - no
   // second slot, or a base this firmware will not ask for - and then `result()` holds the ending
   // and its word. True when it started: `step()` carries it on. A fetch already running is left
@@ -228,10 +298,11 @@ class Fetcher {
   const ReleaseInfo& info() const { return info_; }
 
  private:
-  enum class Step : uint8_t { Idle, Manifest, Signature, Judge, File, Judge45, Ended };
+  enum class Step : uint8_t { Idle, StandDown, Manifest, Signature, Judge, File, Judge45, Ended };
 
   class RangeBody;
 
+  void stepStandDown();
   void stepManifest();
   void stepSignature();
   void stepJudge();
@@ -248,10 +319,16 @@ class Fetcher {
   // An ending, with its word and its number. Every ending but *fetched* spoils a slot that was
   // opened for a write, so that nothing half written or refused can ever be booted.
   void end(Ending ending, uint8_t check, const char* fmt, ...) __attribute__((format(printf, 4, 5)));
-  // An attempt that failed and may be tried again: counted, and the fetch ends when the tries are
-  // spent.
+  // A request that brought **nothing** and may be tried again: counted, and the fetch ends when
+  // three of them in a row have been (kFileTries).
   void countFailure(const char* fmt, ...) __attribute__((format(printf, 2, 3)));
+  // A request that brought bytes which were kept: the run of failures is over, whether the range
+  // was whole or stopped short.
+  void itBroughtBytes();
   void say(const char* fmt, ...) __attribute__((format(printf, 2, 3)));
+  // Whether this file has cost all the requests it may (kFileRequestsPerRange). True when the
+  // fetch was ended here.
+  bool spentTheRequests();
 
   ReleaseHttp* http_ = nullptr;
   SlotSink* slot_ = nullptr;
@@ -260,6 +337,7 @@ class Fetcher {
   size_t keyCount_ = 0;
   const char* board_ = "";
   TextOut* out_ = nullptr;
+  Observers* observers_ = nullptr;
   Limits limits_;
 
   Step step_ = Step::Idle;
@@ -275,6 +353,7 @@ class Fetcher {
   ReleaseInfo info_;
   const ReleaseFile* file_ = nullptr;
   bool slotOpen_ = false;  // a write was opened: an ending that is not *fetched* spoils it
+  bool stoodDown_ = false;  // the observer's slots were told to stand down: stand them up at the end
   uint32_t startedMs_ = 0;
   uint32_t lastMs_ = 0;
   FetchResult result_;
@@ -284,6 +363,13 @@ class Fetcher {
 // header name. False for anything that is not exactly that shape - a `bytes */length` of a 416
 // among them, which says nothing about what was asked for.
 bool parseContentRange(const char* value, uint32_t& first, uint32_t& last, uint32_t& total);
+
+// Why a body stopped, as a phrase for a person: what the client returned, the TLS layer's own
+// error where it has one, whether the transport read the two as a want of memory, and the largest
+// free block at that moment (task p1.19-68, deliverable 4). Written into `out` (cap bytes) and
+// never empty - a transport that said nothing says so. Nothing here is a secret: three numbers
+// and this firmware's own words.
+void describeStop(const HttpAnswer& answer, char* out, size_t cap);
 
 // A release id as `update fetch` and task 61's ask carry it: digits, at least one, at most ten,
 // and no leading zero unless it is the whole of it. Anything else is refused before a path is

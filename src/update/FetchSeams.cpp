@@ -25,6 +25,12 @@ bool ServerRoutes::get(const update::HttpRequest& req, update::HttpAnswer& out, 
   std::snprintf(out.etag, sizeof(out.etag), "%s", answer.etag);
   std::snprintf(out.contentRange, sizeof(out.contentRange), "%s", answer.contentRange);
   std::snprintf(out.error, sizeof(out.error), "%s", answer.error);
+  // Why a body stopped, for the fetch's own line (task p1.19-68).
+  out.bodyReturn = answer.bodyReturn;
+  out.bodyReturnKnown = answer.bodyReturnKnown;
+  out.tlsError = answer.tlsError;
+  out.outOfMemory = answer.outOfMemory;
+  out.largestFreeBlock = answer.largestFreeBlock;
   return out.reachable;
 }
 
