@@ -31,6 +31,10 @@ release workflow opens the next section when it moves the version on, and
 `tools/release.ps1 -Action check` fails in CI when the heading and `VERSION`
 disagree.
 
+## v0.7.8
+
+Nothing yet.
+
 ## v0.7.7
 
 Nothing yet.
