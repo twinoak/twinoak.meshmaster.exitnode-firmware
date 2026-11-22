@@ -96,13 +96,14 @@ order, each bounded, and then it returns and the caller sleeps.**
 
 ```
 config (if this uplink has none) → heartbeat (with the intent) → the offline buffer
-    → the claim (sized from the cap) → the jobs (each priced first) → the batches
+    → the claim (sized from the cap) → the jobs (each priced first) → [claim again] → the batches
 ```
 
 ```cpp
 mm::WakeIntent intent;
 intent.nextCheckInS = 3600;             // what the heartbeat promises the server
 intent.maxTransactionsThisWake = 12;    // and what this wake has the energy for
+intent.maxClaimsThisWake = 4;           // and how many times it may ask for work
 
 mm::Budget budget;
 budget.wakeSeconds = 240;               // the whole wake
@@ -134,6 +135,7 @@ wake cases hold:
 |---|---|
 | **the bounds** | every one of them is read off `IPlatform::millis()`, so the fake clock *is* the budget: a config read that is twenty-one transactions at two a minute is priced at about ten minutes (`mm::transactionsOf` and the gate's pace), a wake with a minute will not start it, and the test says so in milliseconds that nobody waited for |
 | **the promise** | `nextCheckInS` and `maxTransactionsThisWake` are the two optional heartbeat fields of [`spec/EXIT-NODES.md` §6](https://github.com/twinoak/meshmaster.dk/blob/master/spec/EXIT-NODES.md) (*An agent that paces itself*). An agent that proposes neither — `loop()`, so the Heltec — writes the bytes it always wrote, which `test_envelopes` holds against a fixture of its own, `AgentHeartbeatNoWake.json`, beside the one that carries both fields. The reply's `pollIntervalS` is **the accepted interval** and is in the report |
+| **how many claims** | a claim takes two jobs at most, so `maxClaimsThisWake` above 1 lets a wake that has finished what it was handed **ask again** - while the answer to its last result said `jobsWaiting`, nothing of that claim was kept for the budget, and it has the time, the transactions and the claims for it (task p1.20-69). 0 and 1 are the one claim every wake made before, which is what the cases of a wake written before that task still assert; `report.claimsMade` and `report.claimsEndedBy` are what a case about this reads, and the fake server's `sayMoreWaitsAfterEveryResult()` is what makes it happen |
 | **no job left leased** | a job the wake cannot finish is **not put on the air**, and its result is posted all the same: `failed`, with *wake budget* in the log. `NoWakeEverLeavesAJobLeasedAndSilent` is the property over a spread of budgets, caps and claims — every job a claim handed over has a posted result |
 
 What a wake does *not* do: spin, and restart the device. A backoff or a

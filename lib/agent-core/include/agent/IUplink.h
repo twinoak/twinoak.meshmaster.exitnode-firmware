@@ -81,13 +81,27 @@ class IUplink {
   // POST /agent/v1/observations. `body` is what writeObservationBatch() made.
   virtual bool postObservations(const char* body, size_t len, int& accepted, bool& duplicate) = 0;
 
-  // POST /agent/v1/jobs/claim `{"max":N}`. True when the server answered 200 and the reply
-  // parsed; `count` is how many jobs it handed over, which may be none.
-  virtual bool claimJobs(ClaimedJob* jobs, int max, int& count) = 0;
+  // POST /agent/v1/jobs/claim `{"max":N}`, the body `writeClaimRequest` makes. True when the
+  // server answered 200 and the reply parsed; `count` is how many jobs it handed over, which may
+  // be none.
+  //
+  // `transactionsLeft` is what the wake has left of the `maxTransactionsThisWake` its heartbeat
+  // stated, so that the server hands out no job this wake cannot pay for (task p1.20-69).
+  // **Below 0 is not stated**: the member is left out and the body is `{"max":N}` to the byte,
+  // which is what `loop()` sends and what the first claim of a wake sends.
+  virtual bool claimJobs(ClaimedJob* jobs, int max, int& count, int transactionsLeft) = 0;
 
   // POST /agent/v1/jobs/{id}/result. `body` is what writeJobResult() made. A late result is
   // taken all the same and a duplicate clientId stores nothing twice, so this is safe to retry.
-  virtual bool postJobResult(long long jobId, const char* body, size_t len) = 0;
+  //
+  // `jobsWaiting` is the answer's own `jobsWaiting` (API §3, task p1.20-69): whether a claim by
+  // this exit node now would be handed a job. **Read from the body this call already has** -
+  // `mm::resultReplySaysJobsWaiting` is the reader, so the reply is parsed once, here, and the
+  // library is handed an answer rather than a second copy of the bytes. False when the member was
+  // not there, which is every answer from a server that has never written it, and false whenever
+  // this returns false: a call that got no answer said nothing. A wake claims again on it
+  // (`AgentLoop::WakeIntent::maxClaimsThisWake`); `loop()` does nothing with it.
+  virtual bool postJobResult(long long jobId, const char* body, size_t len, bool& jobsWaiting) = 0;
 
   // POST /agent/v1/jobs/{id}/extend `{"seconds":N}` (1-1800): the lease holder asks for longer.
   // True when the server answered 200; `leaseUntil` is then the new end of the lease (UNIX

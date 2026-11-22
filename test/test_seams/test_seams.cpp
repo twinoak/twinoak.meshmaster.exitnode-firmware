@@ -445,10 +445,15 @@ TEST(Seams, TheMeshIsAskedWhatItCannotCarryAtTheHeartbeatAndBeforeAJobAndTheHelt
 // p1.7-25). A type the mesh declines spends no transaction, so there is no budget for it to be
 // too large for; priced first, a bound `trace` on a mesh with no trace came back `failed`,
 // *wake budget*, where `loop()` answered `unsupported` for the same job.
+//
+// The jobs of a claim moved out of `wakeJobs` into `wakeRunClaimed` when a wake learnt to claim
+// more than once (task p1.20-69), and that is the function this reads: the rule is the same one
+// and it now holds for the jobs of **every** claim a wake makes, because there is one place they
+// are run from.
 TEST(Seams, AWakeAsksTheMeshWhetherItCarriesAJobBeforeItPricesIt) {
   const fs::path root(PROJECT_DIR);
   const std::string loop = readFile(root / "lib/agent-core/src/AgentLoop.cpp");
-  const size_t from = loop.find("void AgentLoop::wakeJobs(WakeReport& report) {");
+  const size_t from = loop.find("void AgentLoop::wakeRunClaimed(WakeReport& report, int count) {");
   ASSERT_NE(from, std::string::npos);
   const size_t to = loop.find("\n}", from);
   ASSERT_NE(to, std::string::npos);

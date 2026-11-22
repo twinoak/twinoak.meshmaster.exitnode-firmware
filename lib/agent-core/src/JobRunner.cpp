@@ -2075,7 +2075,12 @@ bool JobRunner::post(long long jobId, const char* body, size_t len) {
   const uint32_t failuresBefore = postFailures_;
   flushResults();
   if (results_.empty() && mayPost(len)) {
-    if (spend(len, [&] { return server_->postJobResult(jobId, body, len); })) return true;
+    // What the answer said about more work waiting is read here and nowhere else, from the body
+    // this call already had: a wake claims again on it (task p1.20-69).
+    bool waiting = false;
+    const bool took = spend(len, [&] { return server_->postJobResult(jobId, body, len, waiting); });
+    lastResultJobsWaiting_ = took && waiting;
+    if (took) return true;
     postFailures_++;
   } else if (postFailures_ == failuresBefore) {
     // Not the server: what stopped this was the wake's own bytes or its uplink seconds, here or
@@ -2129,10 +2134,13 @@ int JobRunner::flushResults() {
       }
       return posted;
     }
-    if (!spend(len, [&] { return server_->postJobResult(jobId, body, len); })) {
+    bool waiting = false;
+    if (!spend(len, [&] { return server_->postJobResult(jobId, body, len, waiting); })) {
+      lastResultJobsWaiting_ = false;
       postFailures_++;
       return posted;
     }
+    lastResultJobsWaiting_ = waiting;
     posted++;
     LOG_I("jobs: the kept result of job %lld went through", jobId);
     results_.popOldest();
@@ -2164,16 +2172,20 @@ int JobRunner::claimAndRun() {
   return count;
 }
 
-int JobRunner::claim(int max) {
+int JobRunner::claim(int max, int transactionsLeft) {
   if (max > kClaimMax) max = kClaimMax;
   if (max < 1) max = 1;
 
   // Whatever a previous claim left: no password outlives its job, and none waits for the next.
   for (int i = 0; i < kClaimMax; i++) g_jobs[i].credential.wipe();
   claimed_ = 0;
+  // And whatever the last claim's results were told: `jobsWaiting` is about the claim that is
+  // being finished, so the answer a caller reads after this one is this claim's or nothing
+  // (task p1.20-69).
+  lastResultJobsWaiting_ = false;
 
   int count = 0;
-  if (!spend(0, [&] { return server_->claimJobs(g_jobs, max, count); })) {
+  if (!spend(0, [&] { return server_->claimJobs(g_jobs, max, count, transactionsLeft); })) {
     for (int i = 0; i < kClaimMax; i++) g_jobs[i].credential.wipe();
     return -1;
   }

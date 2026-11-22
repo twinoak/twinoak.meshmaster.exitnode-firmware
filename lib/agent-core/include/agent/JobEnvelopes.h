@@ -209,8 +209,27 @@ bool guestIsEnough(const char* type, CredentialClass credentialClass, uint8_t gr
 // `leaseUntil` of 0 is a claim that named no lease.
 bool leaseLapsed(uint32_t leaseUntil, bool hasTime, uint32_t nowEpoch);
 
-// POST /agent/v1/jobs/claim's body: `{"max":N}`.
-size_t writeClaimRequest(int max, char* out, size_t cap);
+// POST /agent/v1/jobs/claim's body: `{"max":N}`, and after `max` the optional `transactionsLeft`
+// (API §3, task p1.20-69; meshmaster.dk's task p4.47-253) - what the wake has left of the
+// `maxTransactionsThisWake` its heartbeat stated, so that the server hands out no job this wake
+// cannot pay for. **Below 0 is not stated** and the member is left out, which is the body to the
+// byte that `loop()` sends and that the first claim of a wake sends: an agent writes it in every
+// claim of a wake after the first and never in the first, and a wake whose intent proposed no cap
+// has nothing to say and writes none.
+size_t writeClaimRequest(int max, char* out, size_t cap, int transactionsLeft = -1);
+
+// The answer to a posted result (API §3: `{ jobId, state, duplicate, late }`), read for the one
+// member of it this firmware acts on: **`jobsWaiting`** - whether a claim by this exit node now
+// would be handed a job (task p1.20-69). The server writes it to an exit node whose last
+// heartbeat stated an interval of its own and to no other, so a reply without it says nothing -
+// and nothing is **false** here: an older server has never written it, and a wake that cannot be
+// told there is more does what it always did, one claim.
+//
+// Never a reason to fail a result the server answered 200: a body that is not JSON, or not an
+// object, is false too. Nothing else of the reply is read - the job id, the state, `duplicate`
+// and `late` are the server's record of what it already has, and this firmware acts on none of
+// them.
+bool resultReplySaysJobsWaiting(const char* json, size_t len);
 
 // Reads the claim's answer. At most `max` jobs are kept - the server sends at most what was
 // asked for, and a reply that says otherwise is not a reason to overrun a buffer. `count` is how

@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -30,6 +31,9 @@
 #ifndef COMPANION_DIR
 #error "COMPANION_DIR must be defined; platformio.ini's [env:native] does it"
 #endif
+#ifndef AHEAD_FIXTURES_DIR
+#error "AHEAD_FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
+#endif
 
 namespace {
 
@@ -38,6 +42,18 @@ namespace fs = std::filesystem;
 std::string fixture(const std::string& name) {
   std::ifstream in(fs::path(FIXTURES_DIR) / (name + ".json"), std::ios::binary);
   EXPECT_TRUE(in.good()) << "no such contract fixture: " << name;
+  std::ostringstream all;
+  all << in.rdbuf();
+  std::string text = all.str();
+  while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+  return text;
+}
+
+// An envelope meshmaster.dk has not put on its master yet, written here from the line of the task
+// that needs it (tests/fixtures/contracts-ahead/README.md). Read exactly as a copied fixture is.
+std::string ahead(const std::string& name) {
+  std::ifstream in(fs::path(AHEAD_FIXTURES_DIR) / (name + ".json"), std::ios::binary);
+  EXPECT_TRUE(in.good()) << "no such waiting fixture: " << name;
   std::ostringstream all;
   all << in.rdbuf();
   std::string text = all.str();
@@ -789,6 +805,59 @@ TEST(LoginSilentResult, ItIsTheOneReasonAndTheTierTheProbeWasAnsweredAt) {
   len = mm::writeLoginSilentResult(nullptr, out, sizeof out);
   ASSERT_GT(len, 0u);
   EXPECT_EQ(std::string(out, len), "{\"reason\":\"silentAfterReachable\"}") << "a null tier is left out, as the record's null is";
+}
+
+// ---------------------------------------------------------------------------------------------
+// The answer to a result (API §3, task p1.20-69)
+//
+// `POST /jobs/{id}/result` answers `{ jobId, state, duplicate, late }`, and to an exit node whose
+// last heartbeat stated an interval of its own it answers `jobsWaiting` last as well: whether a
+// claim by that exit node now would be handed a job. It is the one member of the answer this
+// firmware reads, and a wake claims again on it.
+
+TEST(JobResultReply, TheWaitingFixtureSaysMoreWaits) {
+  const std::string reply = ahead("JobResultReplyWaiting");
+  EXPECT_EQ(reply, "{\"jobId\":12345,\"state\":\"succeeded\",\"duplicate\":true,\"late\":true,\"jobsWaiting\":true}")
+      << "the waiting fixture is the line task p1.20-69 carries";
+  EXPECT_TRUE(mm::resultReplySaysJobsWaiting(reply.c_str(), reply.size()));
+
+  // And it is the answer every server has always given, with the one member appended: an exit
+  // node that proposes nothing gets `JobResultReply.json` and reads no `jobsWaiting` from it.
+  const std::string plain = fixture("JobResultReply");
+  EXPECT_EQ(reply.find(plain.substr(0, plain.size() - 1)), 0u)
+      << "the waiting reply is no longer JobResultReply.json with `jobsWaiting` last";
+  EXPECT_FALSE(mm::resultReplySaysJobsWaiting(plain.c_str(), plain.size()))
+      << "a reply that does not carry the member says nothing, and nothing is not `more waits`";
+}
+
+TEST(JobResultReply, FalseAndAbsentAndRubbishAreAllNoMore) {
+  const char* const no[] = {
+      "{\"jobId\":12345,\"state\":\"succeeded\",\"duplicate\":false,\"late\":false,\"jobsWaiting\":false}",
+      "{\"jobId\":12345,\"state\":\"succeeded\"}",
+      "{}",
+      "{\"jobsWaiting\":\"true\"}",
+      "{\"jobsWaiting\":1}",
+      "[]",
+      "not json at all",
+      "",
+  };
+  for (const char* body : no) {
+    EXPECT_FALSE(mm::resultReplySaysJobsWaiting(body, std::strlen(body))) << body;
+  }
+  EXPECT_FALSE(mm::resultReplySaysJobsWaiting(nullptr, 0));
+}
+
+TEST(JobResultReply, ItIsReadWhereverTheMemberSitsAndWhateverElseIsThere) {
+  // The member is written last today, and a member this firmware does not know is not a reason to
+  // stop reading one it does: the rule every reply of this protocol is read by (API §4).
+  const char* const yes[] = {
+      "{\"jobId\":12345,\"state\":\"succeeded\",\"duplicate\":true,\"late\":true,\"jobsWaiting\":true}",
+      "{\"jobsWaiting\":true,\"jobId\":12345}",
+      "{\"jobId\":12345,\"jobsWaiting\":true,\"somethingNew\":{\"a\":[1,2]}}",
+  };
+  for (const char* body : yes) {
+    EXPECT_TRUE(mm::resultReplySaysJobsWaiting(body, std::strlen(body))) << body;
+  }
 }
 
 }  // namespace

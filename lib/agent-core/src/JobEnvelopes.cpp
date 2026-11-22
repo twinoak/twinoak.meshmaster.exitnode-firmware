@@ -159,13 +159,33 @@ bool leaseLapsed(uint32_t leaseUntil, bool hasTime, uint32_t nowEpoch) {
   return nowEpoch >= leaseUntil;
 }
 
-size_t writeClaimRequest(int max, char* out, size_t cap) {
+size_t writeClaimRequest(int max, char* out, size_t cap, int transactionsLeft) {
   JsonWriter w(out, cap);
   w.beginObject();
   w.key("max");
   w.integer(max);
+  // After `max`, and only when there is something to say: the member is left out for the first
+  // claim of a wake and for every claim a board that does not sleep makes, so those bodies are
+  // `{"max":N}` to the byte (API §3).
+  if (transactionsLeft >= 0) {
+    w.key("transactionsLeft");
+    w.integer(transactionsLeft);
+  }
   w.endObject();
   return w.overflowed() ? 0 : w.length();
+}
+
+bool resultReplySaysJobsWaiting(const char* json, size_t len) {
+  if (json == nullptr || len == 0) return false;
+  JsonDocument doc;
+  if (deserializeJson(doc, json, len)) return false;
+  JsonObjectConst root = doc.as<JsonObjectConst>();
+  if (root.isNull()) return false;
+  JsonVariantConst waiting = root["jobsWaiting"];
+  // Absent, or a member of another type, is nothing - and nothing is false: the server writes
+  // this only to an exit node that paces itself, and a reply that does not carry it is not a
+  // reply that says there is more.
+  return waiting.is<bool>() && waiting.as<bool>();
 }
 
 bool parseClaimResponse(char* json, size_t len, ClaimedJob* jobs, int max, int& count, uint32_t& serverTime, char* err,

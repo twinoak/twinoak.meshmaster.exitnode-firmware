@@ -1,11 +1,14 @@
 # The fixtures that wait
 
-**Nothing waits here today.** The six that did — the neighbours result of task
-p1.15-56 and the update's five of task p1.15-61 — came across in the sync of
-19 November, the same bytes as the lines that had waited, and the tests read
-them from the copied tree
+**Two wait**, both of them task p1.20-69's and both written from the four lines
+meshmaster.dk's task p4.47-253 carries: the claim of a wake that has already made
+one, and the answer to a result that says more work is waiting. The six that
+waited before — the neighbours result of task p1.15-56 and the update's five of
+task p1.15-61 — came across in the sync of 19 November, the same bytes as the
+lines that had waited, and the tests read them from the copied tree
 ([`tests/fixtures/contracts/`](../contracts/README.md)). The directory stays,
-because the two repositories' piles will run side by side again.
+because the two repositories' piles will run side by side again — as they do
+now.
 
 **Not a copy — ever.** Every file here is an envelope of the agent protocol that
 twinoak/meshmaster.dk has not put on its `master` at the time the task that needs
@@ -28,7 +31,8 @@ first item of the pile's `FOLLOWUPS.md`.
 
 | File | Written for | From meshmaster.dk's |
 |---|---|---|
-| *(none)* | | |
+| `ClaimRequestLeft.json` | task p1.20-69: `transactionsLeft` after `max`, which a wake states in every claim after its first | task p4.47-253 |
+| `JobResultReplyWaiting.json` | task p1.20-69: `jobsWaiting` last in the answer to a result, on which a wake claims again | task p4.47-253 |
 
 ## Adding one
 

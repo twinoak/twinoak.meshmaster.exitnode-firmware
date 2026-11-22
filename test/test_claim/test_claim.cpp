@@ -23,20 +23,29 @@
 #ifndef FIXTURES_DIR
 #error "FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
 #endif
+#ifndef AHEAD_FIXTURES_DIR
+#error "AHEAD_FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
+#endif
 
 namespace {
 
 namespace fs = std::filesystem;
 
-std::string fixture(const std::string& name) {
-  std::ifstream in(fs::path(FIXTURES_DIR) / (name + ".json"), std::ios::binary);
-  EXPECT_TRUE(in.good()) << "no such fixture: " << name;
+std::string read(const fs::path& path) {
+  std::ifstream in(path, std::ios::binary);
+  EXPECT_TRUE(in.good()) << "cannot read " << path;
   std::ostringstream all;
   all << in.rdbuf();
   std::string text = all.str();
   while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
   return text;
 }
+
+std::string fixture(const std::string& name) { return read(fs::path(FIXTURES_DIR) / (name + ".json")); }
+
+// An envelope meshmaster.dk has not landed yet, written here from the line of the task that needs
+// it (tests/fixtures/contracts-ahead/README.md). Read exactly as a copied fixture is.
+std::string ahead(const std::string& name) { return read(fs::path(AHEAD_FIXTURES_DIR) / (name + ".json")); }
 
 // The second job of the pair: telemetry for the same repeater, grouped with the first, at class
 // `acl` - which is the material these four types ever carry, the granted level and no secret.
@@ -75,6 +84,44 @@ TEST(Claim, TheRequestIsTheOneFieldTheServerReads) {
   const std::size_t len = mm::writeClaimRequest(mm::kClaimMax, out, sizeof out);
   ASSERT_GT(len, 0u);
   EXPECT_EQ(std::string(out, len), "{\"max\":2}");
+}
+
+// The two members after `max` are optional and are left out when there is nothing to say, so the
+// body of the first claim of a wake - and of every claim a board that does not sleep makes - is
+// `ClaimRequest.json`'s one field, unmoved by task p1.20-69.
+TEST(Claim, AClaimThatStatesNothingElseIsTheFixtureStillMaxAlone) {
+  char out[64];
+  const std::size_t len = mm::writeClaimRequest(4, out, sizeof out, /*transactionsLeft=*/-1);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ(std::string(out, len), fixture("ClaimRequest")) << "the copied fixture is {\"max\":4}";
+}
+
+// And a wake's later claim states what is left of the transactions its heartbeat proposed, after
+// `max` and in that order: the waiting fixture of task p1.20-69, byte for byte.
+TEST(Claim, AWakesLaterClaimStatesWhatIsLeftAndIsTheWaitingFixture) {
+  char out[64];
+  const std::size_t len = mm::writeClaimRequest(mm::kClaimMax, out, sizeof out, /*transactionsLeft=*/17);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ(std::string(out, len), ahead("ClaimRequestLeft"));
+  EXPECT_EQ(std::string(out, len), "{\"max\":2,\"transactionsLeft\":17}");
+}
+
+// Nought is a number and is stated: a wake with nothing left says so rather than saying nothing,
+// which is a different thing to the server.
+TEST(Claim, NothingLeftIsStatedAsNoughtAndNotLeftOut) {
+  char out[64];
+  const std::size_t len = mm::writeClaimRequest(1, out, sizeof out, /*transactionsLeft=*/0);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ(std::string(out, len), "{\"max\":1,\"transactionsLeft\":0}");
+}
+
+// The buffer the WiFi client gives this call (src/agent/AgentClient.cpp) holds the longest body it
+// can write; a request that does not fit is refused whole rather than cut in half.
+TEST(Claim, ARequestThatDoesNotFitIsRefusedRatherThanCutInHalf) {
+  char out[64];
+  EXPECT_EQ(mm::writeClaimRequest(mm::kClaimMax, out, sizeof out, 2147483647), 39u);
+  char tiny[16];
+  EXPECT_EQ(mm::writeClaimRequest(mm::kClaimMax, tiny, sizeof tiny, 17), 0u);
 }
 
 TEST(Claim, TheFixtureResponseIsReadAsItArrives) {

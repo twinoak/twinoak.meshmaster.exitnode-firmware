@@ -8,7 +8,7 @@
 // From F-01 on, the tests that round-trip the agent's envelopes read the same files.
 //
 // The second half of this file is tests/fixtures/contracts-ahead/, the envelopes a task writes
-// here from its own line while meshmaster.dk has not landed them. Nothing waits there today.
+// here from its own line while meshmaster.dk has not landed them. Two wait there (task p1.20-69).
 
 #include <gtest/gtest.h>
 
@@ -197,21 +197,33 @@ TEST(ContractFixtures, TheNestedOnesAreHeldVerbatimByTheirEnvelope) {
 // two can be compared byte for byte and a wire the two ends do not agree on is found before any
 // release.
 //
-// **Nothing waits today** (task p1.16-62). The six of tasks p1.15-56 and p1.15-61 came across in
-// the sync of 19 November, the same bytes as the lines that had waited, and every test now reads
-// them from the copied tree. The directory, its README and the two tripwires below stay, because
-// two piles will run side by side again: the next task that needs an envelope meshmaster.dk has
-// not landed writes the file, adds its line to `kWaiting` below and its row to the README's
-// table, and these three tests hold it until the sync brings the real one.
+// **Two wait** (task p1.20-69). The six of tasks p1.15-56 and p1.15-61 came across in the sync of
+// 19 November, the same bytes as the lines that had waited, and every test reads them from the
+// copied tree; the two below are pile 1.20's, written from the four lines meshmaster.dk's task
+// p4.47-253 carries, and they are held here until its sync brings the real ones. A task that
+// writes a waiting fixture adds `{"Name.json", kName}` to `kWaiting`, with the line it carries
+// above it, and `NoneOfThemIsUnaccountedFor` fails until it does.
 
 struct Waiting {
   const char* name;
   const char* line;
 };
 
-// Empty: nothing waits. A task that writes a waiting fixture adds `{"Name.json", kName}` here,
-// with the line it carries above, and `NoneOfThemIsUnaccountedFor` fails until it does.
-const std::vector<Waiting> kWaiting = {};
+// The claim of a wake that has already made one: `transactionsLeft` after `max`, what is left of
+// the `maxTransactionsThisWake` the heartbeat stated. The member is left out of the first claim
+// of a wake and of every claim a board that does not sleep makes, so `ClaimRequest.json` in the
+// copied tree is what it was, to the byte.
+const char* const kClaimRequestLeft = "{\"max\":2,\"transactionsLeft\":17}\n";
+// The answer to a result, with `jobsWaiting` last: whether a claim by this exit node now would be
+// handed a job. The server writes it to an exit node whose last heartbeat stated an interval of
+// its own and to no other, so `JobResultReply.json` in the copied tree is what it was too.
+const char* const kJobResultReplyWaiting =
+    "{\"jobId\":12345,\"state\":\"succeeded\",\"duplicate\":true,\"late\":true,\"jobsWaiting\":true}\n";
+
+const std::vector<Waiting> kWaiting = {
+    {"ClaimRequestLeft.json", kClaimRequestLeft},
+    {"JobResultReplyWaiting.json", kJobResultReplyWaiting},
+};
 
 TEST(WaitingFixtures, TheyAreTheirTasksLineByteForByte) {
   ASSERT_TRUE(fs::is_directory(ahead_dir())) << ahead_dir();
