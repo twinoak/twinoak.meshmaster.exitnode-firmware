@@ -240,9 +240,19 @@ struct WakeReport {
   // cannot work out from the numbers. "" when no claim was made at all, and then the `claim`
   // outcome above says why instead.
   const char* claimsEndedBy = "";
+  // Claims whose answer did not come back whole and which were therefore **asked once more** in
+  // this wake (task p1.20-70): the server had leased their jobs and this end never heard. One of
+  // these is not a failure - the second claim is the one that counts - and `claimFailures` rises
+  // only when that one fails too.
+  int claimsLost = 0;
   int jobsClaimed = 0;
   int jobsRun = 0;
   int jobsNotRun = 0;          // claimed, never on the air: reported `failed`, *wake budget*
+  // Jobs the server handed over again while this end kept a result for them (task p1.20-70):
+  // **not run a second time**, their kept result posted instead. Neither run nor not-run: the job
+  // was answered the first time it was handed over. 0 against a server that reads the claim's
+  // `holding`, which is every server from meshmaster.dk's task p4.47-254 on.
+  int jobsHandedOverAgain = 0;
   int batchesPosted = 0;
   int observationsPosted = 0;
   int observationsLeft = 0;    // still in the ring when the wake ended

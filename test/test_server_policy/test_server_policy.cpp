@@ -63,6 +63,35 @@ TEST(ServerPolicy, ATwoHundredIsSimplyOk) {
   EXPECT_EQ(mm::ServerAction::Ok, mm::actionFor(true, 204, 0));
 }
 
+// ---- task p1.20-70: the answer that was lost ---------------------------------------------------
+//
+// The claim's jobs are leased in the moment the server answers, so a claim whose answer did not
+// come back whole has left leases this exit node knows nothing of - and is worth asking once more.
+// A refusal is the server having spoken.
+
+TEST(ServerPolicy, AnAnswerThatNeverArrivedIsLost) {
+  EXPECT_TRUE(mm::answerWasLost(false, 0)) << "no reply after the request went out";
+  // A stale status beside an unreachable call changes nothing: `reachable` decides first, exactly
+  // as it does in actionFor.
+  EXPECT_TRUE(mm::answerWasLost(false, 429));
+  EXPECT_TRUE(mm::answerWasLost(false, 503));
+}
+
+TEST(ServerPolicy, ATwoHundredThisClientCouldNotReadIsLost) {
+  // Only ever asked of a call that failed, so a 2xx here is a 2xx whose body did not come back
+  // whole: the 200 with no body the Walter's modem gave the unit at Bellevue on 21 November, a
+  // 204 where a document was due, a body that is not the document it should be.
+  for (int status : {200, 201, 202, 204, 299}) {
+    EXPECT_TRUE(mm::answerWasLost(true, status)) << "http " << status;
+  }
+}
+
+TEST(ServerPolicy, EverythingTheServerSpokeIsARefusalAndNotLost) {
+  for (int status : {300, 304, 400, 401, 403, 404, 408, 409, 410, 413, 422, 429, 500, 502, 503, 504}) {
+    EXPECT_FALSE(mm::answerWasLost(true, status)) << "http " << status;
+  }
+}
+
 // ---- task p1.2-10: the deploy ------------------------------------------------------------------
 
 TEST(ServerPolicy, AFiveHundredBacksOffFromHalfAMinute) {

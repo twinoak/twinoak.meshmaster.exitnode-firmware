@@ -87,9 +87,24 @@ class IUplink {
   //
   // `transactionsLeft` is what the wake has left of the `maxTransactionsThisWake` its heartbeat
   // stated, so that the server hands out no job this wake cannot pay for (task p1.20-69).
-  // **Below 0 is not stated**: the member is left out and the body is `{"max":N}` to the byte,
-  // which is what `loop()` sends and what the first claim of a wake sends.
-  virtual bool claimJobs(ClaimedJob* jobs, int max, int& count, int transactionsLeft) = 0;
+  // **Below 0 is not stated**: the member is left out, which is what `loop()` sends and what the
+  // first claim of a wake sends.
+  //
+  // `holding` and `holdingCount` are the ids of the jobs this exit node is running or keeps a
+  // result for, oldest first (task p1.20-70): the claim's `holding`, on which the server hands
+  // back a lease whose answer was lost. The library fills it for **every** claim it makes -
+  // `[]` when it holds nothing, which says *nothing* where an absent member says *this agent
+  // does not say* - so pass both straight on to
+  // `writeClaimRequest(max, out, cap, transactionsLeft, holding, holdingCount)` and write
+  // neither member yourself.
+  //
+  // **A lost answer is told apart from a refusal by `lastCall()`** (agent/ServerPolicy.h's
+  // `answerWasLost`), so an implementation must leave `lastCall()` saying what really came back:
+  // `reachable` false and `httpStatus` 0 for no reply, and `httpStatus` 200 with `ok` false for a
+  // 200 whose body did not parse. A wake makes such a claim once more; it makes no second claim
+  // after a refusal.
+  virtual bool claimJobs(ClaimedJob* jobs, int max, int& count, int transactionsLeft, const long long* holding,
+                         int holdingCount) = 0;
 
   // POST /agent/v1/jobs/{id}/result. `body` is what writeJobResult() made. A late result is
   // taken all the same and a duplicate clientId stores nothing twice, so this is safe to retry.

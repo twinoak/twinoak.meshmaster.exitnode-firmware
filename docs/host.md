@@ -44,7 +44,7 @@ on the include path of every suite).
 | | |
 |---|---|
 | `support/FakeMesh.h` | **A stock repeater at the MeshCore pin.** `mm::IMesh` with one repeater behind it: a name, an ACL of keys at levels (which on stock firmware *is* the login table), an admin password, a guest password or none, the configuration `CONFIGURATION.md` lists, neighbours, a region map, a clock. It answers `sendLogin`, `sendRequest`, `sendCli`, `sendDiscovery` and `sendTrace` as that firmware does, and faults on cue: silence once, twice or always, a reply with the wrong tag, a reply past the wait, a session the repeater forgot, a login refused, a line it will not answer — and, since task p1.6-23, a job type the mesh cannot carry (`cannotServe("trace")`, which is `IMesh::supports` answering false: not advertised, and `unsupported` with nothing sent). Every send is recorded with the fake clock's time, which is what *one send per command*, the minimum gap and the per-minute cap are asserted against |
-| `support/FakeUplink.h` | **A scripted meshmaster.dk.** `mm::IUplink` with a config, heartbeat replies that may say work is waiting, a claim queue of jobs built from the contract fixtures through the firmware's own `parseClaimResponse`, and every result, observation batch, extend and progress call captured as the bytes the library made. Faults: unreachable, 401, 429 with `Retry-After`, 5xx, a 4xx that discards, a slow call |
+| `support/FakeUplink.h` | **A scripted meshmaster.dk.** `mm::IUplink` with a config, heartbeat replies that may say work is waiting, a claim queue of jobs built from the contract fixtures through the firmware's own `parseClaimResponse`, and every result, observation batch, extend and progress call captured as the bytes the library made. Faults: unreachable, 401, 429 with `Retry-After`, 5xx, a 4xx that discards, a slow call, an answer lost on the way back (to an observation batch, or to a claim whose jobs it has leased) |
 | `support/FakePlatform.h` | **A clock that only moves when the test says.** `mm::IPlatform` and `mm::IClock`: `delayMs` *is* the passage of time, so the budget's twenty-second gap is twenty thousand turns of arithmetic and a config read that is eleven minutes on the board is milliseconds here. A seeded random, so a failure is the same failure twice; a log captured rather than printed; and `rebootForHealth` that records its reason and throws, because it may not return and nothing restarts |
 | `support/FakeRetained.h` | **A store that survives a sleep** (task p1.6-22). `mm::IRetained` over a vector: a capacity the test sets, one image written whole and read back, every write and read counted — which is what *at most one image a wake, and none when nothing changed* is held against. The image can be torn short, have a bit flipped, be replaced or erased, and its bytes are readable as text, which is how an image is grepped for a password. A power cut is `clear()`; a sleep is nothing at all, because the vector is the flash and stays |
 | `support/Fixtures.h` | The two fixture sets, read from disk: a companion frame with its wrapper stripped, a contract envelope, and `followsShapeOf` — one object's members against a fixture's, in the fixture's order |
@@ -96,7 +96,8 @@ order, each bounded, and then it returns and the caller sleeps.**
 
 ```
 config (if this uplink has none) → heartbeat (with the intent) → the offline buffer
-    → the claim (sized from the cap) → the jobs (each priced first) → [claim again] → the batches
+    → the claim (sized from the cap, saying what this end holds) → the jobs (each
+      priced first) → [claim again] → the batches
 ```
 
 ```cpp
@@ -128,7 +129,7 @@ charges every call the same milliseconds of the test's clock, so
 and two text tests hold that no call to the server is made anywhere but through
 that ledger.
 
-Three things a test of a wake is about, and they are what `test/test_loop`'s
+Four things a test of a wake is about, and they are what `test/test_loop`'s
 wake cases hold:
 
 | | |
@@ -136,6 +137,7 @@ wake cases hold:
 | **the bounds** | every one of them is read off `IPlatform::millis()`, so the fake clock *is* the budget: a config read that is twenty-one transactions at two a minute is priced at about ten minutes (`mm::transactionsOf` and the gate's pace), a wake with a minute will not start it, and the test says so in milliseconds that nobody waited for |
 | **the promise** | `nextCheckInS` and `maxTransactionsThisWake` are the two optional heartbeat fields of [`spec/EXIT-NODES.md` §6](https://github.com/twinoak/meshmaster.dk/blob/master/spec/EXIT-NODES.md) (*An agent that paces itself*). An agent that proposes neither — `loop()`, so the Heltec — writes the bytes it always wrote, which `test_envelopes` holds against a fixture of its own, `AgentHeartbeatNoWake.json`, beside the one that carries both fields. The reply's `pollIntervalS` is **the accepted interval** and is in the report |
 | **how many claims** | a claim takes two jobs at most, so `maxClaimsThisWake` above 1 lets a wake that has finished what it was handed **ask again** - while the answer to its last result said `jobsWaiting`, nothing of that claim was kept for the budget, and it has the time, the transactions and the claims for it (task p1.20-69). 0 and 1 are the one claim every wake made before, which is what the cases of a wake written before that task still assert; `report.claimsMade` and `report.claimsEndedBy` are what a case about this reads, and the fake server's `sayMoreWaitsAfterEveryResult()` is what makes it happen |
+| **a claim that was lost** | the server leases a claim's jobs in the moment it answers, so a claim whose answer did not come back whole is one it holds leases for and this end knows nothing of (task p1.20-70). Every claim therefore carries `holding` - what this end keeps a result for, `[]` when nothing - and such a claim is made **once** more in the same wake; a refusal is not. `FakeUplink::loseTheAnswerToClaims()` is what makes it happen and it stands in for meshmaster.dk's task p4.47-254 as well, handing the leases back to the next claim that says it does not hold them; `failClaims()` is the refusal beside it. `report.claimsLost` and `report.jobsHandedOverAgain` are what a case about this reads |
 | **no job left leased** | a job the wake cannot finish is **not put on the air**, and its result is posted all the same: `failed`, with *wake budget* in the log. `NoWakeEverLeavesAJobLeasedAndSilent` is the property over a spread of budgets, caps and claims — every job a claim handed over has a posted result |
 
 What a wake does *not* do: spin, and restart the device. A backoff or a

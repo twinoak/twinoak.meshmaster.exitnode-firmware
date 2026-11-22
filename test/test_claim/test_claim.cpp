@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -115,6 +116,47 @@ TEST(Claim, NothingLeftIsStatedAsNoughtAndNotLeftOut) {
   EXPECT_EQ(std::string(out, len), "{\"max\":1,\"transactionsLeft\":0}");
 }
 
+// `holding` is the claim's last member and this library writes it in **every** claim: the ids of
+// the results this exit node keeps and has not had taken, oldest first. One id is the waiting
+// fixture of task p1.20-70, byte for byte.
+TEST(Claim, AClaimSaysWhatThisExitNodeHoldsAndIsTheWaitingFixture) {
+  char out[mm::kMaxClaimRequestLen];
+  const long long held[] = {12345};
+  const std::size_t len = mm::writeClaimRequest(mm::kClaimMax, out, sizeof out, /*transactionsLeft=*/-1, held, 1);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ(std::string(out, len), ahead("ClaimRequestHolding"));
+  EXPECT_EQ(std::string(out, len), "{\"max\":2,\"holding\":[12345]}");
+}
+
+// And **nothing held is `[]`, not nothing said**: an empty list tells the server this exit node
+// holds no job, where leaving the member out tells it this agent does not say - and only on the
+// first does it hand a lease back (meshmaster.dk's task p4.47-254). This is the body of all but
+// the rarest claim this firmware makes.
+TEST(Claim, NothingHeldIsAnEmptyListAndNotALeftOutMember) {
+  char out[mm::kMaxClaimRequestLen];
+  const std::size_t len = mm::writeClaimRequest(mm::kClaimMax, out, sizeof out, /*transactionsLeft=*/-1,
+                                                /*holding=*/nullptr, /*holdingCount=*/0);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ(std::string(out, len), ahead("ClaimRequestHoldingNothing"));
+  EXPECT_EQ(std::string(out, len), "{\"max\":2,\"holding\":[]}");
+
+  // A count below 0 is the member left out, which is `ClaimRequest.json` to the byte: the one
+  // thing this library never writes, and what a consumer that says nothing writes.
+  const std::size_t silent = mm::writeClaimRequest(mm::kClaimMax, out, sizeof out, /*transactionsLeft=*/-1,
+                                                   /*holding=*/nullptr, /*holdingCount=*/-1);
+  ASSERT_GT(silent, 0u);
+  EXPECT_EQ(std::string(out, silent), "{\"max\":2}");
+}
+
+// Both members, in the order API §3 gives them: `transactionsLeft` after `max`, `holding` last.
+TEST(Claim, BothOptionalMembersGoInTheOrderTheContractGivesThem) {
+  char out[mm::kMaxClaimRequestLen];
+  const long long held[] = {12345, 12346};
+  const std::size_t len = mm::writeClaimRequest(mm::kClaimMax, out, sizeof out, /*transactionsLeft=*/17, held, 2);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ(std::string(out, len), "{\"max\":2,\"transactionsLeft\":17,\"holding\":[12345,12346]}");
+}
+
 // The buffer the WiFi client gives this call (src/agent/AgentClient.cpp) holds the longest body it
 // can write; a request that does not fit is refused whole rather than cut in half.
 TEST(Claim, ARequestThatDoesNotFitIsRefusedRatherThanCutInHalf) {
@@ -122,6 +164,22 @@ TEST(Claim, ARequestThatDoesNotFitIsRefusedRatherThanCutInHalf) {
   EXPECT_EQ(mm::writeClaimRequest(mm::kClaimMax, out, sizeof out, 2147483647), 39u);
   char tiny[16];
   EXPECT_EQ(mm::writeClaimRequest(mm::kClaimMax, tiny, sizeof tiny, 17), 0u);
+  // And `kMaxClaimRequestLen` is the bound that makes that unreachable in the client: the longest
+  // body there is - both members, every id the result buffer can hold, and the widest integers
+  // they can be - fits it with room to spare, so no claim this library can make is ever refused.
+  long long full[mm::kClaimHoldingMax];
+  for (int i = 0; i < mm::kClaimHoldingMax; i++) full[i] = -9223372036854775807LL - 1;
+  char widest[mm::kMaxClaimRequestLen];
+  const std::size_t len =
+      mm::writeClaimRequest(mm::kClaimMax, widest, sizeof widest, 2147483647, full, mm::kClaimHoldingMax);
+  EXPECT_GT(len, 0u) << "the longest claim this library can write does not fit kMaxClaimRequestLen";
+  EXPECT_LE(len, mm::kMaxClaimRequestLen);
+  // A list longer than the library can hold is cut to the bound rather than overrunning it: the
+  // commas are the one after `max` and the seven between eight ids.
+  const std::size_t bounded =
+      mm::writeClaimRequest(1, widest, sizeof widest, -1, full, mm::kClaimHoldingMax + 4);
+  ASSERT_GT(bounded, 0u);
+  EXPECT_EQ(std::count(widest, widest + bounded, ','), mm::kClaimHoldingMax);
 }
 
 TEST(Claim, TheFixtureResponseIsReadAsItArrives) {

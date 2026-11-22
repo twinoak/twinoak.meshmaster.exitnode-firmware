@@ -37,40 +37,65 @@ Pile 1.20 (`tasks/phase-1.20/`), in progress. **`agent-core` 0.7.6** in the thre
 manifests; the contract fixtures are still meshmaster.dk's **`28daabd`** and
 MeshCore is still **`companion-v1.18.0`, `81dbae59`**; `kMeshReplyDataCap` 184 and
 `kMeshPathCap` 64, unmoved. **Two methods of `IUplink` moved, and your tree will
-not compile until you follow them** — both of them gained one parameter and
-neither changed what it does. The four questions:
+not compile until you follow them** — both of them gained parameters and neither
+changed what it does. The four questions:
 
-- **Did a method move?** **Yes**, two of `IUplink` (p1.20-69), and nothing else of
-  `IMesh`, `IPlatform`, `IClock`, `IJobExtension`, `JobContext`, `ResultWriter`,
-  `TextOut`, `Backoff`, `WakeState` or `IRetained`:
-  - `claimJobs(jobs, max, count&, int transactionsLeft)`. Pass it on to
-    `mm::writeClaimRequest(max, out, cap, transactionsLeft)`, which writes the
-    claim's new optional `transactionsLeft` after `max` — and **leaves it out
-    when the value is below 0**, so a claim that states nothing is `{"max":N}` to
-    the byte as it always was.
+- **Did a method move?** **Yes**, two of `IUplink` (p1.20-69, p1.20-70), and
+  nothing else of `IMesh`, `IPlatform`, `IClock`, `IJobExtension`, `JobContext`,
+  `ResultWriter`, `TextOut`, `Backoff`, `WakeState` or `IRetained`:
+  - `claimJobs(jobs, max, count&, int transactionsLeft, const long long* holding,
+    int holdingCount)`. Pass all four on to
+    `mm::writeClaimRequest(max, out, cap, transactionsLeft, holding, holdingCount)`
+    and write neither new member yourself. `transactionsLeft` is the claim's new
+    optional member after `max` and **is left out when the value is below 0**;
+    `holding` is the ids this exit node keeps a result for and the library fills
+    it for **every** claim, `[]` when it holds nothing. One more thing is asked
+    of this method and it costs no line in a client that was already honest:
+    **`lastCall()` must say what really came back** — `reachable` false with
+    `httpStatus` 0 for no reply, `httpStatus` 200 with `ok` false for a 200 whose
+    body did not parse — because that is how a wake tells a lost answer from a
+    refusal (`mm::answerWasLost`, new in `agent/ServerPolicy.h`) and decides
+    whether to claim once more.
   - `postJobResult(jobId, body, len, bool& jobsWaiting)`. Set it from the answer
     with the new `mm::resultReplySaysJobsWaiting(body, len)` — the answer's own
     optional `jobsWaiting` — and `false` whenever you return false. A client that
     sets it false always is correct and loses only the new behaviour.
   Both are **one line each** in an existing implementation, and a tree that does
   neither still claims once a wake exactly as it did.
-- **What it buys:** `WakeIntent::maxClaimsThisWake`. A claim takes two jobs at
+- **What it buys, 1:** `WakeIntent::maxClaimsThisWake`. A claim takes two jobs at
   most, so a wake used to do two jobs an hour however much was queued; above 1,
   a wake that has finished what it was handed claims again while the server says
   more waits and it has the time, the transactions and the claims for it.
   **0 and 1 are one claim**, which is every caller's behaviour until it sets the
   field. `WakeReport` gained `claimsMade` and `claimsEndedBy`, and `jobsClaimed`,
   `jobsRun` and `jobsNotRun` now count over the whole wake.
+- **What it buys, 2:** a lost claim costs nothing, and **needs no field set**.
+  The server leases a claim's jobs in the moment it answers, so a claim whose
+  answer did not come back whole has left it holding leases this end knows
+  nothing of. Every claim now says what this end holds (`holding`), and a claim
+  whose answer was lost is made **once** more in the same wake with the same
+  `max` — one, not a loop; a refusal is not asked again, a second failure ends
+  the wake's jobs as a failure always did, and the pair counts one
+  `claimFailures`. A job handed over again whose result this end keeps is **not
+  run twice**: the kept result is posted. `WakeReport` gained `claimsLost` and
+  `jobsHandedOverAgain`, `JobRunner` gained `holding(out, cap)`,
+  `holdsResultFor(id)` and `handedOverAgain()`, and `mm::kClaimHoldingMax` and
+  `mm::kMaxClaimRequestLen` are the two bounds a client sizes its request buffer
+  by. **`loop()` gained `holding` and nothing else**: its next poll's claim is
+  the second claim already.
 - **Did a `MeshReply` constant move?** **No.** `kMeshReplyDataCap` is 184 and
   `kMeshPathCap` is 64, at the same MeshCore pin.
 - **Did the fixtures' manifest commit move?** **No**, still `28daabd`, and no
-  existing fixture's bytes changed. Two envelopes **wait** in
-  `tests/fixtures/contracts-ahead/` (§9.1) for meshmaster.dk's task 253:
-  `ClaimRequestLeft.json` and `JobResultReplyWaiting.json`. The wire moved only
-  by two optional members and one optional member, each left out when it has
-  nothing to say, so **a server that has never heard of them answers an older
-  exit node exactly as before** and this library reads a reply without
-  `jobsWaiting` as *nothing waits*.
+  existing fixture's bytes changed. Four envelopes **wait** in
+  `tests/fixtures/contracts-ahead/` (§9.1) for meshmaster.dk's pile 4.47:
+  `ClaimRequestLeft.json`, `JobResultReplyWaiting.json`,
+  `ClaimRequestHolding.json` and `ClaimRequestHoldingNothing.json`. The wire
+  moved only by three optional members, each left out when it has nothing to
+  say, so **a server that has never heard of them answers an older exit node
+  exactly as before** and this library reads a reply without `jobsWaiting` as
+  *nothing waits*. One caveat that is the server's and not the library's: a
+  server from before meshmaster.dk's task p4.47-254 reads `holding` and hands
+  nothing back on it, which is today's behaviour and not a regression.
 - **The version and the pin:** `agent-core` 0.7.6; MeshCore
   `companion-v1.18.0`, `81dbae59`.
 
