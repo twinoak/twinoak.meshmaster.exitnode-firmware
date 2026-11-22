@@ -8,7 +8,8 @@
 // From F-01 on, the tests that round-trip the agent's envelopes read the same files.
 //
 // The second half of this file is tests/fixtures/contracts-ahead/, the envelopes a task writes
-// here from its own line while meshmaster.dk has not landed them. Two wait there (task p1.20-69).
+// here from its own line while meshmaster.dk has not landed them. Four wait there (tasks p1.20-69
+// and p1.20-70).
 
 #include <gtest/gtest.h>
 
@@ -219,10 +220,20 @@ const char* const kClaimRequestLeft = "{\"max\":2,\"transactionsLeft\":17}\n";
 // its own and to no other, so `JobResultReply.json` in the copied tree is what it was too.
 const char* const kJobResultReplyWaiting =
     "{\"jobId\":12345,\"state\":\"succeeded\",\"duplicate\":true,\"late\":true,\"jobsWaiting\":true}\n";
+// The claim of an exit node that keeps a result it has not had taken: `holding` last, the job ids
+// it is running or keeps a result for, oldest first. The server hands back a lease whose answer
+// was lost on it (meshmaster.dk's task p4.47-254).
+const char* const kClaimRequestHolding = "{\"max\":2,\"holding\":[12345]}\n";
+// And the same member **empty**, which is what this library writes in every claim it makes while
+// it holds nothing: `[]` says *nothing held*, where leaving the member out says *this agent does
+// not say* - and the server hands a lease back only on the first.
+const char* const kClaimRequestHoldingNothing = "{\"max\":2,\"holding\":[]}\n";
 
 const std::vector<Waiting> kWaiting = {
     {"ClaimRequestLeft.json", kClaimRequestLeft},
     {"JobResultReplyWaiting.json", kJobResultReplyWaiting},
+    {"ClaimRequestHolding.json", kClaimRequestHolding},
+    {"ClaimRequestHoldingNothing.json", kClaimRequestHoldingNothing},
 };
 
 TEST(WaitingFixtures, TheyAreTheirTasksLineByteForByte) {

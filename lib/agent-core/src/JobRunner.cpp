@@ -2172,6 +2172,33 @@ int JobRunner::claimAndRun() {
   return count;
 }
 
+// The claim's `holding` can carry as many ids as the offline buffer can hold results, so the two
+// bounds are one number and the writer never has to leave an id out (JobEnvelopes.h).
+static_assert(kClaimHoldingMax == static_cast<int>(ResultBuffer::kMaxResults),
+              "kClaimHoldingMax is the result buffer's capacity: a claim says everything this end holds");
+
+int JobRunner::holding(long long* out, int cap) const {
+  if (out == nullptr || cap < 1) return 0;
+  int count = 0;
+  for (size_t i = 0; i < results_.count() && count < cap; i++) {
+    long long jobId = 0;
+    size_t len = 0;
+    if (results_.at(i, jobId, len) == nullptr) break;
+    out[count++] = jobId;
+  }
+  return count;
+}
+
+bool JobRunner::holdsResultFor(long long jobId) const {
+  for (size_t i = 0; i < results_.count(); i++) {
+    long long held = 0;
+    size_t len = 0;
+    if (results_.at(i, held, len) == nullptr) break;
+    if (held == jobId) return true;
+  }
+  return false;
+}
+
 int JobRunner::claim(int max, int transactionsLeft) {
   if (max > kClaimMax) max = kClaimMax;
   if (max < 1) max = 1;
@@ -2184,8 +2211,15 @@ int JobRunner::claim(int max, int transactionsLeft) {
   // (task p1.20-69).
   lastResultJobsWaiting_ = false;
 
+  // What this end holds, in **every** claim this library makes (task p1.20-70): the results in
+  // the offline buffer, oldest first, and `[]` when there are none. The server leases the jobs of
+  // a claim in the moment it answers, so an answer that was lost leaves it holding leases this
+  // end knows nothing of; this is how it finds out, and its task p4.47-254 hands them back.
+  long long held[kClaimHoldingMax];
+  const int heldCount = holding(held, kClaimHoldingMax);
+
   int count = 0;
-  if (!spend(0, [&] { return server_->claimJobs(g_jobs, max, count, transactionsLeft); })) {
+  if (!spend(0, [&] { return server_->claimJobs(g_jobs, max, count, transactionsLeft, held, heldCount); })) {
     for (int i = 0; i < kClaimMax; i++) g_jobs[i].credential.wipe();
     return -1;
   }
@@ -2207,6 +2241,19 @@ void JobRunner::endClaim() {
 void JobRunner::runClaimed(int i) {
   if (i < 0 || i >= claimed_) return;
   ClaimedJob& job = g_jobs[i];
+  // **A job handed over twice is run once** (task p1.20-70). This end already has an answer for
+  // it, made and not yet taken, so running it again would put a repeater's work on the air for a
+  // result that exists: the kept one is posted instead, oldest first through the same budget as
+  // every other post, and the job's credential is wiped unused. With `holding` in every claim the
+  // server does not hand such a job over at all; this is the rail for the server that does.
+  if (holdsResultFor(job.id)) {
+    handedOverAgain_++;
+    job.credential.wipe();
+    LOG_I("jobs: job %lld was handed over again and this exit node keeps its result: posting that, not running it",
+          job.id);
+    flushResults();
+    return;
+  }
   const uint32_t startedAt = clock_->now();
   g_log.clear();
   g_log.add("job %lld %s for repeater %lld \"%s\" (%s)", job.id, job.type, job.repeaterId, job.repeaterLabel,

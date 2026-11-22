@@ -159,17 +159,33 @@ bool leaseLapsed(uint32_t leaseUntil, bool hasTime, uint32_t nowEpoch) {
   return nowEpoch >= leaseUntil;
 }
 
-size_t writeClaimRequest(int max, char* out, size_t cap, int transactionsLeft) {
+size_t writeClaimRequest(int max, char* out, size_t cap, int transactionsLeft, const long long* holding,
+                         int holdingCount) {
   JsonWriter w(out, cap);
   w.beginObject();
   w.key("max");
   w.integer(max);
   // After `max`, and only when there is something to say: the member is left out for the first
-  // claim of a wake and for every claim a board that does not sleep makes, so those bodies are
-  // `{"max":N}` to the byte (API §3).
+  // claim of a wake and for every claim of a wake that proposed no cap, so those bodies carry
+  // nothing of it (API §3).
   if (transactionsLeft >= 0) {
     w.key("transactionsLeft");
     w.integer(transactionsLeft);
+  }
+  // And `holding` last (task p1.20-70). A count below 0 leaves the member out - *this agent does
+  // not say* - and 0 writes `[]`, which says *nothing is held*; the server reads the two
+  // differently, so the distinction is the writer's to keep. The list is bounded here as well as
+  // by its caller: a claim is never cut in half for want of room, and a longer list than this
+  // library can hold is a bug in the caller and not a request the server should have to read.
+  if (holdingCount >= 0) {
+    const int count = holdingCount > kClaimHoldingMax ? kClaimHoldingMax : holdingCount;
+    w.key("holding");
+    w.beginArray();
+    for (int i = 0; i < count && holding != nullptr; i++) {
+      w.comma();
+      w.integer(holding[i]);
+    }
+    w.endArray();
   }
   w.endObject();
   return w.overflowed() ? 0 : w.length();

@@ -807,10 +807,27 @@ void AgentLoop::wakeJobs(WakeReport& report) {
     }
     // `transactionsLeft` goes in every claim of this wake after the first and never in the first,
     // and is left out altogether by a wake whose intent proposed no cap: below 0 is not stated
-    // (API §3, mm::writeClaimRequest).
+    // (API §3, mm::writeClaimRequest). `holding` is the runner's own and goes in every claim.
     const int stated =
         (report.claimsMade == 0 || intent_.maxTransactionsThisWake <= 0) ? -1 : transactionsLeft();
-    const int count = jobs_->claim(max, stated);
+    int count = jobs_->claim(max, stated);
+    // **One more claim** (task p1.20-70). The server leases the jobs of a claim in the moment it
+    // answers, so a claim whose answer did not come back whole - no reply after the request went
+    // out, a 2xx with no body, a body that did not parse - has left it holding leases this end
+    // knows nothing of, and on 21 November 2026 at Bellevue that cost a download its one attempt.
+    // Such a claim is made **once** more, at once, in this wake, with the same `max` and the same
+    // `holding`: nothing has been spent and nothing has changed between the two. A claim the
+    // server **refused** is not asked again - the server spoke - and a second failure is not
+    // asked a third time: it ends the wake's jobs exactly as a failure did before this task, and
+    // the pair counts one `claimFailures` and not two.
+    if (count < 0 && answerWasLost(server_->lastCall().reachable, server_->lastCall().httpStatus) &&
+        uplinkTimeLeft()) {
+      report.claimsLost++;
+      LOG_W("jobs: the claim's answer did not come back whole (%s): the server may have leased jobs this exit node "
+            "knows nothing of, so it is asked once more",
+            server_->lastCall().error);
+      count = jobs_->claim(max, stated);
+    }
     if (count < 0) {
       counters_.claimFailures++;
       if (report.claimsMade == 0) {
@@ -832,7 +849,9 @@ void AgentLoop::wakeJobs(WakeReport& report) {
     }
 
     const uint32_t keptBefore = jobs_->resultsKeptForBudget();
+    const uint32_t againBefore = jobs_->handedOverAgain();
     wakeRunClaimed(report, count);
+    report.jobsHandedOverAgain += static_cast<int>(jobs_->handedOverAgain() - againBefore);
     jobs_->endClaim();
 
     // Round again? Only when all of it holds: this wake may make another claim; nothing of the
@@ -871,6 +890,16 @@ void AgentLoop::wakeRunClaimed(WakeReport& report, int count) {
     if (jobs_->meshDeclines(job)) {
       jobs_->runClaimed(i);
       report.jobsRun++;
+      if (report.jobs == StepOutcome::Skipped) report.jobs = StepOutcome::Done;
+      continue;
+    }
+    // A job this end already keeps a result for is **not run again** (task p1.20-70), and is
+    // asked about here for the same reason the mesh is asked above: nothing of it goes on the
+    // air, so there is no price for a bound to refuse. `runClaimed` is the one place that decides
+    // it - it posts the kept result and runs nothing - and it is counted as neither run nor
+    // refused, because the job was answered the first time it was handed over.
+    if (jobs_->holdsResultFor(job.id)) {
+      jobs_->runClaimed(i);
       if (report.jobs == StepOutcome::Skipped) report.jobs = StepOutcome::Done;
       continue;
     }
@@ -1015,6 +1044,16 @@ WakeReport AgentLoop::wake(const WakeIntent& intent, const Budget& budget) {
         report.keptImageWritten ? ", an image kept for the sleep" : "",
         report.why[0] == '\0' ? "" : " - nothing was sent");
   if (report.why[0] != '\0') LOG_I("wake: %s", report.why);
+  // The two sentences of task p1.20-70, said only when they happened: a claim whose answer was
+  // lost and was asked once more, and a job the server handed over twice.
+  if (report.claimsLost > 0) {
+    LOG_I("wake: %d claim(s) whose answer did not come back whole and were asked once more", report.claimsLost);
+  }
+  if (report.jobsHandedOverAgain > 0) {
+    LOG_I("wake: %d job(s) handed over again whose result this exit node kept: the kept result was posted, "
+          "and nothing ran twice",
+          report.jobsHandedOverAgain);
+  }
   return report;
 }
 

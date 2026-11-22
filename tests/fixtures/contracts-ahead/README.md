@@ -1,8 +1,9 @@
 # The fixtures that wait
 
-**Two wait**, both of them task p1.20-69's and both written from the four lines
+**Four wait**, all of them pile 1.20's and all written from the four lines
 meshmaster.dk's task p4.47-253 carries: the claim of a wake that has already made
-one, and the answer to a result that says more work is waiting. The six that
+one, the answer to a result that says more work is waiting, and the two claims
+that say what the exit node holds. The six that
 waited before — the neighbours result of task p1.15-56 and the update's five of
 task p1.15-61 — came across in the sync of 19 November, the same bytes as the
 lines that had waited, and the tests read them from the copied tree
@@ -33,6 +34,8 @@ first item of the pile's `FOLLOWUPS.md`.
 |---|---|---|
 | `ClaimRequestLeft.json` | task p1.20-69: `transactionsLeft` after `max`, which a wake states in every claim after its first | task p4.47-253 |
 | `JobResultReplyWaiting.json` | task p1.20-69: `jobsWaiting` last in the answer to a result, on which a wake claims again | task p4.47-253 |
+| `ClaimRequestHolding.json` | task p1.20-70: `holding` last, the job ids this exit node is running or keeps a result for | task p4.47-253 |
+| `ClaimRequestHoldingNothing.json` | task p1.20-70: the same member **empty**, which says *nothing held* where an absent member says *this agent does not say* | task p4.47-253 |
 
 ## Adding one
 

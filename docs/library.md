@@ -592,7 +592,7 @@ exactly that, in `src/agent/AgentClient.cpp`, and caps at an hour itself.)
 | `fetchConfig()` | 200 and the body parsed | `GET /agent/v1/config`, once at startup and again after a new link. Keep the reply: `hasConfig()` and `config()` report it |
 | `postHeartbeat(hb, reply&)` | 200 and the body parsed | `POST /agent/v1/heartbeat` with the bytes `writeHeartbeat` made. The reply carries the server time, the budget, the accepted poll interval and `jobsWaiting` — it is the single most important call in the agent, and the only one that carries a clock |
 | `postObservations(body, len, accepted&, duplicate&)` | 200 and the body parsed | `POST /agent/v1/observations`. `accepted` is how many the server took; `duplicate` means this batch's client id had been posted before, which is **not** a failure — the ring consumes the batch either way |
-| `claimJobs(jobs, max, count&, transactionsLeft)` | 200 and the body parsed | `POST /agent/v1/jobs/claim` with the body `writeClaimRequest(max, …, transactionsLeft)` makes. Parse into the caller's array with `parseClaimResponse`, which parses **in place** and puts the credential in the job's own buffer and nowhere else. `count` may be 0. `transactionsLeft` **below 0 is not stated** and the body is `{"max":N}` to the byte — the first claim of a wake, and every claim `loop()` makes |
+| `claimJobs(jobs, max, count&, transactionsLeft, holding, holdingCount)` | 200 and the body parsed | `POST /agent/v1/jobs/claim` with the body `writeClaimRequest(max, …, transactionsLeft, holding, holdingCount)` makes — pass all four straight on and write no member yourself. Parse into the caller's array with `parseClaimResponse`, which parses **in place** and puts the credential in the job's own buffer and nowhere else. `count` may be 0. `transactionsLeft` **below 0 is not stated** — the first claim of a wake, and every claim `loop()` makes. `holding` is what this exit node is running or keeps a result for, and the library fills it for **every** claim: `[]` when it holds nothing, which says *nothing held* where an absent member says *this agent does not say*, and the server hands a lost lease back only on the first (§6). And **leave `lastCall()` saying what really came back** — `reachable` false with `httpStatus` 0 for no reply, `httpStatus` 200 with `ok` false for a 200 whose body did not parse — because that is how a wake tells a lost answer from a refusal (`mm::answerWasLost`) and decides whether to claim once more |
 | `postJobResult(jobId, body, len, jobsWaiting&)` | 200 | `POST /agent/v1/jobs/{id}/result`. A late result is taken all the same and a duplicate `clientId` stores nothing twice, so this is safe to retry — which is what the offline buffer does. Set `jobsWaiting` from the answer's own `jobsWaiting` with **`mm::resultReplySaysJobsWaiting(body, len)`**, so the reply is parsed once, in your client, and the library is handed an answer rather than the bytes; false when the member was not there, and false whenever you return false. A wake claims again on it (§6) |
 | `extendLease(jobId, seconds, leaseUntil&)` | 200 | `POST /agent/v1/jobs/{id}/extend` with `{"seconds":N}` (1–1800). A **409 is "you are not the lease holder any more"** and is false. Nothing in the library calls this yet; it is here because the protocol has it and a long job of your own will want it |
 | `postUpdateResult(updateId, body, len, notFound&)` | 200 | `POST /agent/v1/updates/{id}/result` with the bytes `writeUpdateResult` made (§6.5). **This one has a body already**, so a consumer that cannot be updated from the server implements nothing and is never asked. A result the server already has is answered 200 too — the first one stands — so it is safe to retry, which the loop does at every heartbeat's turn; `notFound` is the one **404** (an id that is not this exit node's), and it means *stop posting it*, not *it failed* |
@@ -945,7 +945,37 @@ were made, `report.claimsEndedBy` is which of the six ended the asking in a word
 or two, and `jobsClaimed`, `jobsRun` and `jobsNotRun` are counted over the whole
 wake. Every claim's jobs are priced exactly as the first claim's are. With
 `maxClaimsThisWake` 0 or 1 — a caller that says nothing — a wake makes the one
-claim it always made, to the byte and to the call.
+claim it always made, to the call.
+
+**Every claim says what this exit node holds, and a claim that was lost is made
+once more.** Since `0.7.6`. The server leases the jobs of a claim **in the moment
+it answers**, so a claim whose answer did not come back whole leaves it holding
+leases this end knows nothing of — on 21 November 2026 a unit's claim answered
+*http 200* without its body and a download with one attempt was failed as *the
+exit node took this job and never reported a result*. Two things follow, and both
+are the library's: they need nothing of you but the two new parameters of
+`claimJobs`.
+
+- **`holding` in every claim**, `loop()`'s and `wake()`'s alike: the ids of the
+  results in the offline buffer, oldest first, and `[]` when there are none. A
+  job **in hand** is never among them, because this library claims between jobs
+  and never during one. `JobRunner::holding(out, cap)` is where the list comes
+  from and `mm::kClaimHoldingMax` is its bound, which is the buffer's own
+  capacity.
+- **One more claim.** A claim whose answer did not come back whole is made once
+  more, at once, in the same wake, with the same `max` and the same `holding` —
+  *one*, not a loop. A second failure ends the wake's jobs exactly as a failure
+  did before, and the pair counts **one** `claimFailures` and not two; a claim
+  the server **refused** (a 4xx, a 5xx, a 429) is not asked again, because the
+  server spoke. `report.claimsLost` is how many were asked twice. In `loop()` the
+  next poll's claim **is** that second claim already, so nothing was added there
+  but `holding`.
+- **A job handed over twice is run once.** A job whose id this end keeps a result
+  for is not run again: the kept result is posted and nothing goes on the air.
+  `report.jobsHandedOverAgain` counts them and they are neither `jobsRun` nor
+  `jobsNotRun`, because the job was answered the first time it was handed over.
+  With `holding` in the claim the server does not hand such a job over at all;
+  this is the rail for the server that does.
 
 Three guarantees worth relying on: **no job a claim handed over is ever left
 leased and silent** — one the wake has no room for is reported `failed` with
@@ -1470,12 +1500,14 @@ goes. The copied tree is the contract; this one is a promissory note, and a
 difference between them is a wire the two ends do not agree on, found before a
 release rather than after.
 
-**Two wait there today**, both of them `0.7.6`'s and both written from the lines
-meshmaster.dk's task 253 carries: `ClaimRequestLeft.json`, a claim with the
-optional `transactionsLeft` after `max`, and `JobResultReplyWaiting.json`, the
-answer to a result with `jobsWaiting` last. The fixtures they extend —
-`ClaimRequest.json` and `JobResultReply.json` — are unchanged to the byte,
-because both members are left out when there is nothing to say.
+**Four wait there today**, all of them `0.7.6`'s and all written from the four
+lines meshmaster.dk's task 253 carries: `ClaimRequestLeft.json`, a claim with the
+optional `transactionsLeft` after `max`; `JobResultReplyWaiting.json`, the answer
+to a result with `jobsWaiting` last; and `ClaimRequestHolding.json` and
+`ClaimRequestHoldingNothing.json`, a claim that says what the exit node holds and
+the same member empty. The fixtures they extend — `ClaimRequest.json` and
+`JobResultReply.json` — are unchanged to the byte, because every member is left
+out when there is nothing to say.
 
 **The six below waited** for meshmaster.dk's tasks 239
 and 244, the sync of 19 November brought every one of them byte for byte, and

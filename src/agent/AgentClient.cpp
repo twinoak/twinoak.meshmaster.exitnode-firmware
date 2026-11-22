@@ -602,12 +602,32 @@ bool AgentClient::postObservations(const char* requestBody, size_t len, int& acc
   return true;
 }
 
-bool AgentClient::claimJobs(ClaimedJob* jobs, int max, int& count, int transactionsLeft) {
+bool AgentClient::claimJobs(ClaimedJob* jobs, int max, int& count, int transactionsLeft, const long long* holding,
+                            int holdingCount) {
   count = 0;
-  // `{"max":2}`, and with the optional `transactionsLeft` of a wake's later claim about thirty
-  // more characters (task p1.20-69).
-  char request[64];
-  const size_t requestLen = writeClaimRequest(max, request, sizeof request, transactionsLeft);
+  // `{"max":2}`, the optional `transactionsLeft` of a wake's later claim (task p1.20-69) and the
+  // `holding` every claim carries (task p1.20-70). `kMaxClaimRequestLen` is the longest body the
+  // writer can make with both of them and `holding` full, so nothing this library can claim is
+  // ever refused for want of room here - and a body that still would not fit is refused whole.
+  char request[kMaxClaimRequestLen];
+  const size_t requestLen = writeClaimRequest(max, request, sizeof request, transactionsLeft, holding, holdingCount);
+  if (requestLen == 0) {
+    // The writer refuses a body it cannot write whole, and this buffer is sized so that it never
+    // has to; a request that would not fit all the same is **refused here as the server would
+    // have refused it** - a 400, which is Discard, so nothing asks again for a body that would
+    // only be wrong again. Nothing goes on the wire, so there is no lost answer and no lease
+    // (agent/ServerPolicy.h's `answerWasLost`).
+    lastCall_ = Call();
+    lastCall_.atMillis = millis();
+    lastCall_.atEpoch = clock_->now();
+    lastCall_.via = rootName(root_);
+    lastCall_.reachable = true;
+    lastCall_.httpStatus = 400;
+    std::snprintf(lastCall_.error, sizeof lastCall_.error, "the claim's body does not fit %u bytes: not sent",
+                  static_cast<unsigned>(sizeof request));
+    LOG_E("server: claim: %s", lastCall_.error);
+    return false;
+  }
 
   // Two jobs with a label, a path and an idempotency key is about a kilobyte, and a config.apply
   // whose plan holds the region loader's sequence (task 05: forty-odd lines of fifty bytes each
