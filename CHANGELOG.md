@@ -33,7 +33,46 @@ disagree.
 
 ## v0.7.6
 
-Nothing yet.
+Pile 1.20 (`tasks/phase-1.20/`), in progress. **`agent-core` 0.7.6** in the three
+manifests; the contract fixtures are still meshmaster.dk's **`28daabd`** and
+MeshCore is still **`companion-v1.18.0`, `81dbae59`**; `kMeshReplyDataCap` 184 and
+`kMeshPathCap` 64, unmoved. **Two methods of `IUplink` moved, and your tree will
+not compile until you follow them** — both of them gained one parameter and
+neither changed what it does. The four questions:
+
+- **Did a method move?** **Yes**, two of `IUplink` (p1.20-69), and nothing else of
+  `IMesh`, `IPlatform`, `IClock`, `IJobExtension`, `JobContext`, `ResultWriter`,
+  `TextOut`, `Backoff`, `WakeState` or `IRetained`:
+  - `claimJobs(jobs, max, count&, int transactionsLeft)`. Pass it on to
+    `mm::writeClaimRequest(max, out, cap, transactionsLeft)`, which writes the
+    claim's new optional `transactionsLeft` after `max` — and **leaves it out
+    when the value is below 0**, so a claim that states nothing is `{"max":N}` to
+    the byte as it always was.
+  - `postJobResult(jobId, body, len, bool& jobsWaiting)`. Set it from the answer
+    with the new `mm::resultReplySaysJobsWaiting(body, len)` — the answer's own
+    optional `jobsWaiting` — and `false` whenever you return false. A client that
+    sets it false always is correct and loses only the new behaviour.
+  Both are **one line each** in an existing implementation, and a tree that does
+  neither still claims once a wake exactly as it did.
+- **What it buys:** `WakeIntent::maxClaimsThisWake`. A claim takes two jobs at
+  most, so a wake used to do two jobs an hour however much was queued; above 1,
+  a wake that has finished what it was handed claims again while the server says
+  more waits and it has the time, the transactions and the claims for it.
+  **0 and 1 are one claim**, which is every caller's behaviour until it sets the
+  field. `WakeReport` gained `claimsMade` and `claimsEndedBy`, and `jobsClaimed`,
+  `jobsRun` and `jobsNotRun` now count over the whole wake.
+- **Did a `MeshReply` constant move?** **No.** `kMeshReplyDataCap` is 184 and
+  `kMeshPathCap` is 64, at the same MeshCore pin.
+- **Did the fixtures' manifest commit move?** **No**, still `28daabd`, and no
+  existing fixture's bytes changed. Two envelopes **wait** in
+  `tests/fixtures/contracts-ahead/` (§9.1) for meshmaster.dk's task 253:
+  `ClaimRequestLeft.json` and `JobResultReplyWaiting.json`. The wire moved only
+  by two optional members and one optional member, each left out when it has
+  nothing to say, so **a server that has never heard of them answers an older
+  exit node exactly as before** and this library reads a reply without
+  `jobsWaiting` as *nothing waits*.
+- **The version and the pin:** `agent-core` 0.7.6; MeshCore
+  `companion-v1.18.0`, `81dbae59`.
 
 ## v0.7.5
 

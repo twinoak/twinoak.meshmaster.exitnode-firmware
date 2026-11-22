@@ -86,8 +86,8 @@ class AgentClient : public IUplink, private uplink::Transport {
   bool fetchConfig() override;
   bool postHeartbeat(const Heartbeat& hb, HeartbeatReply& reply) override;
   bool postObservations(const char* body, size_t len, int& accepted, bool& duplicate) override;
-  bool claimJobs(ClaimedJob* jobs, int max, int& count) override;
-  bool postJobResult(long long jobId, const char* body, size_t len) override;
+  bool claimJobs(ClaimedJob* jobs, int max, int& count, int transactionsLeft) override;
+  bool postJobResult(long long jobId, const char* body, size_t len, bool& jobsWaiting) override;
   bool extendLease(long long jobId, int seconds, uint32_t& leaseUntil) override;
   bool postProgress(long long jobId, const char* body, size_t len) override;
   // POST /agent/v1/updates/{id}/result (task p1.15-61): the one result of an update meshmaster.dk

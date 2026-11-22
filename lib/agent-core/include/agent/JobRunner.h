@@ -265,15 +265,18 @@ class JobRunner {
   // prices each claimed job before it puts it on the air. The Heltec calls `claimAndRun` and
   // never these.
   //
-  //   claim(max)       one claim of at most `max` jobs (never more than kClaimMax), into this
-  //                    runner's own buffer. The count, or -1 when the call did not come back
+  //   claim(max, left) one claim of at most `max` jobs (never more than kClaimMax), into this
+  //                    runner's own buffer. The count, or -1 when the call did not come back.
+  //                    `left` is the wake's `transactionsLeft` for the claim's body, and **below
+  //                    0 is not stated** - the first claim of a wake and `loop()`'s own
+  //                    (task p1.20-69)
   //   claimed(i)       the job at `i` of that claim, to read its type, class and payload
   //   runClaimed(i)    run it and post its result, exactly as `claimAndRun` would have
   //   reportNotRun(i)  report it `failed` with `why` in its log, at no transaction and with
   //                    nothing sent: a job this wake has no room for is **never left leased and
   //                    silent**, which is the whole point of the pair
   //   endClaim()       the claim is over: every credential wiped, whatever happened
-  int claim(int max);
+  int claim(int max, int transactionsLeft = -1);
   int claimedCount() const { return claimed_; }
   const ClaimedJob& claimed(int i) const { return scratch_.jobs[i < 0 || i >= kClaimMax ? 0 : i]; }
   void runClaimed(int i);
@@ -341,6 +344,13 @@ class JobRunner {
   // for the next wake: *kept: budget*, which is a bound of ours and not a failure of the
   // server's, so it backs nothing off (task p1.6-21). The WakeReport carries a wake's own count.
   uint32_t resultsKeptForBudget() const { return resultsKeptForBudget_; }
+
+  // What the answer to the last result posted **since the last claim** said: API §3's
+  // `jobsWaiting`, whether a claim by this exit node now would be handed a job (task p1.20-69).
+  // `claim()` clears it, so it is always about the claim that is being finished and never about
+  // the one before it or the last wake's; a post that got no answer said nothing, and nothing is
+  // false. A wake reads it to decide whether to claim again; `loop()` never asks.
+  bool lastResultSaidJobsWaiting() const { return lastResultJobsWaiting_; }
 
   // `jobs` on the console: the last ten with their outcome and their transactions.
   void report(TextOut& out) const;
@@ -670,6 +680,8 @@ class JobRunner {
   uint32_t ran_ = 0;
   uint32_t postFailures_ = 0;
   uint32_t resultsKeptForBudget_ = 0;
+  // API §3's `jobsWaiting` from the answer to the last result posted since the last claim.
+  bool lastResultJobsWaiting_ = false;
   // How many jobs the last claim handed over, which is how far claimed(i) and runClaimed(i) go.
   int claimed_ = 0;
 

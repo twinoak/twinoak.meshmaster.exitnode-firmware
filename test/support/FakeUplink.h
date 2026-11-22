@@ -157,6 +157,12 @@ class FakeUplink : public mm::IUplink {
   // client id exists for (task p1.13-55). A later post under the same id is answered *had it
   // already*, with nothing stored twice.
   void loseTheAnswerToObservations(int calls) { obsAnswerLost_ = calls; }
+  // What the answers to results say about more work waiting (API §3's `jobsWaiting`, task
+  // p1.20-69): `results` of them carry it, and -1 is every one. The default is a server that
+  // says it at no result at all - which is what one that has never heard of the member answers,
+  // and what every test written before that task gets.
+  void sayMoreWaitsAfterAResult(int results) { moreWaits_ = results; }
+  void sayMoreWaitsAfterEveryResult() { moreWaits_ = -1; }
   void setRetryAfter(uint32_t seconds) { retryAfterS_ = seconds; }
   void setCallMs(uint32_t ms) { callMs_ = ms; }
   // A slow call: this long on the clock, once.
@@ -179,6 +185,13 @@ class FakeUplink : public mm::IUplink {
   int claimCalls() const { return claimCalls_; }
   // The `max` of every claim, in order: what a wake's transaction cap asked the server for.
   const std::vector<int>& claimMaxes() const { return claimMaxes_; }
+  // And the **bytes** of every claim, in order (task p1.20-69): `{"max":N}` for the first claim
+  // of a wake and for every claim a board that does not sleep makes, with `transactionsLeft`
+  // after `max` in a wake's later ones.
+  const std::vector<std::string>& claimRequests() const { return claimRequests_; }
+  // Every answer this fake gave a result, in order: `JobResultReply`'s bytes, with `jobsWaiting`
+  // last where this server had more for the exit node.
+  const std::vector<std::string>& resultReplies() const { return resultReplies_; }
   // The claim's own buffer, as the runner handed it in: how a test reads a credential back after
   // the job that used it has ended.
   const mm::ClaimedJob* claimed() const { return claimed_; }
@@ -246,9 +259,15 @@ class FakeUplink : public mm::IUplink {
     return true;
   }
 
-  bool claimJobs(mm::ClaimedJob* jobs, int max, int& count) override {
+  bool claimJobs(mm::ClaimedJob* jobs, int max, int& count, int transactionsLeft) override {
     claimCalls_++;
     claimMaxes_.push_back(max);
+    // The bytes the board would have put on the wire for this claim, from the two numbers it
+    // handed in: what a test reads to see the optional `transactionsLeft` of a wake's later
+    // claim (task p1.20-69), and to see the first claim's `{"max":N}` to the byte.
+    char request[64];
+    const size_t requestLen = mm::writeClaimRequest(max, request, sizeof request, transactionsLeft);
+    claimRequests_.emplace_back(request, requestLen);
     claimed_ = jobs;
     claimedCount_ = 0;
     count = 0;
@@ -280,9 +299,23 @@ class FakeUplink : public mm::IUplink {
     return ok;
   }
 
-  bool postJobResult(long long jobId, const char* body, size_t len) override {
+  bool postJobResult(long long jobId, const char* body, size_t len, bool& jobsWaiting) override {
+    jobsWaiting = false;
     if (!begin("result")) return false;
     results_.push_back(PostedResult{jobId, std::string(body, len), platform_.millis()});
+    // The answer, as the server writes one: `JobResultReply.json`'s members, and `jobsWaiting`
+    // last when this server has more for the exit node - the line of task p1.20-69, which is the
+    // waiting fixture `JobResultReplyWaiting.json`. What the board learns from it is read by the
+    // **firmware's own reader** and not by a second reading here, so a test of a wake that claims
+    // again is a test against those bytes.
+    const bool more = moreWaits_ != 0;
+    if (moreWaits_ > 0) moreWaits_--;
+    char reply[160];
+    const int written =
+        std::snprintf(reply, sizeof reply, "{\"jobId\":%lld,\"state\":\"succeeded\",\"duplicate\":false,\"late\":false%s}",
+                      jobId, more ? ",\"jobsWaiting\":true" : "");
+    resultReplies_.emplace_back(reply);
+    jobsWaiting = mm::resultReplySaysJobsWaiting(reply, static_cast<size_t>(written));
     return true;
   }
 
@@ -449,6 +482,9 @@ class FakeUplink : public mm::IUplink {
   int configCalls_ = 0;
   int claimCalls_ = 0;
   std::vector<int> claimMaxes_;
+  std::vector<std::string> claimRequests_;
+  std::vector<std::string> resultReplies_;
+  int moreWaits_ = 0;
   const mm::ClaimedJob* claimed_ = nullptr;
   int claimedCount_ = 0;
 

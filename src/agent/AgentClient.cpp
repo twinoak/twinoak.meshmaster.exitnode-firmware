@@ -602,10 +602,12 @@ bool AgentClient::postObservations(const char* requestBody, size_t len, int& acc
   return true;
 }
 
-bool AgentClient::claimJobs(ClaimedJob* jobs, int max, int& count) {
+bool AgentClient::claimJobs(ClaimedJob* jobs, int max, int& count, int transactionsLeft) {
   count = 0;
-  char request[32];
-  const size_t requestLen = writeClaimRequest(max, request, sizeof request);
+  // `{"max":2}`, and with the optional `transactionsLeft` of a wake's later claim about thirty
+  // more characters (task p1.20-69).
+  char request[64];
+  const size_t requestLen = writeClaimRequest(max, request, sizeof request, transactionsLeft);
 
   // Two jobs with a label, a path and an idempotency key is about a kilobyte, and a config.apply
   // whose plan holds the region loader's sequence (task 05: forty-odd lines of fifty bytes each
@@ -667,10 +669,16 @@ namespace {
 char g_jobReply[256];
 }  // namespace
 
-bool AgentClient::postJobResult(long long jobId, const char* requestBody, size_t len) {
+bool AgentClient::postJobResult(long long jobId, const char* requestBody, size_t len, bool& jobsWaiting) {
+  jobsWaiting = false;
   size_t bodyLen = 0;
   if (!postToJob(jobId, "result", "result", requestBody, len, g_jobReply, sizeof g_jobReply, bodyLen)) return false;
   LOG_D("server: result for job %lld taken: %.200s", jobId, g_jobReply);
+  // The one member of the answer this firmware acts on, read from the body the call already has
+  // and nowhere else (task p1.20-69). A reply that does not carry it says nothing, and nothing is
+  // false: it is written only to an exit node that proposed an interval of its own, which this
+  // board never does - so on a Heltec this is false at every result and `loop()` asks nobody.
+  jobsWaiting = resultReplySaysJobsWaiting(g_jobReply, bodyLen);
   return true;
 }
 

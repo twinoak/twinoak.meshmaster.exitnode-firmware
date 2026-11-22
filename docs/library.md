@@ -564,7 +564,8 @@ What you must put on the wire for all of them:
 - the reply parsed by the library's own parser — `mm::parseAgentConfig`,
   `mm::parseHeartbeatReply`, `mm::parseClaimResponse`,
   `mm::parseObservationsReply`, `mm::parseExtendReply`,
-  `mm::parseProgressReply`. Do not write a second reader of these shapes.
+  `mm::parseProgressReply`, `mm::resultReplySaysJobsWaiting`. Do not write a second
+  reader of these shapes.
 
 **The reply buffer is yours**, and `mm::parseClaimResponse` takes a **mutable**
 `char*` because it parses the claim in place — that is deliberate, and it is why
@@ -591,8 +592,8 @@ exactly that, in `src/agent/AgentClient.cpp`, and caps at an hour itself.)
 | `fetchConfig()` | 200 and the body parsed | `GET /agent/v1/config`, once at startup and again after a new link. Keep the reply: `hasConfig()` and `config()` report it |
 | `postHeartbeat(hb, reply&)` | 200 and the body parsed | `POST /agent/v1/heartbeat` with the bytes `writeHeartbeat` made. The reply carries the server time, the budget, the accepted poll interval and `jobsWaiting` — it is the single most important call in the agent, and the only one that carries a clock |
 | `postObservations(body, len, accepted&, duplicate&)` | 200 and the body parsed | `POST /agent/v1/observations`. `accepted` is how many the server took; `duplicate` means this batch's client id had been posted before, which is **not** a failure — the ring consumes the batch either way |
-| `claimJobs(jobs, max, count&)` | 200 and the body parsed | `POST /agent/v1/jobs/claim` with `{"max":N}` from `writeClaimRequest`. Parse into the caller's array with `parseClaimResponse`, which parses **in place** and puts the credential in the job's own buffer and nowhere else. `count` may be 0 |
-| `postJobResult(jobId, body, len)` | 200 | `POST /agent/v1/jobs/{id}/result`. A late result is taken all the same and a duplicate `clientId` stores nothing twice, so this is safe to retry — which is what the offline buffer does |
+| `claimJobs(jobs, max, count&, transactionsLeft)` | 200 and the body parsed | `POST /agent/v1/jobs/claim` with the body `writeClaimRequest(max, …, transactionsLeft)` makes. Parse into the caller's array with `parseClaimResponse`, which parses **in place** and puts the credential in the job's own buffer and nowhere else. `count` may be 0. `transactionsLeft` **below 0 is not stated** and the body is `{"max":N}` to the byte — the first claim of a wake, and every claim `loop()` makes |
+| `postJobResult(jobId, body, len, jobsWaiting&)` | 200 | `POST /agent/v1/jobs/{id}/result`. A late result is taken all the same and a duplicate `clientId` stores nothing twice, so this is safe to retry — which is what the offline buffer does. Set `jobsWaiting` from the answer's own `jobsWaiting` with **`mm::resultReplySaysJobsWaiting(body, len)`**, so the reply is parsed once, in your client, and the library is handed an answer rather than the bytes; false when the member was not there, and false whenever you return false. A wake claims again on it (§6) |
 | `extendLease(jobId, seconds, leaseUntil&)` | 200 | `POST /agent/v1/jobs/{id}/extend` with `{"seconds":N}` (1–1800). A **409 is "you are not the lease holder any more"** and is false. Nothing in the library calls this yet; it is here because the protocol has it and a long job of your own will want it |
 | `postUpdateResult(updateId, body, len, notFound&)` | 200 | `POST /agent/v1/updates/{id}/result` with the bytes `writeUpdateResult` made (§6.5). **This one has a body already**, so a consumer that cannot be updated from the server implements nothing and is never asked. A result the server already has is answered 200 too — the first one stands — so it is safe to retry, which the loop does at every heartbeat's turn; `notFound` is the one **404** (an id that is not this exit node's), and it means *stop posting it*, not *it failed* |
 | `postProgress(jobId, body, len)` | 200 | `POST /agent/v1/jobs/{id}/progress` with the bytes `writeProgressReport` made: an intermediate `data` and a note, kept on the job and replaced by the next. Not a result. Also uncalled by the library |
@@ -891,6 +892,7 @@ const mm::WakeReport r = agent.wake(intent, budget);   // ... and the image is w
 mm::WakeIntent intent;
 intent.nextCheckInS = 3600;            // what the heartbeat promises the server (60..86400)
 intent.maxTransactionsThisWake = 12;   // and what this wake has the energy for
+intent.maxClaimsThisWake = 4;          // how many times it may ask for work; 0 and 1 are once
 
 mm::Budget budget;
 budget.wakeSeconds = 240;              // the whole wake; 0 is "no bound"
@@ -925,6 +927,25 @@ air if it will not fit — unless your mesh answers `answersLocallyFor()` true f
 its repeater, which is priced at its reply waits, no gaps and no transactions,
 because a job that never touches the channel spends neither), **observations**
 (as many batches as the byte cap allows).
+
+**The claim and the jobs run more than once when you let them.** Since `0.7.6`.
+A claim takes two jobs at most (`mm::kClaimMax`) because two is the room this
+library has at a time, so a wake that is one claim does two jobs an hour at best
+however much is queued. Set `intent.maxClaimsThisWake` above 1 and a wake that
+has finished what it was handed **asks again** — while all of this holds: the
+answer to the last result it posted said `jobsWaiting` (which is what your
+`postJobResult` reports, §4); no result of that claim was kept for the budget;
+the last claim handed over at least one job; the transaction cap can still hold
+a job; there is uplink time left; and it has made fewer than
+`maxClaimsThisWake` claims. The number is **yours and is not sent to the
+server** — it is the board that knows its battery — and what the server is told
+instead is the claim's optional `transactionsLeft`, written in every claim of a
+wake after the first and never in the first. `report.claimsMade` is how many
+were made, `report.claimsEndedBy` is which of the six ended the asking in a word
+or two, and `jobsClaimed`, `jobsRun` and `jobsNotRun` are counted over the whole
+wake. Every claim's jobs are priced exactly as the first claim's are. With
+`maxClaimsThisWake` 0 or 1 — a caller that says nothing — a wake makes the one
+claim it always made, to the byte and to the call.
 
 Three guarantees worth relying on: **no job a claim handed over is ever left
 leased and silent** — one the wake has no room for is reported `failed` with
@@ -1449,7 +1470,14 @@ goes. The copied tree is the contract; this one is a promissory note, and a
 difference between them is a wire the two ends do not agree on, found before a
 release rather than after.
 
-**Nothing waits there today.** The six below waited for meshmaster.dk's tasks 239
+**Two wait there today**, both of them `0.7.6`'s and both written from the lines
+meshmaster.dk's task 253 carries: `ClaimRequestLeft.json`, a claim with the
+optional `transactionsLeft` after `max`, and `JobResultReplyWaiting.json`, the
+answer to a result with `jobsWaiting` last. The fixtures they extend —
+`ClaimRequest.json` and `JobResultReply.json` — are unchanged to the byte,
+because both members are left out when there is nothing to say.
+
+**The six below waited** for meshmaster.dk's tasks 239
 and 244, the sync of 19 November brought every one of them byte for byte, and
 they are ordinary contract fixtures now — read from `tests/fixtures/contracts/`
 like all the rest, and listed in `MANIFEST.txt`.
@@ -1579,8 +1607,8 @@ image ships:
 | `fetchConfig()` | `GET /agent/v1/config` → `mm::parseAgentConfig` |
 | `postHeartbeat(hb, reply&)` | `POST /agent/v1/heartbeat`, body from `mm::writeHeartbeat` → `mm::parseHeartbeatReply` |
 | `postObservations(body, len, …)` | `POST /agent/v1/observations`, body from `mm::writeObservationBatch` → `mm::parseObservationsReply` |
-| `claimJobs(jobs, max, count&)` | `POST /agent/v1/jobs/claim`, body from `mm::writeClaimRequest` → `mm::parseClaimResponse` |
-| `postJobResult(id, body, len)` | `POST /agent/v1/jobs/{id}/result`, body from `mm::writeJobResult`; 200 or keep it for later |
+| `claimJobs(jobs, max, count&, left)` | `POST /agent/v1/jobs/claim`, body from `mm::writeClaimRequest` → `mm::parseClaimResponse` |
+| `postJobResult(id, body, len, waiting&)` | `POST /agent/v1/jobs/{id}/result`, body from `mm::writeJobResult`; 200 or keep it for later. `waiting` from `mm::resultReplySaysJobsWaiting` over the answer |
 | `extendLease(id, seconds, until&)` | `POST /agent/v1/jobs/{id}/extend`, body from `mm::writeExtendRequest` → `mm::parseExtendReply`; 409 is false |
 | `postProgress(id, body, len)` | `POST /agent/v1/jobs/{id}/progress`, body from `mm::writeProgressReport` → `mm::parseProgressReply` |
 | `configured()`, `link()`, `limiter()`, `last()`, `lastCall()` | the modem's own state, a `mm::RateLimiter` of 120 a minute, and the `Call` record of §4.1 |

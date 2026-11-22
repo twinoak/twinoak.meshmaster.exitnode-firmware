@@ -775,32 +775,91 @@ void AgentLoop::wakeResults(WakeReport& report) {
 void AgentLoop::wakeJobs(WakeReport& report) {
   claimDue_ = false;
   if (!lastJobsWaiting_) return;
-  if (!uplinkTimeLeft()) {
-    report.claim = StepOutcome::NoTime;
-    return;
-  }
-  const int max = claimMax();
-  if (max < 1) {
-    report.claim = StepOutcome::NoBudget;
-    LOG_I("jobs: this wake has %d transaction(s) left of its %d, which is less than a job: no claim is made",
-          transactionsLeft(), intent_.maxTransactionsThisWake);
-    return;
-  }
-  const int count = jobs_->claim(max);
-  if (count < 0) {
-    counters_.claimFailures++;
-    report.claim = StepOutcome::Failed;
-    noteFailure(server_->lastCall());
-    return;
-  }
-  report.claim = StepOutcome::Done;
-  report.jobsClaimed = count;
-  succeeded();
-  if (count == 0) {
-    jobs_->endClaim();
-    return;
-  }
+  // How many claims this wake may make: its own bound and not the server's (task p1.20-69). 0 and
+  // 1 are both the one claim every wake made before that task, so a caller that proposes nothing
+  // makes the calls and the bytes it always made.
+  const int maxClaims = intent_.maxClaimsThisWake > 1 ? intent_.maxClaimsThisWake : 1;
+  while (true) {
+    // Every claim is priced as the first is: the uplink's seconds, then what the transaction cap
+    // can still hold at a job's cheapest price. Before the first, these two are the whole of why
+    // no claim is made and the step's outcome says so; after one, the claim step is `Done` and
+    // what ended the asking is `claimsEndedBy`.
+    if (!uplinkTimeLeft()) {
+      if (report.claimsMade == 0) {
+        report.claim = StepOutcome::NoTime;
+      } else {
+        report.claimsEndedBy = "no time";
+        LOG_I("jobs: %d claim(s) this wake and no more: this wake's seconds at the server are spent",
+              report.claimsMade);
+      }
+      return;
+    }
+    const int max = claimMax();
+    if (max < 1) {
+      if (report.claimsMade == 0) {
+        report.claim = StepOutcome::NoBudget;
+      } else {
+        report.claimsEndedBy = "no transactions";
+      }
+      LOG_I("jobs: this wake has %d transaction(s) left of its %d, which is less than a job: no claim is made",
+            transactionsLeft(), intent_.maxTransactionsThisWake);
+      return;
+    }
+    // `transactionsLeft` goes in every claim of this wake after the first and never in the first,
+    // and is left out altogether by a wake whose intent proposed no cap: below 0 is not stated
+    // (API §3, mm::writeClaimRequest).
+    const int stated =
+        (report.claimsMade == 0 || intent_.maxTransactionsThisWake <= 0) ? -1 : transactionsLeft();
+    const int count = jobs_->claim(max, stated);
+    if (count < 0) {
+      counters_.claimFailures++;
+      if (report.claimsMade == 0) {
+        report.claim = StepOutcome::Failed;
+      } else {
+        report.claimsEndedBy = "the claim did not come back";
+      }
+      noteFailure(server_->lastCall());
+      return;
+    }
+    report.claim = StepOutcome::Done;
+    report.claimsMade++;
+    report.jobsClaimed += count;
+    succeeded();
+    if (count == 0) {
+      jobs_->endClaim();
+      report.claimsEndedBy = "an empty claim";
+      return;
+    }
 
+    const uint32_t keptBefore = jobs_->resultsKeptForBudget();
+    wakeRunClaimed(report, count);
+    jobs_->endClaim();
+
+    // Round again? Only when all of it holds: this wake may make another claim; nothing of the
+    // claim just finished was kept back for the budget, because a wake that could not post what
+    // it has must not take on more; and the answer to the last result said a claim now would be
+    // handed a job. The time and the transactions are read at the top of the loop, where the
+    // first claim reads them.
+    if (report.claimsMade >= maxClaims) {
+      report.claimsEndedBy = "the wake's claims";
+      return;
+    }
+    if (jobs_->resultsKeptForBudget() > keptBefore) {
+      report.claimsEndedBy = "a result kept";
+      LOG_I("jobs: %d claim(s) this wake and no more: a result of the last one is kept for the next wake",
+            report.claimsMade);
+      return;
+    }
+    if (!jobs_->lastResultSaidJobsWaiting()) {
+      report.claimsEndedBy = "nothing waits";
+      return;
+    }
+    LOG_I("jobs: the server says more waits and this wake has room: claiming again (%d of %d)", report.claimsMade + 1,
+          maxClaims);
+  }
+}
+
+void AgentLoop::wakeRunClaimed(WakeReport& report, int count) {
   for (int i = 0; i < count; i++) {
     const ClaimedJob& job = jobs_->claimed(i);
     // A type the mesh declines is declined **before it is priced** (task p1.7-25). It spends no
@@ -858,7 +917,6 @@ void AgentLoop::wakeJobs(WakeReport& report) {
     report.jobsRun++;
     if (report.jobs == StepOutcome::Skipped) report.jobs = StepOutcome::Done;
   }
-  jobs_->endClaim();
 }
 
 void AgentLoop::wakeObservations(WakeReport& report) {
@@ -946,8 +1004,9 @@ WakeReport AgentLoop::wake(const WakeIntent& intent, const Budget& budget) {
   LOG_I("wake: config %s, heartbeat %s, results %s, claim %s, jobs %s, observations %s", stepOutcomeName(report.config),
         stepOutcomeName(report.heartbeat), stepOutcomeName(report.results), stepOutcomeName(report.claim),
         stepOutcomeName(report.jobs), stepOutcomeName(report.observations));
-  LOG_I("wake: %d job(s) run, %d not run, %d transaction(s), %d batch(es), %u byte(s) posted; %lu ms of %lu at "
-        "the server%s; next in %d s%s%s%s",
+  LOG_I("wake: %d claim(s)%s%s, %d job(s) run, %d not run, %d transaction(s), %d batch(es), %u byte(s) posted; "
+        "%lu ms of %lu at the server%s; next in %d s%s%s%s",
+        report.claimsMade, report.claimsEndedBy[0] == '\0' ? "" : ", then ", report.claimsEndedBy,
         report.jobsRun, report.jobsNotRun, report.transactionsSpent, report.batchesPosted,
         static_cast<unsigned>(report.bytesPosted), static_cast<unsigned long>(report.uplinkMs),
         static_cast<unsigned long>(report.elapsedMs),
