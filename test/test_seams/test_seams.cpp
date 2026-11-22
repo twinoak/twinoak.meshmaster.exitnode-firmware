@@ -260,6 +260,44 @@ TEST(Seams, TheMeshDrawsTheCliTimestampAndHandsItBack) {
 // The width the library traces a direct neighbour at is the mesh's own, and the interface's
 // default is the rail's two bytes (task p1.10-39; the rail is README.md's *path hashes are two
 // bytes or more, never one*, meshmaster.dk's D-33).
+// **The way back is the runner's send, and nothing leaves MeshCore's own dispatch** (task
+// p1.21-71). `AgentMesh::onPeerPathRecv` still returns false: a path return sent from inside it
+// would be past the airtime gate and outside the login's slot, and its frame would not be logged.
+// What sends one is `tellTheWayBack()`, through `dispatch`, called by the job runner.
+TEST(Seams, NothingIsSentFromInsideOnPeerPathRecvAndTheWayBackIsTheRunnersSend) {
+  const fs::path root(PROJECT_DIR);
+  const std::string iface = readFile(root / "lib/agent-core/include/agent/IMesh.h");
+  EXPECT_NE(iface.find("virtual WayBack tellTheWayBack() { return WayBack(); }"), std::string::npos)
+      << "the default tells nothing, so a mesh that overrides nothing behaves as it did";
+  EXPECT_NE(iface.find("enum class ReplyRoute : uint8_t { NotKnown, Direct, Flood };"), std::string::npos);
+
+  const std::string mesh = readFile(root / "src/mesh/AgentMesh.cpp");
+  const size_t from = mesh.find("bool AgentMesh::onPeerPathRecv(");
+  ASSERT_NE(from, std::string::npos);
+  const size_t to = mesh.find("\nvoid AgentMesh::onTraceRecv(", from);
+  ASSERT_NE(to, std::string::npos);
+  const std::string body = withoutComments(mesh.substr(from, to - from));
+  EXPECT_NE(body.find("return false;"), std::string::npos);
+  EXPECT_EQ(body.find("dispatch("), std::string::npos) << "nothing is dispatched from inside the handler";
+  EXPECT_EQ(body.find("sendDirect("), std::string::npos);
+  EXPECT_EQ(body.find("createPathReturn("), std::string::npos);
+
+  // And the one that does send it goes through the same door every other frame of a job does.
+  const size_t tell = mesh.find("IMesh::WayBack AgentMesh::tellTheWayBack()");
+  ASSERT_NE(tell, std::string::npos);
+  const size_t tellEnd = mesh.find("\nconst uint8_t* AgentMesh::sharedSecret()", tell);
+  ASSERT_NE(tellEnd, std::string::npos);
+  const std::string told = withoutComments(mesh.substr(tell, tellEnd - tell));
+  EXPECT_NE(told.find("createPathReturn(peer_"), std::string::npos);
+  EXPECT_NE(told.find("dispatch(pkt)"), std::string::npos);
+  EXPECT_EQ(told.find("sendFlood"), std::string::npos) << "a way back is told along a path or not at all";
+
+  // The runner tells it before a login that goes out direct, and nothing of it is awaited.
+  const std::string runner = readFile(root / "lib/agent-core/src/JobRunner.cpp");
+  EXPECT_NE(runner.find("tellTheWayBack(ctx, what);"), std::string::npos);
+  EXPECT_EQ(runner.find("awaitReply(0, told"), std::string::npos) << "a way back is not a command and is not awaited";
+}
+
 TEST(Seams, TheMeshTellsTheLibraryTheWidthItFloodsAt) {
   const fs::path root(PROJECT_DIR);
   const std::string iface = readFile(root / "lib/agent-core/include/agent/IMesh.h");

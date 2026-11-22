@@ -33,16 +33,21 @@ disagree.
 
 ## v0.7.6
 
-Pile 1.20 (`tasks/phase-1.20/`), in progress. **`agent-core` 0.7.6** in the three
-manifests; the contract fixtures are still meshmaster.dk's **`28daabd`** and
-MeshCore is still **`companion-v1.18.0`, `81dbae59`**; `kMeshReplyDataCap` 184 and
-`kMeshPathCap` 64, unmoved. **Two methods of `IUplink` moved, and your tree will
-not compile until you follow them** — both of them gained parameters and neither
-changed what it does. The four questions:
+Piles 1.20 and 1.21 (`tasks/phase-1.20/`, `tasks/phase-1.21/`), in progress.
+**`agent-core` 0.7.6** in the three manifests; the contract fixtures are still
+meshmaster.dk's **`28daabd`** and MeshCore is still **`companion-v1.18.0`,
+`81dbae59`**; `kMeshReplyDataCap` 184 and `kMeshPathCap` 64, unmoved. **Two
+methods of `IUplink` moved, and your tree will not compile until you follow
+them** — both of them gained parameters and neither changed what it does.
+`IMesh` gained one method with a default, which costs a consumer nothing until it
+wants what the method buys. The four questions:
 
-- **Did a method move?** **Yes**, two of `IUplink` (p1.20-69, p1.20-70), and
-  nothing else of `IMesh`, `IPlatform`, `IClock`, `IJobExtension`, `JobContext`,
-  `ResultWriter`, `TextOut`, `Backoff`, `WakeState` or `IRetained`:
+- **Did a method move?** **Yes**, two of `IUplink` (p1.20-69, p1.20-70) — and
+  `IMesh` gained one, `tellTheWayBack()` (p1.21-71), **with a default that tells
+  nothing**, so a mesh that overrides nothing compiles and behaves exactly as it
+  did. Nothing else of `IMesh`, `IPlatform`, `IClock`, `IJobExtension`,
+  `JobContext`, `ResultWriter`, `TextOut`, `Backoff`, `WakeState` or `IRetained`
+  moved:
   - `claimJobs(jobs, max, count&, int transactionsLeft, const long long* holding,
     int holdingCount)`. Pass all four on to
     `mm::writeClaimRequest(max, out, cap, transactionsLeft, holding, holdingCount)`
@@ -83,8 +88,31 @@ changed what it does. The four questions:
   `mm::kMaxClaimRequestLen` are the two bounds a client sizes its request buffer
   by. **`loop()` gained `holding` and nothing else**: its next poll's claim is
   the second claim already.
+- **What it buys, 3: a reply comes home the way the request went out**
+  (p1.21-71). A repeater answers a direct request along the `out_path` it has
+  stored for that client and **floods** the reply when it has none, and it stores
+  one only from a PATH packet the client sends it — so until now **every** reply
+  to an exit node was a flood, and a trace said nothing about the way an answer
+  would take. Implement `IMesh::tellTheWayBack()` and the library tells your
+  repeater the way home before every login that goes out direct, once more when a
+  reply came home flooded all the same, and before the first send of a job that
+  reuses a session whose claim named another path:
+  `docs/library.md` §3.9 is what to send (the job's path reversed, at its own
+  width; the empty path for a pair of no hops) and `WayBack::clearMs` is your own
+  figure for how long it needs to clear the hops. It is one packet inside the
+  login's own slot of the airtime budget, counts **no transaction** and is **not
+  a command**: nothing awaits it and nothing retries it. `MeshReply` gained
+  `route` (`mm::ReplyRoute`: `NotKnown`, `Direct`, `Flood`) — fill it at every
+  reply you hand over and the job's log says how each one came; `NotKnown` is the
+  default and is never read as *flooded*. `RepeaterSession` gained the path a
+  session was opened along (`hasPath`, `pathLen`, `path`, `samePathAs`) and
+  `SessionStore::put` gained three **defaulted** parameters for it, so a caller
+  that passes nothing still compiles. **Nothing of the wire moved**, and how a
+  reply came is in the job's log only.
 - **Did a `MeshReply` constant move?** **No.** `kMeshReplyDataCap` is 184 and
-  `kMeshPathCap` is 64, at the same MeshCore pin.
+  `kMeshPathCap` is 64, at the same MeshCore pin. `MeshReply` gained the `route`
+  field above, which is one byte after `traceFinalSnr` and is not a size anybody
+  asserts on.
 - **Did the fixtures' manifest commit move?** **No**, still `28daabd`, and no
   existing fixture's bytes changed. Four envelopes **wait** in
   `tests/fixtures/contracts-ahead/` (§9.1) for meshmaster.dk's pile 4.47:

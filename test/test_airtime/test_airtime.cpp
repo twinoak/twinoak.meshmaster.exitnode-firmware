@@ -316,10 +316,16 @@ TEST(Sessions, TheSlotsAreReadableForTheConsoleAndHoldNoSecret) {
     EXPECT_EQ(s->loggedInAtMs, 5000u);
     EXPECT_EQ(s->credentialClass, mm::CredentialClass::Acl);
     EXPECT_STREQ(s->tier(), "read-only");
-    // What a session is: a key, a class, a role byte and a time, and nothing else - the struct
-    // is no bigger than those four fields and their padding.
+    // What a session is: a key, a class, a role byte, a time - and, since task p1.21-71, the
+    // path the claim of the job that opened it carried, which is what the repeater was told the
+    // way back from and what tells a job reusing this session that the route has changed. The
+    // struct is no bigger than those fields and their padding. **Still no secret**: a hop hash
+    // is the server's own and public by construction - it travels in every claim and in the
+    // header of every direct packet - and the console prints a session as it always did.
     EXPECT_LE(sizeof(mm::RepeaterSession), sizeof(s->key) + sizeof(s->credentialClass) + sizeof(s->permissions) +
-                                               sizeof(s->loggedInAtMs) + 3 /* alignment */);
+                                               sizeof(s->loggedInAtMs) + sizeof(s->hasPath) + sizeof(s->pathLen) +
+                                               sizeof(s->path) + 3 /* alignment */);
+    EXPECT_FALSE(s->hasPath) << "a session put with no path carries none";
   }
   EXPECT_EQ(live, 1);
   EXPECT_EQ(sessions.slot(0, 5000 + mm::SessionStore::kLifetimeMs), nullptr) << "an expired slot is not shown";

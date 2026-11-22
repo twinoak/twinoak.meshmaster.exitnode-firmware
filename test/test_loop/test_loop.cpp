@@ -2766,11 +2766,14 @@ TEST_F(LoopTest, TheAirtimeGateStillPacesAWakeWithRoomForSixTransactions) {
 
   ASSERT_EQ(report.jobsRun, 1) << "the job did not run at all";
   EXPECT_GE(report.transactionsSpent, 2);
-  // Every gap between two sends is the budget's twenty seconds, on the fake clock.
-  const std::vector<fake::Send>& sends = mesh.sends();
-  ASSERT_GE(sends.size(), 2u);
-  for (size_t i = 1; i < sends.size(); i++) {
-    EXPECT_GE(sends[i].atMs - sends[i - 1].atMs, 20000u) << "send " << i << " came too soon after " << (i - 1);
+  // Every gap between two **transactions** is the budget's twenty seconds, on the fake clock.
+  // `gapsMs()` is where a transaction started and not where its command went out, which since
+  // task p1.21-71 are two different moments: a direct login is preceded by the way back, inside
+  // the same slot, and the login follows it by however long the mesh says the hops need.
+  const std::vector<uint32_t> gaps = mesh.gapsMs();
+  ASSERT_GE(gaps.size(), 1u);
+  for (size_t i = 0; i < gaps.size(); i++) {
+    EXPECT_GE(gaps[i], 20000u) << "transaction " << (i + 1) << " came too soon after " << i;
   }
   EXPECT_GE(platform.millis() - began, 20000u) << "a paced wake takes the time the pacing costs";
 }
