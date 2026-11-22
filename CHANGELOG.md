@@ -31,6 +31,10 @@ release workflow opens the next section when it moves the version on, and
 `tools/release.ps1 -Action check` fails in CI when the heading and `VERSION`
 disagree.
 
+## v0.7.7
+
+Nothing yet.
+
 ## v0.7.6
 
 Piles 1.20 and 1.21 (`tasks/phase-1.20/`, `tasks/phase-1.21/`), in progress.
