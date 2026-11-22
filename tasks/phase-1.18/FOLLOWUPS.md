@@ -40,7 +40,7 @@ and the change in `src/` of each (`AgentMesh.h`, `mesh/Receiver.cpp`, `settings/
 
 ## A fetch that three short ranges ended (Aarhus C, 20 November)
 
-- [ ] **[next] An update of Aarhus C to 0.7.5 was refused eight seconds into its fetch.** Its
+- [x] **[next] An update of Aarhus C to 0.7.5 was refused eight seconds into its fetch.** Its
   journal on meshmaster.dk: `check: table two, 0.7.4+a3bc485 running`, `fetching: 0.7.5+ac412e7,
   1515024 bytes`, `refused: range 145570-211105 stopped at 48208 of 65536 bytes (3 failure(s),
   which is all this fetch gets)`; the server counted 262 kB sent in 4 requests. Nothing was
@@ -65,3 +65,5 @@ and the change in `src/` of each (`AgentMesh.h`, `mesh/Receiver.cpp`, `settings/
   error, the largest free block); a count that a range which got further does not use up; and
   whether the observer's slots give way while a file is fetched, as they do for a call under
   the floor.
+  *Done in pile 1.19, task 68: the slots stand down for a fetch, a short range says why and
+  is carried on, and three requests in a row that bring nothing end it. Not on a board yet.*
