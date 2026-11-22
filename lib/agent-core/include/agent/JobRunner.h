@@ -216,6 +216,10 @@ class JobRunner {
     char pathHops[kMaxClaimPathHops][8];
     const char* pathPtrs[kMaxClaimPathHops];
     uint8_t pathBytes[kMaxClaimPathHops * 3];
+    // **The path this job's claim carried**, kept for the whole job (task p1.21-71): what the
+    // session a login opens remembers it was opened along, and what a job reusing a session
+    // compares with. `pathBytes` above is scratch that runTrace writes over.
+    uint8_t claimPath[kMeshPathCap];
     uint8_t roundTrip[kMeshPathCap];
     ConfigSnapshot snapshot;
     AccessListEntry acl[kAccessListMaxEntries];
@@ -496,6 +500,26 @@ class JobRunner {
     // is where it failed.
     enum class Stage : uint8_t { None, Login, Request };
     Stage stage = Stage::None;
+    // ---------------------------------------------------------------- the way back (task p1.21-71)
+    //
+    // The path this job's claim carried, as `beginJob` was given it: `claimPathLen` is the
+    // encoded `path_len` byte and the bytes are `scratch_.claimPath`. A session a login of this
+    // job opens remembers them, and a job that reuses a session compares them.
+    bool hasClaimPath = false;
+    uint8_t claimPathLen = 0;
+    // How many ways back this job has told. A direct login tells one before every try, and a
+    // reply that came home flooded all the same buys **one** more before the next send - once a
+    // job, whatever happens after it, because a way back told twice is the same way back and a
+    // repeater that ignored two will ignore three.
+    int waysBackTold = 0;
+    bool wayBackOwed = false;    // one is owed before this job's next send that goes out direct
+    bool wayBackRetold = false;  // the once-a-job telling a flooded reply buys has been spent
+    bool wayBackNoted = false;   // the one sentence a job about a mesh that tells none
+    // Why one is owed, as the job's log says it when it goes: a static string, and nullptr for
+    // the ordinary telling before a direct login. The log is 1 024 bytes and whole entries fall
+    // off the front of it (JobLog above), so the reason is part of the line that tells the way
+    // back rather than a line of its own - a job's evidence is worth more than a second sentence.
+    const char* wayBackWhy = nullptr;
   };
 
   // The word a result carries for where it failed, or nullptr: the rule above, with success and
@@ -546,6 +570,21 @@ class JobRunner {
   // and nullptr only at class admin with no admin password, because there is no admin login
   // without one.
   const char* loginMaterial(const ClaimedJob& job);
+
+  // ---------------------------------------------------------------- the way back (task p1.21-71)
+
+  // Tell this job's repeater the way back and wait for the packet to clear the hops, so that the
+  // send after it comes home along them. Nothing when this job holds no path - a flooded send is
+  // preceded by nothing - and one line in the job's log when the mesh tells none at all. Called
+  // before every login that goes out direct, each try, and from the two sends below when one is
+  // owed.
+  void tellTheWayBack(Context& ctx, const char* what);
+  // The one owed before the next send, if there is one: the same call, guarded.
+  void tellTheWayBackIfOwed(Context& ctx, const char* what);
+  // A reply came home: `how` gets "<the send's shape>, reply <direct|flooded>" for the job's log,
+  // and a reply that came flooded buys one more telling of the way back, once a job. Nothing is
+  // logged here - the telling's own line says why it went.
+  void noteReplyRoute(Context& ctx, const char* shape, char* how, size_t cap);
   // One login: counted, logged, the session bookkeeping a reply implies, and no policy beyond
   // that. ensureSession() is this twice; a discover is this once, for the path.
   LoginResult loginOnce(const ClaimedJob& job, Context& ctx, const char* material, const char* what);

@@ -290,6 +290,7 @@ them there is one peer and at most one awaited reply.
 | `hasPath()` | no | Whether a path is held. The library reads it to choose a reply timeout and to write the result's `pathUsed`, and the `discover` job reads it after a login to learn whether the reply taught one |
 | `pathHopCount()` | no | The hops in that path, 0 for a direct neighbour. **This is the reply timeout's multiplier** (§3.3) |
 | `describePath(char hops[][8], int max)` | no | The path now held, as hex hops of `hashSize` bytes each, in the order they go into a packet — which for a server-supplied path is the order the claim carried — into the caller's array; return how many were written. It becomes the result's `pathUsed` |
+| `tellTheWayBack()` | no — returns when the packet is away | **Tell this job's repeater the way back to this exit node** (unreleased, task p1.21-71; `CHANGELOG.md` gives it its version at the next release), so that this job's replies come home along the hops its requests go out by. A repeater answers a direct request along the `out_path` it has stored for that client and **floods** the reply when it has none, and it stores one only from a PATH packet the client sends it — so until a mesh sends one, every reply to an exit node is a flood. Return a `WayBack`: `How::Told` with the hops it named and `clearMs`, **your own** figure for how long the packet needs to clear those hops before the next send may go; `How::Failed` when you tell one and could not; `How::NotTold` when you tell none. What to send is [§3.9](#39-the-way-back-and-how-a-reply-came-home). The library calls it before **every** login that goes out direct, each try, and once more before the next send when a reply came home flooded all the same — never before a send that floods. It is one packet **inside the login's own slot** of the airtime budget and counts **no transaction**, and it is **not a command**: nothing retries it and nothing awaits an answer. **It has a default that tells nothing and says so**, so a mesh that overrides nothing is exactly the mesh it was and the library says one sentence about it in the job's log |
 | `sendLogin(password, tag&)` | no — returns when the packet is away | A login as *this unit* (EXIT-NODES §7). `password` empty or `nullptr` is the **ACL login**: our own key and no secret at all. With a password it is the guest or admin login, and **at most 15 bytes of it go** (`kMaxPasswordLen`), because that is what the firmware at the other end keeps; wipe the plaintext as soon as the packet is encrypted. Set `tag = 0`: a login reply carries the peer's timestamp and not ours, so the await that follows is "the next reply from this peer" |
 | `sendRequest(reqType, data, len, tag&)` | no | One request datagram on the session the login opened — the four `kReqTypeGet*` constants of `agent/IMesh.h`, and `kReqTypeGetAccessList` beside its parser in `agent/ReplyCodec.h`. `tag` out is the timestamp you drew, which the reply will carry back |
 | `sendCli(text, sensitive, timestamp&)` | no | One CLI line as a text datagram of CLI type, on the admin session. **You draw the sender timestamp**, put it in the packet and hand it back in `timestamp` — the repeater judges replays by it and will answer an *equal* one with nothing at all, so the series must be strictly increasing per peer. A retry calls again and gets a fresh one. `sensitive` is a line made from a password: its frame, and the reply awaited for it, must be printed with their bodies redacted if you print frames at all |
@@ -297,7 +298,7 @@ them there is one peer and at most one awaited reply.
 | `sendTrace(roundTripHashes, hashBytes, hashSize, tag&)` | no | A trace along the round trip: the way out, the repeater, and the way back. `hashSize` is 1, 2, 4 or 8 — a trace packet cannot express three-byte hashes, and the library refuses such a path before it ever reaches you (`unsupported`, at no transaction). Needs no session and no login |
 | `awaitReply(tag, timeoutMs, pump)` | **yes** | Wait up to `timeoutMs` for the `Response` (or `Trace`) with this tag; `tag == 0` means *the next reply from the peer*. Pump your own mesh and call `pump` (when it is not null) while waiting. Return `true` with `reply()` filled, or `false` on silence. A reply with the wrong tag is not this one: drop it as a late reply, do not return it |
 | `awaitText(timeoutMs, pump)` | **yes** | The same for a CLI reply: the first text datagram of CLI data from the peer, which carries **no tag** at all |
-| `reply()` | no | The last reply an `await*` returned true for |
+| `reply()` | no | The last reply an `await*` returned true for. Fill its `route` (unreleased, task p1.21-71): `ReplyRoute::Direct` for a reply that arrived along a path, `Flood` for one that was flooded, `NotKnown` — the default — for a mesh that cannot say. The library puts it in the job's log at every answered exchange and reads nothing else from it; a `NotKnown` is never read as *flooded* |
 
 `uniqueTime()` is deliberately **not** on this interface. Every send draws its
 own timestamp and hands it back, so nothing in the library ever asks for one;
@@ -545,6 +546,73 @@ wiped with the one the secret is built in.
 **For your `IMesh`: do nothing.** As with §3.6 and §3.7, the rule is the
 library's, and for the same reason: it has to hold for a mesh that hands every
 text through. You are not asked to know which line is in flight.
+
+### 3.9 The way back, and how a reply came home
+
+A trace goes out and comes back along the hops it names. A reply did not.
+
+MeshCore's repeater answers a **direct** request along the `out_path` it has
+stored for that client and **floods** the reply when it has none
+(`examples/simple_repeater/MyMesh.cpp` at `81dbae59`: a login's reply ~L596–619
+through `mesh::chooseReplyRoute`, a request's ~L684–697, a console reply
+~L744–756). It stores one **only** from a PATH packet the client sends it
+(`onPeerPathRecv` ~L766–782), and a login that arrives as a flood makes it forget
+the one it had (~L131–133). This library sent none, and with a path from the
+server nothing of ours is flooded for the repeater to answer with a path return
+either — so every reply to an exit node was a flood, repeated by every repeater
+that could hear it.
+
+On 22 November 2026 a trace of TwinOak Ebeltoft through the Risskov exit node
+read 7 to 12 dB at all six receptions, and a status read along the same pinned
+path two minutes later had two logins unanswered. Ebeltoft answered a login, a
+status and a telemetry request in each of seven hours that morning and its
+`sentDirect` moved by **five** in all.
+
+**What a way back is.** The hops of the path this job holds, in the **opposite
+order**, at the width the path carried:
+
+- a direct packet is routed by the **front** of its path — each hop matches
+  `path[0]` against itself and then takes itself off (`src/Mesh.cpp` ~L88–105) —
+  so a path is read in the order of travel;
+- a **flood** appends each repeater's hash at the **end** (`routeRecvPacket`,
+  ~L344–356), which is why a repeater can store what a flooded request arrived
+  with and answer back along it.
+
+So the way out read backwards is the way home read forwards. A path of **no
+hops** is the **empty** path, which `Packet::copyPath` stores as an
+`out_path_len` of 0 and not `OUT_PATH_UNKNOWN` — the repeater then answers that
+client direct with no hops at all. And a path a **flooded** reply taught is the
+path that reply itself travelled.
+
+On this board the packet is MeshCore's own reciprocal path return, made exactly
+as `Mesh::onRecvPacket` makes one for a client's flood (`src/Mesh.cpp`
+~L174–178): `createPathReturn` to the peer with that reversed path as its
+payload, no extra payload, sent **direct** along the path the job holds. The
+whole of it is `AgentMesh::tellTheWayBack`.
+
+**`clearMs` is yours.** The library waits exactly what you return before the send
+that follows, because the two packets would otherwise race each other at the
+first repeater. This board's figure is arithmetic over its radio's own numbers
+and nothing picked by hand: the packet's airtime once for its own transmission,
+and for each hop the longest that hop may hold it plus its own transmission of
+it — and the longest a hop may hold a direct packet is **one and a half
+airtimes**, because MeshCore's repeater draws `nextInt(0, 5·t + 1)` with
+`t = airtime × direct_tx_delay_factor` and `direct_tx_delay_factor` is `0.3` out
+of the box. Answer 0 and nothing is waited.
+
+**When the library calls it.**
+
+| | |
+|---|---|
+| before **every** login that goes out direct, each try | the login's own reply then takes the way back, and a path that changed is told before anything has to come back along the old one |
+| once more before the job's next send, when a reply came home **flooded** | the repeater did not hold this exit node's key when the packet arrived — a guest's very first login is what writes that entry, and a PATH packet from a key the access list does not hold is dropped before it is decrypted — or the packet was lost, or a flooded reply has just taught a path there were no hops for before. **Once a job**, whatever happens after it: a way back told twice is the same way back |
+| before the first send of a job that **reuses a session** whose claim named another path | a session remembers the path it was opened along, because that is what the repeater was told the way back from |
+| never | before a send that **floods** (there are no hops to name), and never for a job your mesh answers without the air (`answersLocally()`) |
+
+**What gets less forgiving.** A reply has one way home now. A pair that is good
+out and poor back fails where a flood might have got through — and then the job
+ends exactly as a silence has always ended it, `unreachable`, with nothing new
+tried. A trace shows both directions; a pin is the cure.
 
 ## 4. `IUplink` — meshmaster.dk
 
@@ -1406,7 +1474,7 @@ your half of each needs one of yours.
 |---|---|---|
 | **Nothing the mesh says is logged as text** | The library has no way to see a frame it did not ask for: the only way in is `reply()` after an `await*`, and nothing it logs carries a reply body — `Credential.ThePasswordIsNeverInTheJobsPrintableFields` and `RunnerTest.APasswordSetSendsTheLineOnceAndRecordsNoValueAnywhere`, which greps every captured log line and the whole result body for the value. A repeater's CLI reply *to our own command* is a job's result and is carried on purpose; the mesh's own chat is not | **The dropping is the mesh implementation's.** On this board `AgentMesh::onRecvPacket` counts a chat frame and releases it before anything is decrypted, and the only trace of it that travels is the `overheard` counter (`LoopTest.TheHeartbeatsBodyIsTheContractsShapeAndThisBoardsIdentity`). Yours must do the same and must not print one either |
 | **A password is in RAM for the job and gone** | The claim is parsed in place and the credential lands in the job's own fixed buffer and nowhere else; it is wiped when the claim ends, whatever happened. `Credential.ThePasswordIsHeldInAFixedBufferAndWipedToZeros`, `Credential.TheRunnerWipesTheCredentialAfterEveryJob`, `Credential.NoModuleThePasswordPassesThroughNamesTheStoreOrAFileSystem` (a grep of every module it passes through for an NVS or file-system API), and `RunnerTest.TheCredentialBytesAreZeroAfterTheJob`, which reads the bytes back through the pointer the fake server was handed | Your `sendLogin` must wipe the plaintext as soon as the packet is encrypted and **keep no copy** — not in a link buffer, not in a retry cache, not in a log. At most 15 bytes of it are ever sent; a stored password longer than that is a lock-out, which the library says in a log line and reports `unreachable` |
-| **One send per command** | A write is sent once, whatever comes back: an apply's commands in order with strictly increasing sender timestamps, stopped at the first refusal or silence, and a CLI line never retried. `RunnerTest.ACliLineIsSentOnceAndNeverRetried`, `RunnerTest.AConfigApplySendsEachCommandOnceAndReadsBackWhatItTouched`, and `RunnerTest.OneSendPerCommandTheMinimumGapAndThePerMinuteCapAreHeldByTheClock`, which reads every send out of the fake with the clock's time against it | **The library's pacing assumes your mesh sends exactly what it was asked, once.** A transport that retries a datagram by itself turns one `set` into two changes. If your link has a retry, it must be a retry of the *link* frame and not of the mesh packet |
+| **One send per command** | A write is sent once, whatever comes back: an apply's commands in order with strictly increasing sender timestamps, stopped at the first refusal or silence, and a CLI line never retried. **Where the rail ends** (unreleased, task p1.21-71): it is a rail about **commands** — a line or a request that *changes* a repeater, where a second send is a second change. A **way back** ([§3.9](#39-the-way-back-and-how-a-reply-came-home)) is not one: it changes nothing but where that repeater addresses its replies, and told twice it is the same way back. So the library tells one before every direct login and once more when a reply came home flooded, and that is not the rail broken but the rail's edge. What still holds of it there: nothing **awaits** a way back, nothing **retries** it on a silence, and it is at most two a job. `RunnerTest.ACliLineIsSentOnceAndNeverRetried`, `RunnerTest.AConfigApplySendsEachCommandOnceAndReadsBackWhatItTouched`, and `RunnerTest.OneSendPerCommandTheMinimumGapAndThePerMinuteCapAreHeldByTheClock`, which reads every send out of the fake with the clock's time against it | **The library's pacing assumes your mesh sends exactly what it was asked, once.** A transport that retries a datagram by itself turns one `set` into two changes. If your link has a retry, it must be a retry of the *link* frame and not of the mesh packet |
 | **TLS is verified** | **The library cannot check this and does not try.** It has no socket. `test_tls_policy` greps this whole tree — `src/`, `test/`, `tools/`, `docs/`, `lib/`, the workflows, `platformio.ini` and `README.md` — for every way of skipping certificate verification, and the pinned root is held to ISRG Root X1 (`TlsPolicy.NothingInTheTreeSkipsCertificateVerification`, `TlsPolicy.ThePinnedRootIsIsrgRootX1`) | Your `IUplink` verifies the chain, against a root you ship. Write the same grep over your own tree; it is twenty lines and it is the only thing standing between a field unit and a man in the middle |
 | **Path hashes are two bytes or more, never one** | The library never chooses a width for a flood — it passes through the width the claim carried — and it refuses a three-byte path for a trace before a packet is built (`Trace.ThePathHashSizesATracePacketCanCarryAreThePowersOfTwo`, `RunnerTest.ATraceAlongThreeByteHashesIsUnsupportedAtNoTransaction`). The one width it does choose is **a trace to a direct neighbour**, where no hop was learned, and that one is **the board's own**: it asks `floodPathHashSize()` and uses the answer, which defaults to two bytes (`RunnerTest.ATraceToADirectNeighbourGoesAtTheBoardsWidth`, `Seams.TheMeshTellsTheLibraryTheWidthItFloodsAt`) | Every flood **your** mesh originates uses two-byte path hashes or wider (`AgentMesh::kFloodPathHashSize` is this board's), and `floodPathHashSize()` answers that same number. One-byte hashes let two repeaters that share a first byte both repeat a direct packet; the first bench showed a five-hop path of them, and job 20005 a trace hop that three repeaters could have sent (D-33) |
 | **The contract is the .NET agent's** | Every envelope is held byte for byte against `MeshMaster.Contracts`' own fixtures — `test_contract_fixtures`, `test_envelopes`, `test_job_results`, `test_config_read`, `test_claim`. There is one dialect and a second one is a bug however well it works | Post the bytes the library wrote, unchanged (§4) |

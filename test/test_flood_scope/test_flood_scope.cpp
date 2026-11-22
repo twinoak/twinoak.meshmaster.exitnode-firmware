@@ -415,7 +415,7 @@ TEST_F(FloodTest, AFloodedLoginSendsTryOneScopedAndTryTwoUnscoped) {
 
   EXPECT_NE(body.find("try 1: no reply (flood, scope dk)"), std::string::npos) << body;
   EXPECT_NE(body.find("try 2: logged in as"), std::string::npos) << body;
-  EXPECT_NE(body.find("(flood, unscoped)"), std::string::npos) << body;
+  EXPECT_NE(body.find("(flood, unscoped"), std::string::npos) << body;
 
   EXPECT_GE(runner.floodCounts().answeredUnscoped, 1u);
   EXPECT_EQ(runner.floodCounts().answeredScoped, 0u);
@@ -464,7 +464,7 @@ TEST_F(FloodTest, AnUnscopedBoardFloodsUnscopedAndCountsItAsSuch) {
 
   for (bool scoped : mesh.floodShapes()) EXPECT_FALSE(scoped);
   EXPECT_NE(body.find("try 1: logged in as"), std::string::npos) << body;
-  EXPECT_NE(body.find("(flood, unscoped)"), std::string::npos) << body;
+  EXPECT_NE(body.find("(flood, unscoped"), std::string::npos) << body;
   EXPECT_GE(runner.floodCounts().answeredUnscoped, 1u);
   EXPECT_FALSE(runner.floodUnscopedRetry());
   EXPECT_NE(floodLine().find("scope *"), std::string::npos) << floodLine();
@@ -485,7 +485,7 @@ TEST_F(FloodTest, ADiscoverThatFloodsTwiceSendsTheSecondUnscoped) {
   EXPECT_EQ(runner.floodCounts().unanswered, 1u) << "two floods, one transaction, one count";
   EXPECT_EQ(runner.floodCounts().answeredScoped + runner.floodCounts().answeredUnscoped, 0u);
   EXPECT_NE(body.find("the last resort"), std::string::npos) << body;
-  EXPECT_NE(body.find("(flood, unscoped)"), std::string::npos) << body;
+  EXPECT_NE(body.find("(flood, unscoped"), std::string::npos) << body;
 }
 
 // **Direct sends are unchanged.** A path the server holds means every send of the job is DIRECT:
@@ -507,7 +507,9 @@ TEST_F(FloodTest, ADirectSendCarriesNoScopeAndCountsNothing) {
   EXPECT_EQ(runner.floodCounts().answeredScoped, 0u);
   EXPECT_EQ(runner.floodCounts().answeredUnscoped, 0u);
   EXPECT_EQ(runner.floodCounts().unanswered, 0u);
-  EXPECT_NE(body.find("(direct)"), std::string::npos) << body;
+  // Since task p1.21-71 an answered exchange says how its reply came home as well, inside the
+  // same brackets: `(direct, reply direct)`. The shape of the **send** is still `direct`.
+  EXPECT_NE(body.find("(direct, reply direct)"), std::string::npos) << body;
   EXPECT_EQ(body.find("flood,"), std::string::npos) << "no line of a direct job's log names a flood's shape";
 }
 

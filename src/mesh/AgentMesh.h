@@ -110,6 +110,12 @@ class AgentMesh : public mesh::Mesh, public IMesh, public observer::NeighbourLin
   uint8_t pathHopCount() const override { return haveOutPath_ ? static_cast<uint8_t>(outPathLen_ & 63) : 0; }
   int describePath(char hops[][8], int max) const override;
 
+  // The way back, as the PATH packet upstream's own clients send as their reciprocal one
+  // (src/Mesh.cpp:174-178 at 81dbae59): `createPathReturn` to the peer with the path this job
+  // holds reversed, sent direct along that path, through `dispatch` so that its frame is logged
+  // like any other. Nothing of it is awaited - it is not a command (agent/IMesh.h).
+  WayBack tellTheWayBack() override;
+
   // The login reply carries no tag of ours (`tag` is left 0: the next RESPONSE from the peer);
   // the timestamp in the packet is what the repeater judges replays by and nothing else.
   SendResult sendLogin(const char* password, uint32_t& tag) override;
@@ -205,6 +211,18 @@ class AgentMesh : public mesh::Mesh, public IMesh, public observer::NeighbourLin
   // it chooses for itself - a trace to a direct neighbour - is this board's own and not one byte.
   uint8_t floodPathHashSize() const override { return kFloodPathHashSize; }
 
+  // **The longest a repeater may hold a direct packet before it retransmits it**, as a fraction
+  // of the packet's own airtime. MeshCore's repeater draws `getRNG()->nextInt(0, 5*t + 1)` with
+  // `t = getEstAirtimeFor(bytes) * direct_tx_delay_factor`
+  // (examples/simple_repeater/MyMesh.cpp:551-554 at 81dbae59), and `direct_tx_delay_factor` is
+  // **0.3** out of the box (same file:894, `d_txdelay` on the console) - so five times three
+  // tenths of the airtime, which is three halves of it. A repeater whose owner set `d_txdelay`
+  // higher holds it longer, and the way back then clears the hops after the login rather than
+  // before it: the reply of that login is flooded and the way back is told once more
+  // (agent/IMesh.h), which is the same recovery as a packet lost on the air.
+  static constexpr uint32_t kHopDelayNumerator = 3;
+  static constexpr uint32_t kHopDelayDenominator = 2;
+
  protected:
   // The receiver is put back on MeshCore's own timer (task p1.18-66, src/mesh/Receiver.h). This
   // is the whole of it: the dispatcher arms its timer from this answer and calls the radio's
@@ -259,9 +277,20 @@ class AgentMesh : public mesh::Mesh, public IMesh, public observer::NeighbourLin
   // when the scope is `*` or this send was told `Unscoped`. A **direct** send never goes through
   // here and carries no transport code: MeshCore's `sendDirect` has no overload that takes any.
   SendResult floodOut(mesh::Packet* pkt);
+  // How long a direct packet of `bytes` needs to clear `hops` repeaters, by this radio's own
+  // figures: its airtime once for this board's transmission, and for each hop the longest that
+  // hop may hold it (kHopDelayNumerator above) and its own transmission of it. Not const:
+  // `Radio::getEstAirtimeFor` is not.
+  uint32_t clearMsFor(int bytes, uint8_t hops);
   bool await(Awaiting what, uint32_t tag, uint32_t timeoutMs, void (*pump)());
-  void takeResponse(const uint8_t* data, size_t len);
-  void takeText(const uint8_t* data, size_t len);
+  void takeResponse(const uint8_t* data, size_t len, ReplyRoute route);
+  void takeText(const uint8_t* data, size_t len, ReplyRoute route);
+  // How a frame came home (agent/IMesh.h), from its own header: a direct packet took a path and
+  // a flooded one was repeated by everybody that heard it.
+  static ReplyRoute routeOf(const mesh::Packet* pkt) {
+    if (pkt == nullptr) return ReplyRoute::NotKnown;
+    return pkt->isRouteDirect() ? ReplyRoute::Direct : ReplyRoute::Flood;
+  }
   void logFrame(const char* direction, const mesh::Packet* pkt, bool withHex, size_t clearBytes = 0);
 
   MeshCounters counters_;

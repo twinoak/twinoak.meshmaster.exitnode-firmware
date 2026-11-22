@@ -303,6 +303,71 @@ int AgentMesh::describePath(char hops[][8], int max) const {
   return count;
 }
 
+// ------------------------------------------------------------------ the way back (task p1.21-71)
+
+uint32_t AgentMesh::clearMsFor(int bytes, uint8_t hops) {
+  const uint32_t air = static_cast<uint32_t>(_radio->getEstAirtimeFor(bytes));
+  const uint32_t perHop = air + (air * kHopDelayNumerator) / kHopDelayDenominator;
+  return air + static_cast<uint32_t>(hops) * perHop;
+}
+
+// **The way back: this job's path, reversed.**
+//
+// A direct packet is routed by the **front** of its path - `self_id.isHashMatch(pkt->path, ...)`
+// and then `removeSelfFromPath`, which shifts the rest forward (src/Mesh.cpp:88-105 at 81dbae59)
+// - so the first hash of a path is the next hop and the order is the order of travel. A **flood**
+// appends each repeater's hash at the **end** (`routeRecvPacket`, same file 344-356), so the path
+// a flood accumulates from A to B is the hops in the order it travelled them. Those two together
+// are why a repeater can store what a flooded request arrived with and answer along it
+// (`createPathReturn(sender, secret, packet->path, packet->path_len, ...)`,
+// examples/simple_repeater/MyMesh.cpp:604-606) - and why the way **out** read backwards is the
+// way **home** read forwards.
+//
+// So the hops go out in the opposite order, at the width the path carried. A path of **no hops**
+// is the empty path, which `Packet::copyPath(client->out_path, path, 0)` stores as an
+// `out_path_len` of 0 - not OUT_PATH_UNKNOWN (0xFF) - so the repeater then answers that client
+// direct with no hops at all, which is what a pair that hears each other needs.
+//
+// The packet is MeshCore's own reciprocal path return, made exactly as `Mesh::onRecvPacket` makes
+// one for a client's flood (src/Mesh.cpp:174-178): `createPathReturn` to the peer, the path as
+// its payload and no extra payload - the five bytes `createPathReturn` appends in its place are a
+// dummy type and four random ones, which is all that keeps two such packets' hashes apart - sent
+// **direct** along the path this job holds.
+IMesh::WayBack AgentMesh::tellTheWayBack() {
+  WayBack out;
+  // No peer, or no path to tell one along: a flooded send is preceded by nothing.
+  if (!peerSet_ || !haveOutPath_) return out;
+  const uint8_t size = static_cast<uint8_t>((outPathLen_ >> 6) + 1);
+  const uint8_t hops = static_cast<uint8_t>(outPathLen_ & 63);
+  if (static_cast<size_t>(hops) * size > MAX_PATH_SIZE) return out;
+  uint8_t back[MAX_PATH_SIZE] = {0};
+  for (uint8_t i = 0; i < hops; i++) {
+    std::memcpy(&back[i * size], &outPath_[(hops - 1 - i) * size], size);
+  }
+  mesh::Packet* pkt = createPathReturn(peer_, sharedSecret(), back, outPathLen_, 0, nullptr, 0);
+  if (pkt == nullptr) {
+    out.how = WayBack::How::Failed;
+    return out;
+  }
+  // The frame as it goes on the air: the header and the `path_len` byte, the path `sendDirect`
+  // is about to write into it, and the payload. **Not `getRawLength()`**, which cannot be read
+  // before `sendDirect`: the route bits are still 0 there, which `Packet::hasTransportCodes`
+  // reads as a transport flood and counts four bytes a direct frame does not carry.
+  const int bytes = 2 + static_cast<int>(hops) * static_cast<int>(size) + static_cast<int>(pkt->payload_len);
+  out.hops = hops;
+  out.clearMs = clearMsFor(bytes, hops);
+  // Through `dispatch`, so the frame is logged like any other; `haveOutPath_` holds, so it goes
+  // direct along the path and never floods.
+  if (dispatch(pkt) != SendResult::Direct) {
+    out.how = WayBack::How::Failed;
+    return out;
+  }
+  out.how = WayBack::How::Told;
+  LOG_D("mesh: the way back told: %u hop(s) reversed, %lu ms to clear them", static_cast<unsigned>(hops),
+        static_cast<unsigned long>(out.clearMs));
+  return out;
+}
+
 const uint8_t* AgentMesh::sharedSecret() {
   if (!haveSecret_) {
     self_id.calcSharedSecret(peerSecret_, peer_);
@@ -524,7 +589,7 @@ int AgentMesh::searchPeersByHash(const uint8_t* hash) {
 
 void AgentMesh::getPeerSharedSecret(uint8_t* dest_secret, int) { std::memcpy(dest_secret, sharedSecret(), PUB_KEY_SIZE); }
 
-void AgentMesh::takeText(const uint8_t* data, size_t len) {
+void AgentMesh::takeText(const uint8_t* data, size_t len, ReplyRoute route) {
   // A CLI reply carries the repeater's own timestamp and no tag, so every text of CLI data from
   // the peer is handed through while one is awaited - and **which of them is this line's answer
   // is the library's to decide** (task p1.10-49, `JobRunner::awaitCliReply`): the line went out
@@ -540,10 +605,11 @@ void AgentMesh::takeText(const uint8_t* data, size_t len) {
   }
   reply_ = MeshReply();
   reply_.kind = MeshReply::Kind::Text;
+  reply_.route = route;
   std::memcpy(reply_.text, text, sizeof reply_.text);
 }
 
-void AgentMesh::takeResponse(const uint8_t* data, size_t len) {
+void AgentMesh::takeResponse(const uint8_t* data, size_t len, ReplyRoute route) {
   if (len < 4) return;
   if (awaiting_ == Awaiting::Text) {
     // A RESPONSE while a CLI reply is awaited is an old one that took another route home.
@@ -563,6 +629,7 @@ void AgentMesh::takeResponse(const uint8_t* data, size_t len) {
   }
   reply_ = MeshReply();
   reply_.kind = MeshReply::Kind::Response;
+  reply_.route = route;
   reply_.tag = tag;
   size_t n = len - 4;
   if (n > sizeof reply_.data) n = sizeof reply_.data;
@@ -570,16 +637,18 @@ void AgentMesh::takeResponse(const uint8_t* data, size_t len) {
   reply_.len = static_cast<uint8_t>(n);
 }
 
-void AgentMesh::onPeerDataRecv(mesh::Packet*, uint8_t type, int, const uint8_t*, uint8_t* data, size_t len) {
+void AgentMesh::onPeerDataRecv(mesh::Packet* pkt, uint8_t type, int, const uint8_t*, uint8_t* data, size_t len) {
   // A REQ never reaches this: onRecvPacket released it, so nothing here can compose a reply.
+  // The packet's own header says how the reply came home (task p1.21-71): a repeater answers
+  // direct along a way back it holds and floods when it holds none.
   if (type == PAYLOAD_TYPE_RESPONSE) {
-    takeResponse(data, len);
+    takeResponse(data, len, routeOf(pkt));
   } else if (type == PAYLOAD_TYPE_TXT_MSG) {
-    takeText(data, len);
+    takeText(data, len, routeOf(pkt));
   }
 }
 
-bool AgentMesh::onPeerPathRecv(mesh::Packet*, int, const uint8_t*, uint8_t* path, uint8_t path_len,
+bool AgentMesh::onPeerPathRecv(mesh::Packet* pkt, int, const uint8_t*, uint8_t* path, uint8_t path_len,
                                uint8_t extra_type, uint8_t* extra, uint8_t extra_len) {
   // A flooded request is answered with the way back, and the reply rides in `extra`. Take the
   // path - the next transaction of this job goes direct - and the reply with it.
@@ -592,9 +661,14 @@ bool AgentMesh::onPeerPathRecv(mesh::Packet*, int, const uint8_t*, uint8_t* path
     LOG_D("mesh: the reply came back along a path of %u hop(s); the rest of this job goes direct",
           static_cast<unsigned>(count));
   }
-  if (extra_type == PAYLOAD_TYPE_RESPONSE && extra != nullptr) takeResponse(extra, extra_len);
-  // **false**: no reciprocal path is sent. One send per command is the rail, and a repeater that
-  // answered us has already learnt what it needs from the request it answered.
+  if (extra_type == PAYLOAD_TYPE_RESPONSE && extra != nullptr) takeResponse(extra, extra_len, routeOf(pkt));
+  // **false**: nothing is sent from in here. A reciprocal path *is* sent since task p1.21-71 -
+  // it is how a reply comes home along the hops the request went out by - but it is sent from
+  // `tellTheWayBack()` above, by the job runner, before a login that goes out direct: past the
+  // airtime gate and through `dispatch`, so it is inside the login's own slot and its frame is
+  // logged like every other. A path return sent from in here would be neither. The rail it does
+  // not break is *one send per command*: a way back is not a command, and told twice it is the
+  // same way back (docs/library.md section 8).
   return false;
 }
 
@@ -605,6 +679,7 @@ void AgentMesh::onTraceRecv(mesh::Packet* pkt, uint32_t tag, uint32_t, uint8_t f
   const uint8_t hops = static_cast<uint8_t>(path_len >> (flags & 0x03));
   reply_ = MeshReply();
   reply_.kind = MeshReply::Kind::Trace;
+  reply_.route = routeOf(pkt);
   reply_.tag = tag;
   reply_.traceFlags = flags;
   reply_.traceHashBytes = path_len > MAX_PATH_SIZE ? MAX_PATH_SIZE : path_len;
