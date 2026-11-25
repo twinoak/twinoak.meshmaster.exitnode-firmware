@@ -44,3 +44,22 @@ code. No task written.
   -5.75 dB on 22T03Z and 7.25 dB at 15:23Z, and the other direction moved with it. TwinOak
   Risskov did not restart (79 days up) and no setting was applied to it. Not explained; the
   reads through it failed for three hours as the link came back.
+
+## The review of 69–70 (22 November)
+
+Merged 22 November (#80, #81; released in v0.7.7). Read: both reports whole, the claim loop's
+ends in `AgentLoop.cpp` (~L781–876). Not read line by line: the envelopes, `JobRunner::claim`,
+the tests. Seven of seven criteria in each, no deviation of substance. Nothing that holds a
+rollout back.
+
+- [ ] **[none] A wake's claims are bounded four ways** and say which ended them
+  (`claimsEndedBy`): the wake's own number, time, transactions, and the server's word.
+  `maxClaimsThisWake` unset is one claim, so a Heltec's `loop()` is what it was.
+- [ ] **[none] An older server is safe.** `holding` is a member it skips; said in 70's report and
+  read in meshmaster.dk (`ContractsJson.cs` ~L64: unmapped members are skipped).
+- [ ] **[later] `IUplink`'s two methods changed their signatures** where a defaulted sibling
+  would have kept a consumer compiling. The Walter's sync of v0.7.7 was red on exactly that
+  (its pull request #92); meant, by 69's own decision, and it is one line each there.
+- [ ] **[the Walter's sync] The second claim after one that did not come back acts on a Walter
+  at once**, with nothing there asking for it. Its sync task of v0.7.7 is told to show the wake
+  holds it.
