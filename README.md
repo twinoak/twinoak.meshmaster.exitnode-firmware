@@ -318,7 +318,7 @@ board     heltec_v3, Power-on reset, up 0d 00:00:41
 identity  7f3a9c02e1b44d9a0f6c2b7d8e9a1c3f5d7b9e0a2c4e6f8a0b1c2d3e4f5a6b7c
 radio     869.618 MHz, bw 62.5 kHz, sf 8, cr 8, tx 22 dBm; companion role, no repeat; receiver reset every 4 s
 frames    rx 3 (advert 2, grp-txt 1, txt 0, ack 0, path 0, trace 0, other 0), tx 0, noise floor -112 dBm, frame log off
-wifi      off, wifi.ssid is unset
+wifi      off, wifi.ssid is unset, mac 34:85:18:1a:2b:3c, name meshmaster-2b3c
 time      no time (sntp not started, no wifi)
 server    not configured (meshmaster.token unset)
 flood     scope dk, answered scoped 0 / unscoped 0 / none 0 since boot; the second flood of a transaction goes unscoped
@@ -379,7 +379,7 @@ board     heltec_v3, Power-on reset, up 0d 00:03:10
 identity  7f3a9c02e1b44d9a0f6c2b7d8e9a1c3f5d7b9e0a2c4e6f8a0b1c2d3e4f5a6b7c
 radio     869.618 MHz, bw 62.5 kHz, sf 8, cr 8, tx 22 dBm; companion role, no repeat; receiver reset every 4 s
 frames    rx 32 (advert 23, grp-txt 6, txt 0, ack 0, path 0, trace 0, other 3), tx 3, noise floor -112 dBm, frame log off
-wifi      connected to Twinoak, 192.168.1.20, rssi -61 dBm (1 connects, 0 drops)
+wifi      connected to Twinoak, 192.168.1.20, rssi -61 dBm (1 connects, 0 drops), mac 34:85:18:1a:2b:3c, name meshmaster-2b3c
 time      2026-09-28T12:03:14Z (sntp)
 server    https://meshmaster.dk: config ok at 12:03:14, agent 17 "Window at Grenaa", transport onboard, budget 2/min gap 20 s, poll 30 s, root ISRG Root X1
 heartbeat last at 12:03:16, 4 answered, poll 120 s; 20 observation(s) posted, 3 waiting, 0 dropped
@@ -805,6 +805,20 @@ reading.
   before anything was written. The boot's last line and `status`' `stack` line
   say the least that was ever free, so the next one of these is read off a window
   rather than off a panic (`src/platform/LoopStack.h`, `test/test_loop_stack`).
+- **A board's address on the network is the chip's, and its name is its own.**
+  Nothing under `src/` or `lib/` sets a MAC: the station's address is the one
+  burnt into the chip's eFuse, which is why it survives a reflash, an
+  `erase confirm` and an update, and why a reservation in a router can be made
+  by it. A native test walks both trees for every call that would choose one
+  instead — `esp_base_mac_addr_set`, `esp_iface_mac_addr_set`,
+  `esp_wifi_set_mac`, `esp_netif_set_mac`, `ETH_CMD_S_MAC_ADDR`,
+  `setMacAddress` — and fails on any of them, planted files and all. The *name*
+  is the half a firmware may choose, and each board announces one of its own:
+  `meshmaster-` and the last four hex digits of that address, handed over before
+  the first `WiFi.mode(WIFI_STA)`, which at the pinned Arduino core is the one
+  call that puts a name on the station's netif and so into its DHCP request.
+  Nothing stores it and no `set` reaches it; `status` prints it beside the
+  address (`src/net/Hostname.h`, `test/test_hostname`).
 - **Path hashes are two bytes or more, never one.** Wherever this firmware
   chooses a path-hash width - every flood it originates
   (`AgentMesh::kFloodPathHashSize`), a trace it builds, anything a later task

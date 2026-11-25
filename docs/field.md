@@ -65,6 +65,17 @@ standard is the only one that needs `set flood.scope <region>` or
 it derives, and `status`'s `flood` line counts which shape of flood was
 answered — [`console.md`](console.md) has both.
 
+**Its address on the network, and its name there.** `status`'s `wifi` line ends
+with `mac …, name meshmaster-xxxx` ([`console.md`](console.md#the-wifi-line-of-status-and-the-name-on-the-network)).
+The **mac** is the board's address on the network — the chip's own, burnt in at
+the factory, and the same after a reflash, an `erase confirm` and an update — so
+**reserve an address in the router by that**, never by the IP the board happens
+to have been given. The **name** is what the board calls itself in the router's
+list of leases, and it is built from the same address, so two boards are two
+names there: that is how you tell which line is which when you go to reserve.
+Neither can be set, and the line says both before any WiFi name has been typed,
+which is when you want them.
+
 Nothing is stored anywhere else, and no reboot is part of provisioning: every
 `set` takes effect at once.
 
