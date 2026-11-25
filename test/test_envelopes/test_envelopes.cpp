@@ -34,6 +34,7 @@
 #include <agent/AgentLoop.h>
 #include <agent/Envelopes.h>
 #include <agent/JobEnvelopes.h>
+#include <agent/ServerPolicy.h>
 #include "version.h"
 
 #ifndef FIXTURES_DIR
@@ -856,6 +857,64 @@ TEST(Names, TheNameIsCutAtTheLastByteThatIsStillUtf8) {
   // A control character ends it: a name is one line or it is nothing.
   EXPECT_EQ(2u, mm::validUtf8PrefixLength("ab\ncd", 32));
   EXPECT_EQ(0u, mm::validUtf8PrefixLength(nullptr, 32));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Which statuses are the server's verdict on a result's body (task p1.22-72)
+//
+// One result meshmaster.dk turned away for what it said sat oldest in a unit's buffer on
+// 24 November 2026 and held three hours of a repeater's readings behind it, because the library
+// could not tell *refused* from *not reached*. `mm::resultIsTheServersVerdict` is where that is
+// decided, once, for every consumer of this library.
+
+TEST(AResultsVerdict, EachStatusThatIsAVerdictOnTheBodyAndEachThatIsNot) {
+  // A verdict: the server answered, and its answer is about these bytes. The same body at every
+  // wake for ever would be refused again, so the result is dropped.
+  for (int status : {400, 404, 409, 410, 413, 422}) {
+    EXPECT_TRUE(mm::resultIsTheServersVerdict(status)) << "http " << status << " is the server's verdict on the body";
+  }
+  // Not a verdict: the token, a pause of this exit node, a clock, a rate limit, a server that is
+  // unwell. Each says nothing about the body, and the result is kept and posted again.
+  for (int status : {401, 403, 408, 429}) {
+    EXPECT_FALSE(mm::resultIsTheServersVerdict(status)) << "http " << status << " says nothing about the body";
+  }
+  for (int status = 500; status <= 599; status++) {
+    EXPECT_FALSE(mm::resultIsTheServersVerdict(status)) << "http " << status << ": a 5xx is the server, not the body";
+  }
+  // A call that came back with nothing, and the statuses of a result the server took: neither is
+  // a refusal.
+  EXPECT_FALSE(mm::resultIsTheServersVerdict(0)) << "no answer came back at all";
+  for (int status : {200, 202, 204, 304}) EXPECT_FALSE(mm::resultIsTheServersVerdict(status));
+  // And everything else: a status no server of ours has sent keeps the result, because keeping is
+  // what this library has always done and a dropped result cannot be got back.
+  for (int status : {402, 405, 411, 412, 415, 418, 421, 423, 428, 431, 451}) {
+    EXPECT_FALSE(mm::resultIsTheServersVerdict(status)) << "http " << status << " is not on the list";
+  }
+}
+
+TEST(AResultsVerdict, TheListIsActionForsDiscardListAndOneStatusLess) {
+  // The two questions are near neighbours and are not the same question. `actionFor`'s `Discard`
+  // asks *retry this call now, or back off?*; this asks *is this body finished?*. **403** is the
+  // one status where they part: an exit node its owner paused is handed nothing and should neither
+  // retry in the same breath nor back off - and its results are perfectly good and go out the
+  // moment the owner unpauses. Held here so that neither list can move without the other being
+  // read.
+  int verdicts = 0;
+  int discards = 0;
+  for (int status = 400; status <= 599; status++) {
+    const bool verdict = mm::resultIsTheServersVerdict(status);
+    const bool discard = mm::actionFor(true, status, 0) == mm::ServerAction::Discard;
+    if (verdict) verdicts++;
+    if (discard) discards++;
+    if (status == 403) {
+      EXPECT_TRUE(discard) << "a pause is not a call worth repeating now";
+      EXPECT_FALSE(verdict) << "a pause is not an answer about a body";
+      continue;
+    }
+    EXPECT_EQ(verdict, discard) << "http " << status << ": the two lists have parted somewhere other than 403";
+  }
+  EXPECT_EQ(verdicts, 6) << "400, 404, 409, 410, 413 and 422";
+  EXPECT_EQ(discards, verdicts + 1) << "the same, and 403";
 }
 
 int main(int argc, char** argv) {

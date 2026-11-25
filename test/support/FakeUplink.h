@@ -50,7 +50,11 @@ struct PostedResult {
 class FakeUplink : public mm::IUplink {
  public:
   // What the server answered, where it was not 200.
-  enum class Fault : uint8_t { None, Unreachable, Unauthorized, RateLimited, ServerError, Discard, NotFound };
+  // `Discard` (422), `NotFound` (404) and `BadRequest` (400) are the three of these that
+  // `mm::resultIsTheServersVerdict` calls a verdict on the body; the other three are not. The
+  // 400 is the one of 24 November 2026 (task p1.22-72): meshmaster.dk turned a result away for
+  // what it said.
+  enum class Fault : uint8_t { None, Unreachable, Unauthorized, RateLimited, ServerError, Discard, NotFound, BadRequest };
 
   explicit FakeUplink(FakePlatform& platform) : platform_(platform) {
     configJson_ = contract("AgentConfig");
@@ -156,6 +160,12 @@ class FakeUplink : public mm::IUplink {
     resultFault_ = fault;
     resultFaultCalls_ = calls;
   }
+  // One fault for each of the next result posts **in turn**, and `Fault::None` for a post that is
+  // taken (task p1.22-72): a flush whose oldest result is refused, whose second is not reached and
+  // whose third would be taken needs three different answers from three calls, which one fault
+  // and a count cannot give. The list is consumed from the front and takes precedence over
+  // `failResults` while anything is left in it.
+  void failResultsInTurn(std::vector<Fault> faults) { resultFaultTurns_ = std::move(faults); }
   // The next `calls` **claims** answer this, whatever the other calls do: a claim the server
   // **refused** - a 4xx, a 5xx, a 429 - which is the server having spoken, and which a wake does
   // not ask again (task p1.20-70).
@@ -365,9 +375,17 @@ class FakeUplink : public mm::IUplink {
     return ok;
   }
 
-  bool postJobResult(long long jobId, const char* body, size_t len, bool& jobsWaiting) override {
+  bool postJobResult(long long jobId, const char* body, size_t len, bool& jobsWaiting, int& refusedWith) override {
     jobsWaiting = false;
-    if (!begin("result")) return false;
+    refusedWith = 0;
+    if (!begin("result")) {
+      // The third answer of IUplink::postJobResult (task p1.22-72), decided here exactly as
+      // `AgentClient::postJobResult` decides it on the board: off the status that came back, with
+      // the library's own list and no second copy of it. A fault that reached no server leaves
+      // `call_.httpStatus` 0, which is *not reached*.
+      if (call_.reachable && mm::resultIsTheServersVerdict(call_.httpStatus)) refusedWith = call_.httpStatus;
+      return false;
+    }
     results_.push_back(PostedResult{jobId, std::string(body, len), platform_.millis()});
     // The answer, as the server writes one: `JobResultReply.json`'s members, and `jobsWaiting`
     // last when this server has more for the exit node - the line of task p1.20-69, which is the
@@ -444,7 +462,10 @@ class FakeUplink : public mm::IUplink {
     call_.rateLimitRemaining = 119;
 
     Fault fault = Fault::None;
-    if (std::strcmp(what, "result") == 0 && resultFaultCalls_ != 0) {
+    if (std::strcmp(what, "result") == 0 && !resultFaultTurns_.empty()) {
+      fault = resultFaultTurns_.front();
+      resultFaultTurns_.erase(resultFaultTurns_.begin());
+    } else if (std::strcmp(what, "result") == 0 && resultFaultCalls_ != 0) {
       fault = resultFault_;
       if (resultFaultCalls_ > 0) resultFaultCalls_--;
     } else if (std::strcmp(what, "claim") == 0 && claimFaultCalls_ != 0) {
@@ -490,6 +511,11 @@ class FakeUplink : public mm::IUplink {
         call_.reachable = true;
         call_.httpStatus = 404;
         std::snprintf(call_.error, sizeof call_.error, "http 404");
+        return false;
+      case Fault::BadRequest:
+        call_.reachable = true;
+        call_.httpStatus = 400;
+        std::snprintf(call_.error, sizeof call_.error, "http 400");
         return false;
       case Fault::None:
       default:
@@ -548,6 +574,7 @@ class FakeUplink : public mm::IUplink {
   // leased. Handed back to the first claim that says it does not hold them.
   std::vector<std::pair<long long, std::string>> lost_;
   int resultFaultCalls_ = 0;
+  std::vector<Fault> resultFaultTurns_;
   Fault updateFault_ = Fault::None;
   int updateFaultCalls_ = 0;
   uint32_t retryAfterS_ = 0;

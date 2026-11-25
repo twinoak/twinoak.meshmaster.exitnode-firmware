@@ -116,7 +116,23 @@ class IUplink {
   // not there, which is every answer from a server that has never written it, and false whenever
   // this returns false: a call that got no answer said nothing. A wake claims again on it
   // (`AgentLoop::WakeIntent::maxClaimsThisWake`); `loop()` does nothing with it.
-  virtual bool postJobResult(long long jobId, const char* body, size_t len, bool& jobsWaiting) = 0;
+  //
+  // **A post has three answers, not two** (task p1.22-72), and `refusedWith` is the third:
+  //
+  //   - **taken**: true back, `refusedWith` 0. The library forgets the result.
+  //   - **not reached**: false back, `refusedWith` **0** - the call did not come back whole, or it
+  //     came back with a status that says nothing about the body (a 401, a 403, a 408, a 429, a
+  //     5xx). The result is kept and posted again, which is what the offline buffer is for.
+  //   - **refused**: false back, `refusedWith` the **HTTP status**, when the server answered and
+  //     its answer is a verdict on *this body* - `mm::resultIsTheServersVerdict(status)` is the
+  //     list and the only place it is decided. The library drops the result, counts it, says so
+  //     with the job and the status, and **goes on to the next kept result**.
+  //
+  // The third answer is why: on 24 November 2026 one result meshmaster.dk turned away for what it
+  // said sat oldest in a unit's buffer and held three hours of a repeater's readings behind it,
+  // because *refused* and *not reached* were the same `false`. An implementation that leaves
+  // `refusedWith` 0 always behaves exactly as this interface did before that task.
+  virtual bool postJobResult(long long jobId, const char* body, size_t len, bool& jobsWaiting, int& refusedWith) = 0;
 
   // POST /agent/v1/jobs/{id}/extend `{"seconds":N}` (1-1800): the lease holder asks for longer.
   // True when the server answered 200; `leaseUntil` is then the new end of the lease (UNIX

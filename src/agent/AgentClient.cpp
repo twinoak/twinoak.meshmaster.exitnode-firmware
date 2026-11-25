@@ -665,15 +665,20 @@ bool AgentClient::claimJobs(ClaimedJob* jobs, int max, int& count, int transacti
 }
 
 bool AgentClient::postToJob(long long jobId, const char* action, const char* what, const char* requestBody, size_t len,
-                            char* body, size_t bodyCap, size_t& bodyLen) {
+                            char* body, size_t bodyCap, size_t& bodyLen, int* httpStatus) {
   char endpoint[48];
   std::snprintf(endpoint, sizeof endpoint, "/agent/v1/jobs/%lld/%s", jobId, action);
+  if (httpStatus != nullptr) *httpStatus = 0;
 
   Call c;
   if (!call("POST", endpoint, requestBody, len, body, bodyCap, bodyLen, c)) {
+    // `c.reachable` is false here and `c.httpStatus` is 0, which is exactly what a caller asking
+    // about a refusal must be told: nothing came back, so the server said nothing about the body.
+    if (httpStatus != nullptr) *httpStatus = c.reachable ? c.httpStatus : 0;
     LOG_W("server: %s for job %lld: no reply: %s", what, jobId, c.error);
     return false;
   }
+  if (httpStatus != nullptr) *httpStatus = c.httpStatus;
   if (!c.ok) {
     LOG_W("server: %s for job %lld: http %d", what, jobId, c.httpStatus);
     if (bodyLen > 0) LOG_D("server: body (%u bytes): %.200s", static_cast<unsigned>(bodyLen), body);
@@ -689,10 +694,24 @@ namespace {
 char g_jobReply[256];
 }  // namespace
 
-bool AgentClient::postJobResult(long long jobId, const char* requestBody, size_t len, bool& jobsWaiting) {
+bool AgentClient::postJobResult(long long jobId, const char* requestBody, size_t len, bool& jobsWaiting,
+                                int& refusedWith) {
   jobsWaiting = false;
+  refusedWith = 0;
   size_t bodyLen = 0;
-  if (!postToJob(jobId, "result", "result", requestBody, len, g_jobReply, sizeof g_jobReply, bodyLen)) return false;
+  int status = 0;
+  if (!postToJob(jobId, "result", "result", requestBody, len, g_jobReply, sizeof g_jobReply, bodyLen, &status)) {
+    // The three answers of IUplink::postJobResult (task p1.22-72). A status that is the server's
+    // verdict on **this body** is the third: the same bytes posted again at every wake would be
+    // turned away again, so the library drops the result instead of keeping it. A 401, a 403, a
+    // 429, a 5xx and no reply at all leave `refusedWith` 0, which is *not reached*: the result is
+    // kept and posted when the token, the pause or the server is seen to.
+    if (resultIsTheServersVerdict(status)) {
+      refusedWith = status;
+      LOG_W("server: the result of job %lld was refused: http %d is the server's verdict on this body", jobId, status);
+    }
+    return false;
+  }
   LOG_D("server: result for job %lld taken: %.200s", jobId, g_jobReply);
   // The one member of the answer this firmware acts on, read from the body the call already has
   // and nowhere else (task p1.20-69). A reply that does not carry it says nothing, and nothing is

@@ -257,10 +257,21 @@ statuses a deploy answers. A 5xx with no header backs off as above.
 Through all of it **the mesh keeps running**: the radio is listening, adverts
 go into the ring, and the ring holds 64 of them — when it is full the oldest is
 dropped and counted, and the count is the heartbeat's `observationsDropped`.
-Job results the server would not take are kept the same way, oldest dropped and
+Job results the server did not *reach* are kept the same way, oldest dropped and
 counted (`resultsDropped`), and posted late with the bytes and the client id
 they were written with, which is why a late result is still a good result: the
 server takes it and de-duplicates.
+
+**A result the server turns away is not kept.** When the server answers and its
+answer is about what the result *said* — an http 400, 404, 409, 410, 413 or 422 —
+the same bytes would be turned away at every wake for ever, so that result is
+dropped there and then, and the results behind it are posted in the same breath.
+`status` says how many have gone and what the last was answered with, `jobs`
+marks the job *(refused by the server: http 400)*, and the log line names the job
+and the status. A 401, a 403, a 429 and every 5xx are not that: they are the
+token, a pause of this exit node or the server itself, and the result waits as
+before. One such result sat oldest in a unit's buffer on 24 November 2026 and held
+three hours of a repeater's readings behind it.
 
 **The connection it keeps, and a router that drops idle sessions.** Since task
 p1.8-30 the uplink keeps one TLS connection to meshmaster.dk between calls

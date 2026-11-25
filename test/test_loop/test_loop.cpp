@@ -2389,6 +2389,56 @@ TEST_F(LoopTest, AWakeWhoseCapNoPostCanFitPostsNothingAndKeepsEverything) {
   EXPECT_EQ(loop.ring().size(), 0u);
 }
 
+// A wake whose oldest kept result the server refuses (task p1.22-72)
+//
+// The whole of 24 November 2026 in one wake: two results waiting, the server turns the older one
+// away for what it said, and the newer one is posted in the same flush. The step is **Done** and
+// not Failed - the server is answering, the link is well, and nothing backs off - the buffer is
+// empty afterwards, and the claim that follows says this end holds nothing.
+TEST_F(LoopTest, AKeptResultTheServerRefusesIsDroppedAndTheOneBehindItGoesInTheSameWake) {
+  server.answerHeartbeat(60, 1, 3600, true, platform.clock().now());
+  server.failResults(fake::FakeUplink::Fault::Unreachable, 1);
+  server.queue(fake::Job(14140, "trace").leasedUntil(kLease).json());
+  ASSERT_EQ(loop.wake(hourly(), mm::Budget()).jobsRun, 1);
+  ASSERT_EQ(jobs.queueDepth(), 1);
+
+  // The second, kept by a byte cap of nothing rather than by a failure, so the link is proven
+  // well all the way to the wake that matters.
+  server.answerHeartbeat(60, 1, 3600, true, platform.clock().now());
+  server.queue(fake::Job(14141, "trace").leasedUntil(platform.clock().now() + 1800).json());
+  mm::Budget tight;
+  tight.postBytes = 1;
+  ASSERT_EQ(loop.wake(hourly(), tight).jobsRun, 1);
+  ASSERT_EQ(jobs.queueDepth(), 2) << "two results waiting, in the order they were made";
+
+  // The wake of the fix: the server reads the older result and will not have it.
+  server.answerHeartbeat(60, 1, 3600, false, platform.clock().now());
+  server.forgetCalls();
+  server.failResultsInTurn({fake::FakeUplink::Fault::BadRequest});
+
+  const mm::WakeReport report = loop.wake(hourly(), mm::Budget());
+
+  EXPECT_EQ(report.results, mm::StepOutcome::Done) << "the server answered, and the buffer is empty";
+  EXPECT_EQ(report.resultsFlushed, 1) << "one went through; the other was refused, not posted";
+  EXPECT_EQ(jobs.queueDepth(), 0) << "and neither is waiting any more";
+  EXPECT_EQ(jobs.resultsRefused(), 1u);
+  EXPECT_EQ(jobs.lastRefusedWith(), 400);
+  EXPECT_EQ(jobs.resultsDropped(), 0u) << "the heartbeat's figure is the buffer running out of room, and it did not";
+  EXPECT_EQ(report.counters.consecutiveFailures, 0u) << "nothing backs off for a server that answered";
+  EXPECT_EQ(loop.retrySeconds(), 0u);
+  ASSERT_EQ(server.results().size(), 1u);
+  EXPECT_EQ(server.results()[0].jobId, 14141) << "the one behind the refused result";
+  EXPECT_TRUE(fake::LogCapture::the().holds("the result of job 14140 was refused by the server: http 400"));
+
+  // And the next claim says this end holds nothing: the refused result is out of `holding` too,
+  // so the server does not hand job 14140 back expecting a result that will never come.
+  server.answerHeartbeat(60, 1, 3600, true, platform.clock().now());
+  server.queue(fake::Job(14142, "trace").leasedUntil(platform.clock().now() + 1800).json());
+  ASSERT_EQ(loop.wake(hourly(), mm::Budget()).jobsClaimed, 1);
+  ASSERT_FALSE(server.claimHoldings().empty());
+  EXPECT_TRUE(server.claimHoldings().back().empty()) << "nothing is held: the refusal settled job 14140";
+}
+
 TEST_F(LoopTest, AServerThatIsAwayIsABackoffTheCallerSleepsThroughAndTheNextWakeHonoursIt) {
   server.failAlways(fake::FakeUplink::Fault::Unreachable);
   server.setRetryAfter(0);

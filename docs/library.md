@@ -661,7 +661,7 @@ exactly that, in `src/agent/AgentClient.cpp`, and caps at an hour itself.)
 | `postHeartbeat(hb, reply&)` | 200 and the body parsed | `POST /agent/v1/heartbeat` with the bytes `writeHeartbeat` made. The reply carries the server time, the budget, the accepted poll interval and `jobsWaiting` — it is the single most important call in the agent, and the only one that carries a clock |
 | `postObservations(body, len, accepted&, duplicate&)` | 200 and the body parsed | `POST /agent/v1/observations`. `accepted` is how many the server took; `duplicate` means this batch's client id had been posted before, which is **not** a failure — the ring consumes the batch either way |
 | `claimJobs(jobs, max, count&, transactionsLeft, holding, holdingCount)` | 200 and the body parsed | `POST /agent/v1/jobs/claim` with the body `writeClaimRequest(max, …, transactionsLeft, holding, holdingCount)` makes — pass all four straight on and write no member yourself. Parse into the caller's array with `parseClaimResponse`, which parses **in place** and puts the credential in the job's own buffer and nowhere else. `count` may be 0. `transactionsLeft` **below 0 is not stated** — the first claim of a wake, and every claim `loop()` makes. `holding` is what this exit node is running or keeps a result for, and the library fills it for **every** claim: `[]` when it holds nothing, which says *nothing held* where an absent member says *this agent does not say*, and the server hands a lost lease back only on the first (§6). And **leave `lastCall()` saying what really came back** — `reachable` false with `httpStatus` 0 for no reply, `httpStatus` 200 with `ok` false for a 200 whose body did not parse — because that is how a wake tells a lost answer from a refusal (`mm::answerWasLost`) and decides whether to claim once more |
-| `postJobResult(jobId, body, len, jobsWaiting&)` | 200 | `POST /agent/v1/jobs/{id}/result`. A late result is taken all the same and a duplicate `clientId` stores nothing twice, so this is safe to retry — which is what the offline buffer does. Set `jobsWaiting` from the answer's own `jobsWaiting` with **`mm::resultReplySaysJobsWaiting(body, len)`**, so the reply is parsed once, in your client, and the library is handed an answer rather than the bytes; false when the member was not there, and false whenever you return false. A wake claims again on it (§6) |
+| `postJobResult(jobId, body, len, jobsWaiting&, refusedWith&)` | 200 | `POST /agent/v1/jobs/{id}/result`. A late result is taken all the same and a duplicate `clientId` stores nothing twice, so this is safe to retry — which is what the offline buffer does. Set `jobsWaiting` from the answer's own `jobsWaiting` with **`mm::resultReplySaysJobsWaiting(body, len)`**, so the reply is parsed once, in your client, and the library is handed an answer rather than the bytes; false when the member was not there, and false whenever you return false. A wake claims again on it (§6). And set `refusedWith` to the **status** when the server answered one that is its verdict on this body, which is the third answer of §4.3 |
 | `extendLease(jobId, seconds, leaseUntil&)` | 200 | `POST /agent/v1/jobs/{id}/extend` with `{"seconds":N}` (1–1800). A **409 is "you are not the lease holder any more"** and is false. Nothing in the library calls this yet; it is here because the protocol has it and a long job of your own will want it |
 | `postUpdateResult(updateId, body, len, notFound&)` | 200 | `POST /agent/v1/updates/{id}/result` with the bytes `writeUpdateResult` made (§6.5). **This one has a body already**, so a consumer that cannot be updated from the server implements nothing and is never asked. A result the server already has is answered 200 too — the first one stands — so it is safe to retry, which the loop does at every heartbeat's turn; `notFound` is the one **404** (an id that is not this exit node's), and it means *stop posting it*, not *it failed* |
 | `postProgress(jobId, body, len)` | 200 | `POST /agent/v1/jobs/{id}/progress` with the bytes `writeProgressReport` made: an intermediate `data` and a note, kept on the job and replaced by the next. Not a result. Also uncalled by the library |
@@ -712,6 +712,59 @@ break it is never made: hold a `RateLimiter`, `take()` before a call, and answer
 `limiter()` with it. The ordinary loop never comes near it; a bug that polls in a
 tight loop meets it instead of meeting the server's 429.
 
+### 4.3 A result has three answers, not two
+
+`postJobResult` is the one call of this interface whose `false` was ambiguous, and
+the ambiguity cost a repeater three hours of readings on 24 November 2026. The
+library keeps results until they are taken, oldest first, and the flush stops at
+the first post that fails; the server had turned one result away for what it
+*said*, and *refused* read exactly like *not reached*, so the same bytes went out
+at every wake and everything behind them waited.
+
+So the call answers three things:
+
+| Answer | `return` | `refusedWith` | What the library does |
+|---|---|---|---|
+| **taken** | `true` | `0` | forgets the result |
+| **not reached** | `false` | `0` | keeps it, posts it again, and **stops the flush** — the results behind it are not posted either, because the server has not been reached |
+| **refused** | `false` | the **HTTP status** | drops it, counts it (`resultsRefused()`), logs it with the job and the status, marks it in what `jobs` prints — and **goes on to the next kept result** |
+
+**Which statuses are a verdict is the library's to decide, not yours.**
+`mm::resultIsTheServersVerdict(status)` is the one function
+(`agent/JobEnvelopes.h`): **400, 404, 409, 410, 413** and **422** are — the
+envelope or the job type's own contract, no such job, a `clientId` that belongs to
+another job, a body larger than the server will read. **401, 403, 408, 429** and
+every **5xx** are **not**: they are about the token, a pause, the clock or the
+server, and the result they did not take is posted again when that is seen to. A
+status the function does not know is not a verdict either — keeping a result is
+what this library has always done, and a result dropped cannot be got back.
+
+It is deliberately **not** `actionFor`'s `ServerAction::Discard` (§4.1), which is
+the same list *and 403*: that question is *retry this call now, or back off?*, and
+an exit node its owner paused should do neither. This one is *is this body
+finished?*, and a pause is no answer about a body.
+
+Your implementation has the status already — it is `Call::httpStatus` — so this is
+one line:
+
+```cpp
+bool MyUplink::postJobResult(long long jobId, const char* body, size_t len, bool& jobsWaiting, int& refusedWith) {
+  jobsWaiting = false;
+  refusedWith = 0;
+  // … the POST …
+  if (!call.ok) {
+    if (call.reachable && mm::resultIsTheServersVerdict(call.httpStatus)) refusedWith = call.httpStatus;
+    return false;
+  }
+  jobsWaiting = mm::resultReplySaysJobsWaiting(reply, replyLen);
+  return true;
+}
+```
+
+An uplink that leaves `refusedWith` 0 always behaves exactly as this interface did
+before pile 1.22 — including holding every result behind the one the server will
+not take.
+
 ## 5. `IPlatform` and `IClock` — seven primitives and a wall clock
 
 `agent/IPlatform.h`. This is everything the portable files used to take from
@@ -756,8 +809,9 @@ it before anything logs.
 `agent/IRetained.h`. A fourth interface, and the only optional one: a device
 that drives the loop with `loop()` never needs it, and the Heltec passes none.
 
-A result the server would not take, or one a wake kept for its budget, waits in
-the offline buffer — which is RAM. On a device that deep-sleeps between wakes
+A result the server did not *reach*, or one a wake kept for its budget, waits in
+the offline buffer — which is RAM. (A result the server **refused** waits for
+nothing: it is dropped where it was refused, §4.3.) On a device that deep-sleeps between wakes
 the RAM goes with the sleep, so until pile 1.6 the result was lost and its job
 stayed leased until the server's lease lapsed; the adverts a wake could not post
 went the same way. `WakeState` cannot carry them — twelve kilobytes of results
@@ -988,7 +1042,8 @@ The six steps run in this order, each recording its own outcome in the report �
 uplink has none, which after a deep sleep is once a boot), **heartbeat** (always,
 and it is where the clock and the accepted interval come from — a heartbeat that
 did not come back stops the wake there), **results** (the offline buffer, oldest
-first, with the timestamps they were made with), **claim** (only when the
+first, with the timestamps they were made with — a result the server refuses is
+dropped and the flush goes on, §4.3), **claim** (only when the
 heartbeat said work waits; `max` sized from what the transaction cap can hold),
 **jobs** (each priced by `mm::transactionsOf` and refused *before* it goes on the
 air if it will not fit — unless your mesh answers `answersLocallyFor()` true for
