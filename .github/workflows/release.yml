@@ -24,7 +24,9 @@
 #                 workflow reads the number from there and from nowhere else.
 #   the notes     write themselves. A task that changes something a person will notice leaves one
 #                 line in release-notes/unreleased/<task>.md, as meshmaster.dk's tasks do; *What's
-#                 new* is those lines, in the order the tasks merged. The standing parts below -
+#                 new* is those lines, in the order the tasks merged, and they are published as a
+#                 file of the release too - WHATSNEW.md, the bullets alone - so that an owner reads
+#                 them on meshmaster.dk where the update is offered. The standing parts below -
 #                 the flasher, the table of files, the console lines - are this file's and stay.
 #   it refuses    before anything is built, in one sentence: no line waiting, the version's tag
 #                 already there, or a release asked for from a ref that is not master.
@@ -44,11 +46,15 @@
 #                                                flashed at 0x0 on a board out of the box or one
 #                                                coming from other firmware
 #   SHA256SUMS                                   for all of them, one file
-# And, once per release (task p1.15-58):
-#   manifest.json                                what every file above is - its size, its SHA-256,
+# And, once per release:
+#   WHATSNEW.md                                  this release's bullets and nothing else, so that
+#                                                meshmaster.dk shows what an update brings where
+#                                                the update is offered. Listed in SHA256SUMS; not
+#                                                in the manifest and not signed (task p1.22-73)
+#   manifest.json                                what every image above is - its size, its SHA-256,
 #                                                the board, the band and the load address - as
 #                                                MeshMaster's firmware catalogue and a board that
-#                                                updates itself read it
+#                                                updates itself read it (task p1.15-58)
 #   manifest.json.sig                            one Ed25519 signature over its bytes, made here
 #                                                with the RELEASE_SIGNING_KEY secret. One
 #                                                signature covers the whole release, because the
@@ -282,16 +288,30 @@ jobs:
       # This release's own lines, in the order the tasks merged, as the bullets they will be. A dry
       # run with nothing waiting says so instead of failing: a real release has already been
       # refused by the gate for that, and a rehearsal is allowed to be of a release with no lines.
+      #
+      # WHATSNEW.md IS A FILE OF THE RELEASE (task p1.22-73), beside manifest.json: the bullets and
+      # nothing else - no heading, no version, none of the standing text the release's page adds -
+      # so that meshmaster.dk shows what an update brings where the update is offered instead of
+      # sending an owner to GitHub (its task p4.49-262). It is not in the manifest and not signed:
+      # text about a release is never a part of what a board trusts. The shape both repositories
+      # hold it to is held HERE, before anything is uploaded, over the file as it stands - however
+      # it was written, the dry run's line below included - and a release whose notes break it
+      # stops with the line that broke it.
       - name: What's new, from the lines the tasks left
         shell: pwsh
         run: |
           $out = Join-Path $PWD 'out/release/WHATSNEW.md'
           try { ./tools/release.ps1 -Action notes -Out $out }
           catch {
+            # NOTHING WAITING is the one thing a rehearsal is allowed to be of, and it says so
+            # instead of failing. Lines that are there but of a shape no release could publish are
+            # red in a rehearsal too - rehearsing that is what a rehearsal is for.
             if ('${{ needs.gate.outputs.release }}' -eq 'true') { throw }
+            if ($_.Exception.Message -notmatch 'nothing to release') { throw }
             Write-Host $_.Exception.Message
-            [System.IO.File]::WriteAllText($out, "_Nothing is waiting in ``release-notes/unreleased/``; a real release would refuse. This is a dry run._`n")
+            [System.IO.File]::WriteAllText($out, "- **This is a dry run.** Nothing is waiting in ``release-notes/unreleased/``, and a real release would refuse.`n")
           }
+          ./tools/release.ps1 -Action whatsnew -File $out
 
       # The manifest, before the hashes and the notes, because it is read from the files
       # themselves: every size and every SHA-256 comes off the four .bin files just downloaded,
@@ -318,7 +338,12 @@ jobs:
           set -euo pipefail
           cd out/release
 
-          sha256sum ./*.bin | sed 's| \./| |' > SHA256SUMS
+          # Every image, and WHATSNEW.md after them: the notes are a published file and a person
+          # who downloads them can check them like any other. The MANIFEST does not list it, and
+          # must not - what the manifest names is what a board flashes, its format is the hardware
+          # repository's FIRMWARE-MANIFEST.md, and the notes are text about the release and no
+          # part of what a board trusts (docs/release.md, section 5).
+          sha256sum ./*.bin WHATSNEW.md | sed 's| \./| |' > SHA256SUMS
           cat SHA256SUMS
 
           v="v${VERSION%%+*}"
@@ -528,7 +553,7 @@ jobs:
             --title "MeshMaster agent firmware $TAG" \
             --notes-file out/release/NOTES.md \
             --latest \
-            out/release/*.bin out/release/SHA256SUMS \
+            out/release/*.bin out/release/SHA256SUMS out/release/WHATSNEW.md \
             out/release/manifest.json out/release/manifest.json.sig
           echo "Released **$TAG** from \`${SHA:0:7}\`, with ${{ needs.gate.outputs.lines }} line(s) of notes." >> "$GITHUB_STEP_SUMMARY"
 

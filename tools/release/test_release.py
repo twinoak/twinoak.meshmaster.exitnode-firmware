@@ -16,6 +16,7 @@ Three things are held here, and CI runs all of them before anything is built
 No framework and no dependency: a plain script, so it runs anywhere the release does.
 """
 
+import hashlib
 import io
 import json
 import os
@@ -383,6 +384,40 @@ def the_gate_passes_the_fixture_release_and_refuses_what_it_must():
         # No key at all.
         a_release(scratch)
         refused("no release key is trusted", verify_release.verify, scratch, [], "nothing")
+
+
+@case
+def the_notes_file_changes_neither_the_manifest_nor_its_signature():
+    """WHATSNEW.md is published beside manifest.json and is no part of it (task p1.22-73).
+
+    The manifest names the files a BOARD flashes, and its format is the hardware repository's -
+    so the notes are listed in SHA256SUMS and nowhere else, and a release that carries them comes
+    out with the same manifest bytes and the same signature bytes as one that does not. The gate
+    passes with the extra file there and with SHA256SUMS listing it: check 4 reads the manifest's
+    files out of SHA256SUMS and does not mind it saying more.
+    """
+    notes = b"- **A release carries its notes.** As a file, beside `manifest.json`.\n"
+    with tempfile.TemporaryDirectory() as scratch:
+        a_release(scratch)
+        with open(os.path.join(scratch, "WHATSNEW.md"), "wb") as fh:
+            fh.write(notes)
+
+        args = (make_test_release.VERSION, make_test_release.COMMIT, make_test_release.TAG,
+                scratch, make_test_release.BUILT_AT)
+        build_release.build(*args, upstream=build_release.meshcore_pin())
+        ok(read("manifest.json", scratch) == read("manifest.json", RELEASE),
+           "a WHATSNEW.md in the directory changed the manifest's bytes")
+
+        private, public = mf.test_key_pair(FIXTURES)
+        line = mf.sign(private, read("manifest.json", scratch))
+        ok(line.encode("ascii") == read("manifest.json.sig", RELEASE),
+           "a WHATSNEW.md in the directory changed the signature's bytes")
+
+        digest = hashlib.sha256(notes).hexdigest()
+        sums = read("SHA256SUMS", RELEASE).decode("ascii") + "%s  WHATSNEW.md\n" % digest
+        with open(os.path.join(scratch, "SHA256SUMS"), "w", encoding="ascii", newline="\n") as fh:
+            fh.write(sums)
+        verify_release.verify(scratch, [public], "the test key")
 
 
 @case

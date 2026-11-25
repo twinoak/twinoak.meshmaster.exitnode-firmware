@@ -16,6 +16,10 @@
                   master. One sentence each.
       notes       the waiting lines, as the bullets of the release's *What's new*, in the order the
                   tasks merged.
+      whatsnew    the WHATSNEW.md the step above wrote, held to the shape it is published in:
+                  UTF-8 without a byte-order mark, LF, at most 16 384 bytes, every line a bullet
+                  or a bullet's continuation, and nothing of Markdown but **bold** and `code`.
+                  It stops with the line that broke it, before anything is uploaded.
       move        after the release is out: the lines into release-notes/vX.Y.Z.md as published,
                   release-notes/unreleased/ emptied, the version moved to the next patch in every
                   place that carries it, and CHANGELOG.md's next section opened.
@@ -43,7 +47,7 @@
     docs/release.md is the page. tasks/RUNBOOK.md is where a task is told to leave its line.
 
 .PARAMETER Action
-    check, plan, notes, move, pr-body, outcome or ci-commit. See above.
+    check, plan, notes, whatsnew, move, pr-body, outcome or ci-commit. See above.
 
 .PARAMETER Repository
     The working tree to act in. The repository root by default.
@@ -58,6 +62,10 @@
 
 .PARAMETER Out
     notes, pr-body: the file to write to. Standard output as well, either way.
+
+.PARAMETER File
+    whatsnew: the WHATSNEW.md to hold to its shape - the file the notes' step wrote, as it will
+    be uploaded.
 
 .PARAMETER Tag
     pr-body, outcome: the tag of the release that was just published. It is passed in rather than
@@ -95,12 +103,13 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('check', 'plan', 'notes', 'move', 'pr-body', 'outcome', 'ci-commit')]
+    [ValidateSet('check', 'plan', 'notes', 'whatsnew', 'move', 'pr-body', 'outcome', 'ci-commit')]
     [string]$Action = '',
     [string]$Repository = '',
     [string]$Ref = '',
     [string]$Sha = '',
     [string]$Out = '',
+    [string]$File = '',
     [string]$Tag = '',
     [string]$Branch = '',
     [string]$Number = '',
@@ -120,6 +129,17 @@ $ErrorActionPreference = 'Stop'
 # bound is generous where meshmaster.dk's is 120 characters, because that repository's notes are
 # shown as a list on a page and these are read inside a GitHub release beside the flashing table.
 $script:MaxNoteLength = 400
+
+# WHATSNEW.md is those same lines as a FILE of the release, beside manifest.json, so that an owner
+# reads what an update brings where the update is offered instead of on GitHub: meshmaster.dk keeps
+# it with the release it imports and draws it (its task p4.49-262, task p1.22-73 here). It is NOT
+# in the manifest and NOT signed - text about a release is never a part of what a board trusts.
+#
+# Both repositories hold it to the same shape, and this is its bound. The file is read by a drawer
+# that knows `**bold**` and a `code span` and shows everything else as the characters it is made
+# of, so a link, a table or a tag in a line would be read there as its punctuation - which is why
+# a release whose notes carry any of it stops with the line that broke it.
+$script:MaxWhatsNewBytes = 16384
 
 # What the pull request after a release is allowed to touch, and nothing else (deliverable 6).
 # ci-commit will only walk back over a commit whose every file is one of these.
@@ -346,6 +366,82 @@ function Format-Bullets {
     return (@($Notes | ForEach-Object { "- $($_.text)" }) -join "`n")
 }
 
+# What of Markdown a bullet of WHATSNEW.md may carry, in one place: `**bold**` and a `code span`.
+# Code spans come out first, because anything at all is literal inside one - heltec_v3's
+# underscore, a console line, a path - and then bold, and what is left has to be prose. Empty when
+# the line is clean, and the name of what it carries otherwise.
+function Find-WhatsNewMarkup {
+    param([string]$Line)
+
+    $prose = [regex]::Replace($Line, '`[^`]*`', ' ')
+    if ($prose.Contains('`')) { return 'a code span that is never closed' }
+    $prose = [regex]::Replace($prose, '\*\*[^*]+\*\*', ' ')
+    if ($prose.Contains('*')) { return 'an asterisk that is not part of **bold**' }
+
+    # Two characters first, so that a link is called a link rather than a bracket.
+    foreach ($markup in @(
+            @('](', 'a link'),
+            @('~~', 'strikethrough'),
+            @('[', 'a bracket, which Markdown reads as a link'),
+            @(']', 'a bracket, which Markdown reads as a link'),
+            @('<', 'a tag, which Markdown reads as HTML or as an address'),
+            @('>', 'a tag, which Markdown reads as HTML, an address or a quote'),
+            @('|', 'a pipe, which Markdown reads as a table'),
+            @('_', 'an underscore, which Markdown reads as emphasis')
+        )) {
+        if ($prose.Contains($markup[0])) { return $markup[1] }
+    }
+    return ''
+}
+
+# The shape of WHATSNEW.md, held over the text that is about to be written or uploaded. It throws
+# with the line that broke it: the sentence is what a person reading a stopped release has.
+function Test-WhatsNew {
+    param([string]$Text)
+
+    $bytes = [System.Text.Encoding]::UTF8.GetByteCount($Text)
+    if ($bytes -gt $script:MaxWhatsNewBytes) {
+        throw "WHATSNEW.md is $bytes bytes; the bound is $script:MaxWhatsNewBytes (docs/release.md)."
+    }
+    if ($Text.Contains("`r")) {
+        throw 'WHATSNEW.md carries a carriage return; the file is UTF-8 and LF (docs/release.md).'
+    }
+
+    $lines = @($Text -split "`n")
+    # The file ends with one newline, so the last piece of the split is empty and is not a line.
+    if ($lines.Count -gt 0 -and $lines[-1].Length -eq 0) {
+        if ($lines.Count -eq 1) { $lines = @() } else { $lines = @($lines[0..($lines.Count - 2)]) }
+    }
+
+    foreach ($line in $lines) {
+        if ($line -notmatch '^- \S' -and $line -notmatch '^  \S') {
+            throw "WHATSNEW.md has a line that is neither a bullet nor a bullet's continuation: '$line' (docs/release.md)."
+        }
+        $markup = Find-WhatsNewMarkup $line
+        if ($markup) {
+            throw "WHATSNEW.md carries $markup, where a bullet holds no Markdown but **bold** and ``code``: '$line' (docs/release.md)."
+        }
+    }
+}
+
+# Read it as the drawer at the other end will: the bytes, UTF-8 and strictly, with no byte-order
+# mark in front of them and with the line endings left exactly as they are. Read-Text would have
+# turned a CRLF file into an LF one and hidden the one thing this is here to see.
+function Read-WhatsNew {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "There is no WHATSNEW.md at $Path; the notes' step writes it (docs/release.md)."
+    }
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        throw 'WHATSNEW.md begins with a byte-order mark; the file is UTF-8 without one (docs/release.md).'
+    }
+    $strict = New-Object System.Text.UTF8Encoding($false, $true)
+    try { return $strict.GetString($bytes) }
+    catch { throw 'WHATSNEW.md is not UTF-8 (docs/release.md).' }
+}
+
 function Write-Pair {
     param([string]$Key, [string]$Value)
 
@@ -390,6 +486,11 @@ function Invoke-Check {
     if ($wrong.Count -gt 0) {
         throw ("The version is in one place, VERSION, and these do not agree with it:`n  " + ($wrong -join "`n  ") + "`nMove them together, or let the release's own pull request do it (docs/release.md).")
     }
+
+    # The waiting lines also have to compile into a WHATSNEW.md of the shape the release publishes
+    # it in, so that a line no release could carry is a red check on its own pull request and not a
+    # surprise during a release (docs/release.md, section 2).
+    if ($notes.Count -gt 0) { Test-WhatsNew ((Format-Bullets $notes) + "`n") }
 
     Write-Output "The release rails hold: VERSION $version, $($notes.Count) line(s) waiting."
     if (-not $Quiet) {
@@ -476,6 +577,9 @@ function Invoke-Notes {
     if ($notes.Count -eq 0) { throw 'There is nothing to release: no line is waiting in release-notes/unreleased/.' }
 
     $bullets = Format-Bullets $notes
+    # Held to the shape of WHATSNEW.md BEFORE the file is written, so that a release stops here,
+    # with the line that broke it, rather than publishing notes the other end cannot draw.
+    Test-WhatsNew ($bullets + "`n")
     if ($Out) {
         # .NET's current directory is not PowerShell's, and Write-Text is [System.IO.File]'s.
         if (-not [System.IO.Path]::IsPathRooted($Out)) { $Out = Join-Path (Get-Location).Path $Out }
@@ -483,6 +587,21 @@ function Invoke-Notes {
     }
     Write-Output $bullets
     Write-Pair 'lines' "$($notes.Count)"
+}
+
+# ---- whatsnew ------------------------------------------------------------------------------------
+
+function Invoke-WhatsNew {
+    param([string]$File)
+
+    if (-not $File) { throw 'Name the file with -File: the WHATSNEW.md the notes'' step wrote.' }
+    if (-not [System.IO.Path]::IsPathRooted($File)) { $File = Join-Path (Get-Location).Path $File }
+
+    $text = Read-WhatsNew $File
+    Test-WhatsNew $text
+    $lines = @(($text -split "`n") | Where-Object { $_.Length -gt 0 })
+    Write-Output $text.TrimEnd("`n")
+    Write-Output "WHATSNEW.md holds its shape: $($lines.Count) line(s), $([System.Text.Encoding]::UTF8.GetByteCount($text)) of at most $script:MaxWhatsNewBytes bytes."
 }
 
 # ---- move ----------------------------------------------------------------------------------------
@@ -921,6 +1040,88 @@ function Invoke-SelfTest {
         if ($r.text -notmatch 'lines=2') { throw "wrong count: $($r.text)" }
     }
 
+    # 8b. And they are published as a file of the release, WHATSNEW.md, held to its shape before
+    # anything is uploaded (task p1.22-73). Through the door, with a real file, because what the
+    # workflow runs is the action and what a person reading a stopped release has is the sentence.
+    $whatsnew = Join-Path $scratch 'WHATSNEW.md'
+
+    # PowerShell wraps a long error at the console's width and breaks a word in half to do it, so
+    # an assertion about a refusal's sentence must not depend on where the break landed: both
+    # sides lose every space before they are compared.
+    function Flat {
+        param([string]$Text)
+
+        return ($Text -replace '\s', '')
+    }
+
+    function Shaped {
+        param([string]$Raw, [bool]$WithMark = $false)
+
+        # Raw, and not Write-Text: a CRLF written here must still be a CRLF when it is read.
+        [System.IO.File]::WriteAllText($whatsnew, $Raw, (New-Object System.Text.UTF8Encoding($WithMark)))
+        return (Run -Root $a -Arguments @('-Action', 'whatsnew', '-File', $whatsnew))
+    }
+
+    function Unshaped {
+        param([string]$Raw, [string]$Says, [string]$Names, [bool]$WithMark = $false)
+
+        $r = Shaped -Raw $Raw -WithMark $WithMark
+        if ($r.code -eq 0) { throw "it passed: $($r.text)" }
+        if ((Flat $r.text) -notmatch [regex]::Escape((Flat $Says))) { throw "did not say '$Says': $($r.text)" }
+        if ($Names -and (Flat $r.text) -notmatch [regex]::Escape((Flat $Names))) { throw "did not name '$Names': $($r.text)" }
+    }
+
+    Confirm 'the bullets of a release are a WHATSNEW.md of the right shape' {
+        $r = Shaped "- **A bold beginning.** A line with ``code`` in it, and nothing else.`n- A second bullet.`n  And its continuation.`n"
+        if ($r.code -ne 0) { throw "exit $($r.code): $($r.text)" }
+        if ((Flat $r.text) -notmatch 'holdsitsshape') { throw "it said: $($r.text)" }
+        if ((Flat $r.text) -notmatch 'Aboldbeginning') { throw "it did not print the file: $($r.text)" }
+    }
+
+    Confirm 'a line of WHATSNEW.md that is not a bullet stops the release, with the line' {
+        Unshaped -Raw "- a bullet`nand a line that is not one`n" `
+            -Says 'neither a bullet nor' -Names 'and a line that is not one'
+    }
+
+    Confirm 'a WHATSNEW.md past the bound stops the release, with the bound' {
+        $bullet = '- ' + ('x' * ($script:MaxNoteLength - 2)) + "`n"
+        $over = $bullet * [int][math]::Ceiling($script:MaxWhatsNewBytes / $bullet.Length + 1)
+        Unshaped -Raw $over -Says "the bound is $script:MaxWhatsNewBytes" -Names ''
+    }
+
+    Confirm 'markup beyond bold and code stops the release, with the line and what it carries' {
+        foreach ($pair in @(
+                @('- a bullet with [a link](https://example.invalid) in it', 'a link'),
+                @('- a bullet with <b>a tag</b> in it', 'a tag'),
+                @('- a bullet with _emphasis_ in it', 'an underscore'),
+                @('- a bullet with *one asterisk* in it', 'an asterisk'),
+                @('- a bullet | with a column in it', 'a pipe'),
+                @('- a bullet with an unclosed `code span in it', 'never closed')
+            )) {
+            Unshaped -Raw ($pair[0] + "`n") -Says $pair[1] -Names $pair[0]
+        }
+    }
+
+    Confirm 'and a WHATSNEW.md that is not LF, or carries a byte-order mark, stops it too' {
+        Unshaped -Raw "- a bullet`r`n" -Says 'carriage return' -Names ''
+        Unshaped -Raw "- a bullet`n" -Says 'byte-order mark' -Names '' -WithMark $true
+    }
+
+    Confirm 'and a waiting line with a link in it stops the notes before the file is written' {
+        $i = New-Scratch 'markup-in-a-line'
+        Land -Root $i -Name '90.md' -Text 'A line that sends a person to [the page](https://example.invalid).' -When '2026-11-25T09:00:00Z'
+        $out = Join-Path $scratch 'never-written.md'
+        $r = Run -Root $i -Arguments @('-Action', 'notes', '-Out', $out)
+        if ($r.code -eq 0) { throw 'it passed' }
+        if ((Flat $r.text) -notmatch 'carriesalink') { throw "did not say why: $($r.text)" }
+        if (Test-Path -LiteralPath $out) { throw 'it wrote the file anyway' }
+
+        # And the same line is a red check on its own pull request, which is where it is cheap.
+        $r = Run -Root $i -Arguments @('-Action', 'check')
+        if ($r.code -eq 0) { throw 'check passed' }
+        if ((Flat $r.text) -notmatch 'carriesalink') { throw "check did not say why: $($r.text)" }
+    }
+
     # 9. A release asked for from a commit that is not master's head.
     Confirm 'a release from a commit behind master''s head is refused' {
         & git -C $h update-ref refs/remotes/origin/master HEAD | Out-Null
@@ -1120,7 +1321,7 @@ if ($SelfTest) {
     return
 }
 
-if (-not $Action) { throw 'Name an -Action (check, plan, notes, move, pr-body, outcome, ci-commit) or -SelfTest. Get-Help .\tools\release.ps1 -Detailed.' }
+if (-not $Action) { throw 'Name an -Action (check, plan, notes, whatsnew, move, pr-body, outcome, ci-commit) or -SelfTest. Get-Help .\tools\release.ps1 -Detailed.' }
 
 $root = Resolve-Root $Repository
 
@@ -1128,6 +1329,7 @@ switch ($Action) {
     'check' { Invoke-Check -Root $root }
     'plan' { Invoke-Plan -Root $root -Ref $Ref -IsDryRun ([bool]$DryRun) }
     'notes' { Invoke-Notes -Root $root -Out $Out }
+    'whatsnew' { Invoke-WhatsNew -File $File }
     'move' { Invoke-Move -Root $root -Sha $Sha -At $At }
     'pr-body' { Invoke-PrBody -Tag $Tag -Out $Out }
     'outcome' { Invoke-Outcome -Tag $Tag -Branch $Branch -Number $Number -Pushed ([bool]$Pushed) -Opened ([bool]$Opened) -Merged ([bool]$Merged) -Because $Because }

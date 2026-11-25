@@ -224,8 +224,11 @@ version — so a file that was renamed or mixed up is still known for what it is
 `update` on the console prints them. **One press of a button
 makes one**: *Actions → release → Run workflow*, which publishes the version
 [`VERSION`](VERSION) names, from `master`'s head, with CI green on it, and with
-*What's new* compiled from the lines the tasks left in `release-notes/unreleased/`;
-it then moves the version on in a pull request of its own. A **dry run** box on
+*What's new* compiled from the lines the tasks left in `release-notes/unreleased/`.
+Those same lines are published as a file of the release, `WHATSNEW.md` — listed in
+`SHA256SUMS`, in neither the manifest nor its signature — so that meshmaster.dk
+shows what an update brings on the page where it offers it. The run then moves the
+version on in a pull request of its own. A **dry run** box on
 the same button rehearses the whole thing and publishes nothing, and a tag pushed
 by hand starts nothing at all. [`docs/release.md`](docs/release.md) is the page.
 Both are built on a **GitHub-hosted** runner, a machine that is new every time,

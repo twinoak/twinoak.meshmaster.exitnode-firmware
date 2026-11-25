@@ -13,7 +13,7 @@ and a tag pushed by hand starts nothing at all.
 |---|---|---|
 | the version | [`VERSION`](../VERSION), one line, at the root | a task, or the release's own pull request |
 | a change somebody will notice | `release-notes/unreleased/<task>.md`, one or two sentences | the task that makes the change |
-| what a release did | `release-notes/vX.Y.Z.md`, and the GitHub release | the release workflow |
+| what a release did | `release-notes/vX.Y.Z.md`, the GitHub release, and `WHATSNEW.md` beside its images | the release workflow |
 | what a *library consumer* must know | [`CHANGELOG.md`](../CHANGELOG.md) | the task that moves an interface |
 | the decisions, with their tests | [`tools/release.ps1`](../tools/release.ps1) | — |
 | the build, the images, the publish | [`.github/workflows/release.yml`](../.github/workflows/release.yml) | — |
@@ -61,8 +61,13 @@ holds **one paragraph** — one or two sentences, at most 400 characters:
   done. *A repeater that answers slowly is no longer reported as having lost its
   access-list entry.* — not *`LoginSequence` drops a non-login response*;
 - plain words. No heading, no list marker, no quote: the release makes the
-  bullet. Emphasis and a `code span` are fine, and the lines of a release read
-  better when the first few words are bold;
+  bullet. `**Bold**` and a `` `code span` `` are fine — and the lines of a
+  release read better when the first few words are bold — but **nothing else of
+  Markdown**: no link, no table, no tag, no `_underscore_`. The lines travel as
+  a file of the release (§4) and are drawn on meshmaster.dk by something that
+  knows those two and shows everything else as the characters it is made of, so
+  a link there would be read as its own brackets. Anything at all is allowed
+  *inside* a code span;
 - it **stands on its own**. It is read in a GitHub release by somebody who will
   never see the task.
 
@@ -72,7 +77,8 @@ do differently after flashing it. If the answer is *nothing*, there is no line.
 
 `release-notes/unreleased/.gitkeep` keeps the directory through a release that
 empties it; leave it alone. `tools/release.ps1 -Action check` holds every waiting
-file to the format on every pull request, so a line that breaks it is a red check
+file to the format on every pull request — and holds what they compile into to
+the shape of `WHATSNEW.md` below — so a line that breaks either is a red check
 and not a surprise during a release.
 
 This is **not** `CHANGELOG.md`. That file is for the *other* consumer of this
@@ -106,9 +112,19 @@ unknown**, waited for with the same twenty minutes as before.
 
 ## 4. What it publishes
 
-Per board, the application image and the merged image, with `SHA256SUMS` — see
-[`README.md`](../README.md)'s *Which of the two* — and, once per release,
-`manifest.json` and `manifest.json.sig` (§5). The notes are two halves:
+| | |
+|---|---|
+| `meshmaster-agent-<board>-vX.Y.Z.bin` | the application image: the upgrade for a board already running this firmware |
+| `meshmaster-agent-<board>-vX.Y.Z-merged.bin` | bootloader, partitions and application in one file: a first install. [`README.md`](../README.md)'s *Which of the two* |
+| `SHA256SUMS` | every file above, and `WHATSNEW.md`, one line each |
+| `WHATSNEW.md` | this release's bullets and nothing else (below) |
+| `manifest.json`, `manifest.json.sig` | what a board and a catalogue read, and one signature over it (§5) |
+
+The release is created with its tag on `master`'s head, as **Latest**.
+
+### The notes, on the page and as a file
+
+The release's **page** is two halves:
 
 - ***What's new in vX.Y.Z*** — the waiting lines, as bullets, **in the order the
   tasks merged**. That order is read off git: the commit that added each file
@@ -119,7 +135,29 @@ Per board, the application image and the merged image, with `SHA256SUMS` — see
   flood scope. That is *standing text*, it lives in `release.yml`, and a task
   that changes what a person types edits it there.
 
-The release is created with its tag on `master`'s head, as **Latest**.
+`WHATSNEW.md` is the **first half alone**, as a file: the bullets, no heading, no
+version, and none of the standing text. It is there because a page on GitHub is
+not where an owner is asked to update — meshmaster.dk is, and it keeps this file
+with the release it imports and draws it on the Firmware tab of a board, where
+the update is offered. Its shape is what that drawer can read, and both
+repositories hold to it:
+
+- UTF-8 without a byte-order mark, LF, **at most 16 384 bytes**;
+- every line a bullet (`- `) or a bullet's continuation (indented two spaces);
+- `**bold**` and `` `code` `` and **nothing else of Markdown**.
+
+`tools/release.ps1 -Action whatsnew` holds the file to it in the release run,
+before anything is uploaded, and **a release whose notes break it stops with the
+line that broke it**. `-Action check` holds the same shape on every pull request
+(§2), so it is a red check first and a stopped release never.
+
+`SHA256SUMS` lists it. **`manifest.json` does not, and must not:** the manifest
+is what a *board* trusts — the files it will flash, with their sizes, hashes and
+load addresses — its format is the hardware repository's `FIRMWARE-MANIFEST.md`
+and not ours to extend, and the notes are text *about* a release and no part of
+what a board verifies before it boots an image. Nothing about the manifest or
+its signature changes because this file is published beside it, and
+`tools/release/test_release.py` holds that byte for byte.
 
 ## 5. Signed where it is built
 
@@ -132,7 +170,7 @@ repository's `FIRMWARE-MANIFEST.md`, schema 1, which
 
 | | |
 |---|---|
-| `manifest.json` | what every published file is: its size, its SHA-256, the board, the band, the address it loads at. Written by [`tools/release/build_release.py`](../tools/release/build_release.py) **from the files themselves** — no size and no hash is ever typed |
+| `manifest.json` | what every published **image** is: its size, its SHA-256, the board, the band, the address it loads at. Written by [`tools/release/build_release.py`](../tools/release/build_release.py) **from the files themselves** — no size and no hash is ever typed. `WHATSNEW.md` (§4) is not in it and must not be |
 | `manifest.json.sig` | one line, `ed25519 <key id> <base64>`: one Ed25519 signature over the manifest's bytes. One signature covers the whole release, because the manifest carries every file's hash |
 | the descriptor | 96 bytes **inside** each image saying what it is — the role `exit-node`, the board, the band, the version. Placed by the build and held by `tools/check-descriptor.py` on every CI build of every board |
 
@@ -173,7 +211,9 @@ and nothing else:
 1. the signature names a trusted key and verifies over `manifest.json`'s bytes;
 2. the manifest validates and its product is this firmware's;
 3. there is an image for each board, `exit-node.<board>.868`;
-4. every file's size and SHA-256 are the manifest's — and `SHA256SUMS` agrees;
+4. every file's size and SHA-256 are the manifest's — and `SHA256SUMS` agrees
+   (it may list more, and it does: `WHATSNEW.md`, which the manifest never
+   names);
 5. every file holds **exactly one** descriptor and it agrees with its entry.
 
 A release that cannot pass it is not published. **A dry run runs the same gate**
@@ -264,11 +304,14 @@ shell inside the workflow, so that it can be run twice and tested:
 .\tools\release.ps1 -Action check        # the rails; CI runs this on every pull request
 .\tools\release.ps1 -SelfTest            # the whole of a release, against a scratch repository
 .\tools\release.ps1 -Action notes        # what this release's What's new would say, now
+.\tools\release.ps1 -Action whatsnew -File out\release\WHATSNEW.md   # and whether it holds its shape
 ```
 
 `-SelfTest` builds throwaway repositories in the temporary directory and walks
 every case: the rails, the format of a line, each of the three refusals, a dry
-run that refuses nothing, two lines compiling in merge order, the move after a
-release, the commit the `ci is green` gate reads, and how the step that files the
-notes ends — green with the pull request named, red for a branch that was not
-pushed or a pull request that was not opened. CI runs it in the native job.
+run that refuses nothing, two lines compiling in merge order, the shape of
+`WHATSNEW.md` — a line that is not a bullet, a file past the bound, markup
+beyond bold and code, a file that is not LF — the move after a release, the
+commit the `ci is green` gate reads, and how the step that files the notes ends
+— green with the pull request named, red for a branch that was not pushed or a
+pull request that was not opened. CI runs it in the native job.
