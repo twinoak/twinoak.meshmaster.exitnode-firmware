@@ -19,7 +19,7 @@ test, so it is the session the console accepts, line for line.
 | `set <key> <value>` | store a setting in NVS; it takes effect at once (see below). The value is the rest of the line, trimmed; a WiFi name with spaces is fine |
 | `get <key>` | print one setting. `wifi.pass` and `meshmaster.token` print `set` or `unset` and never the value |
 | `get` | print every setting, one per line, in the order of the table below; an unset key shows its fallback in brackets |
-| `status` | a first line in `!!` while this board's partition-table sector holds no table and the firmware is putting the old one back (`update slot`, below) — and nothing at all there otherwise — then firmware, board and reset reason, the public key, the radio and its frame counters, WiFi, time and where it came from, the server's last answer, the heartbeat, the flood scope and what each shape has earned (task p1.8-32, below), the observer (its two slots and their states, or why it is off, how many packet messages it has made and how many slots are connected), the heap, the loop task's `stack` line (below — the observer's own two tasks' `stack` lines are in `get mqtt.status`), and the uplink's kept connection with what the last call cost (task p1.8-30, below) |
+| `status` | a first line in `!!` while this board's partition-table sector holds no table and the firmware is putting the old one back (`update slot`, below) — and nothing at all there otherwise — then firmware, board and reset reason, the public key, the radio and its frame counters, WiFi with this board's own address on the network and the name it announces itself by (below), time and where it came from, the server's last answer, the heartbeat, the flood scope and what each shape has earned (task p1.8-32, below), the observer (its two slots and their states, or why it is off, how many packet messages it has made and how many slots are connected), the heap, the loop task's `stack` line (below — the observer's own two tasks' `stack` lines are in `get mqtt.status`), and the uplink's kept connection with what the last call cost (task p1.8-30, below) |
 | `mesh` | the adverts heard: how many, how many are waiting to be posted and how many the ring dropped, and the last five with their names, roles, hops, SNR and RSSI |
 | `server` | the exit node's loop: the last heartbeat and the next, the last observation batch, the batch that went out and is still waiting for an answer (`batchid`, when there is one), the job counters, and the four error counters the heartbeat itself carries |
 | `jobs` | the airtime budget in force and what it has spent, how many claims were made, the thirteen job types this firmware advertises, and the last ten jobs with their outcome, their transaction count and when they ended. A job whose result the server **refused** carries the status it was refused with — *(refused by the server: http 400)* — and a `refused` line counts them; *(not posted)* means the result is still waiting in the buffer |
@@ -126,6 +126,7 @@ clock and the server call is one line, so a bench walk is reading:
 [+2s] I radio: receiver reset every 4 s
 [+2s] I identity: 7f3a...
 [+2s] I clock: no time yet
+[+2s] I wifi: mac 34:85:18:1a:2b:3c, name meshmaster-2b3c
 [+2s] I wifi: connecting to Twinoak (attempt 1)
 [+2s] I stack: loop task: 16384 bytes, the least ever free 11240
 [+5s] I wifi: connected, 192.168.1.20, rssi -61 dBm
@@ -180,6 +181,35 @@ what it is and the observer's status message leaves its `noise_floor` out for
 that moment ([`observer.md`](observer.md)). On a board with the timer on it is
 what `status` says for a moment now and then; it should be a number again by the
 next `status`.
+
+### The `wifi` line of `status`, and the name on the network
+
+```
+wifi      connected to Twinoak, 192.168.1.20, rssi -61 dBm (1 connects, 0 drops), mac 34:85:18:1a:2b:3c, name meshmaster-2b3c
+wifi      off, wifi.ssid is unset, mac 34:85:18:1a:2b:3c, name meshmaster-2b3c
+```
+
+**`mac`** is this board's station address, and **`name`** is what it calls
+itself on the network: `meshmaster-` and the last four characters of that
+address, lower case. Both are on the line in every state, including before any
+WiFi name has been set, because that is when they are wanted: the name is the
+line to look for in a router's list of leases, and the address is what a
+reservation there is made by.
+
+Neither can be changed. There is no key for the name and nothing of it is
+stored: it is made from the address each time the board starts, so a board comes
+back under the same name after a reflash, an `erase confirm` or an update. And
+the address is the chip's own, burnt in at the factory — this firmware sets no
+MAC, and a native test walks `src/` and `lib/` for every call that would
+([`README.md`](../README.md), *Rails that hold in every task*).
+
+The name is handed to the network before the board asks for an address, so the
+first DHCP request already carries it. Two boards on one network are therefore
+two names in the router's list where they used to be one, which is what
+[`field.md`](field.md#2-the-bench-from-a-dark-board-to-a-heartbeat) tells an
+owner of two to look for. `mac unknown, name unknown` would mean the chip's
+address could not be read at all; the board then runs under the framework's own
+name, and the boot log says so in a line of its own.
 
 ### The `stack` lines, and the command each one is in
 
