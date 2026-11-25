@@ -2198,14 +2198,29 @@ bool JobRunner::post(long long jobId, const char* body, size_t len) {
   // in front of it. The flush is the bounded one and there is no other (task p1.6-21): a wake's
   // budget covers the job step's posts as it covers the rest.
   const uint32_t failuresBefore = postFailures_;
+  postRefusedJob_ = 0;
+  postRefusedWith_ = 0;
   flushResults();
   if (results_.empty() && mayPost(len)) {
     // What the answer said about more work waiting is read here and nowhere else, from the body
     // this call already had: a wake claims again on it (task p1.20-69).
     bool waiting = false;
-    const bool took = spend(len, [&] { return server_->postJobResult(jobId, body, len, waiting); });
+    int refusedWith = 0;
+    const bool took = spend(len, [&] { return server_->postJobResult(jobId, body, len, waiting, refusedWith); });
     lastResultJobsWaiting_ = took && waiting;
     if (took) return true;
+    if (refusedWith != 0) {
+      // The server answered, and its answer is a verdict on **this body** (task p1.22-72): the
+      // same bytes at every wake for ever would be refused again, so the result is not kept. It is
+      // dropped here, before the buffer ever sees it - counted, said, and marked on the job -
+      // which is also what keeps it out of the claim's `holding` and out of the kept image.
+      noteRefused(jobId, refusedWith);
+      // The record of this job does not exist yet - `remember()` is the line after `post()` at
+      // every call site - so the status is handed to it rather than written here.
+      postRefusedJob_ = jobId;
+      postRefusedWith_ = refusedWith;
+      return false;
+    }
     postFailures_++;
   } else if (postFailures_ == failuresBefore) {
     // Not the server: what stopped this was the wake's own bytes or its uplink seconds, here or
@@ -2239,6 +2254,20 @@ void JobRunner::markPosted(long long jobId) {
   }
 }
 
+void JobRunner::noteRefused(long long jobId, int httpStatus) {
+  resultsRefused_++;
+  lastRefusedWith_ = httpStatus;
+  // The one record of it on the board, beside the counter: a line with the job and the status, so
+  // that a console that watched the wake can see which result was dropped and why. A result is not a
+  // secret - it is a reading of a repeater - but no body is printed here all the same: the status
+  // is the whole of what a person needs to take this to the server's own record of the job.
+  LOG_W("jobs: the result of job %lld was refused by the server: http %d; it is dropped and will not be sent again",
+        jobId, httpStatus);
+  for (int i = 0; i < recentCount_; i++) {
+    if (recent_[i].id == jobId) recent_[i].refusedWith = httpStatus;
+  }
+}
+
 int JobRunner::flushResults() {
   int posted = 0;
   while (!results_.empty()) {
@@ -2260,8 +2289,19 @@ int JobRunner::flushResults() {
       return posted;
     }
     bool waiting = false;
-    if (!spend(len, [&] { return server_->postJobResult(jobId, body, len, waiting); })) {
+    int refusedWith = 0;
+    if (!spend(len, [&] { return server_->postJobResult(jobId, body, len, waiting, refusedWith); })) {
       lastResultJobsWaiting_ = false;
+      if (refusedWith != 0) {
+        // **Refused, not unreached** (task p1.22-72): the server answered and its answer is about
+        // these bytes, so posting them again at the next wake and the wake after it would only be
+        // refused again - and while this one sat oldest, every result behind it waited. It goes,
+        // it is counted and said, and the flush carries on with the next. `postFailures_` does not
+        // move and nothing backs off: the server is answering, and the link is well.
+        noteRefused(jobId, refusedWith);
+        results_.popOldest();
+        continue;
+      }
       postFailures_++;
       return posted;
     }
@@ -2284,6 +2324,11 @@ void JobRunner::remember(const ClaimedJob& job, Outcome outcome, int transaction
   r.transactions = transactions;
   r.atEpoch = clock_->now();
   r.posted = posted;
+  // What this job's own post was refused with, if it was (task p1.22-72). Read once and cleared,
+  // and only ever for the job it was set for.
+  r.refusedWith = postRefusedJob_ == job.id ? postRefusedWith_ : 0;
+  postRefusedJob_ = 0;
+  postRefusedWith_ = 0;
   if (recentCount_ < kRemembered) recentCount_++;
 }
 
@@ -2544,6 +2589,12 @@ void JobRunner::report(TextOut& out) const {
   out.printf("claims    %lu made, %lu job(s) run, %lu result(s) not taken first time\r\n",
              static_cast<unsigned long>(claims_), static_cast<unsigned long>(ran_),
              static_cast<unsigned long>(postFailures_));
+  // Only when it has happened: a board that has never had a result refused says nothing about it,
+  // and one that has says how many and what the last was answered with (task p1.22-72).
+  if (resultsRefused_ > 0) {
+    out.printf("refused   %lu result(s) refused by the server and dropped; the last with http %d\r\n",
+               static_cast<unsigned long>(resultsRefused_), lastRefusedWith_);
+  }
   out.printf("buffer    %u result(s) waiting of %u, %u of %u bytes; %lu dropped, %lu held in all\r\n",
              static_cast<unsigned>(results_.count()), static_cast<unsigned>(ResultBuffer::kMaxResults),
              static_cast<unsigned>(results_.bytes()), static_cast<unsigned>(ResultBuffer::kCapacityBytes),
@@ -2567,8 +2618,18 @@ void JobRunner::report(TextOut& out) const {
   for (int i = 0; i < recentCount_; i++) {
     const Record& r = recent_[i];
     formatClock(r.atEpoch, when, sizeof when);
+    char mark[48];
+    if (r.posted) {
+      mark[0] = '\0';
+    } else if (r.refusedWith != 0) {
+      // Not *(not posted)*, which reads as "still on its way": this result was posted, turned
+      // away for what it said, and dropped (task p1.22-72).
+      std::snprintf(mark, sizeof mark, "  (refused by the server: http %d)", r.refusedWith);
+    } else {
+      std::snprintf(mark, sizeof mark, "  (not posted)");
+    }
     out.printf("  %-8lld %-11s %-13s %d tx  %s%s\r\n", r.id, r.type, outcomeName(r.outcome), r.transactions, when,
-               r.posted ? "" : "  (not posted)");
+               mark);
   }
 }
 
@@ -2597,9 +2658,18 @@ void JobRunner::describe(char* out, size_t cap) const {
     return;
   }
   const Record& r = recent_[0];
-  std::snprintf(out, cap, "%lu run, %lu transaction(s); last job %lld %s %s after %d tx", static_cast<unsigned long>(ran_),
-                static_cast<unsigned long>(gate_.transmissions()), r.id, r.type, outcomeName(r.outcome),
-                r.transactions);
+  // What a refusal adds, and only when there has been one: the count and the last status, so that
+  // `status` alone says a result was dropped by the server's verdict rather than lost (task
+  // p1.22-72). `jobs` is where the job it belonged to is.
+  char refused[64];
+  refused[0] = '\0';
+  if (resultsRefused_ > 0) {
+    std::snprintf(refused, sizeof refused, "; %lu result(s) refused (last http %d)",
+                  static_cast<unsigned long>(resultsRefused_), lastRefusedWith_);
+  }
+  std::snprintf(out, cap, "%lu run, %lu transaction(s); last job %lld %s %s after %d tx%s",
+                static_cast<unsigned long>(ran_), static_cast<unsigned long>(gate_.transmissions()), r.id, r.type,
+                outcomeName(r.outcome), r.transactions, refused);
 }
 
 // ------------------------------------------------------------------ the flood scope

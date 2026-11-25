@@ -3096,6 +3096,190 @@ TEST_F(RunnerTest, AJobOfATypeTheMeshCannotCarryIsUnsupportedAtNoTransactionWith
   EXPECT_EQ(mesh.logins(), 1);
 }
 
+
+// ---------------------------------------------------------------------------------------------
+// A refused result holds nobody back (task p1.22-72)
+//
+// On 24 November 2026 the unit at Bellevue posted a result meshmaster.dk turned away for what it
+// said. The library keeps results until they are taken, oldest first, and the flush stopped at
+// the first post that failed - so that one result was the oldest for three hours and every
+// reading behind it waited, until the kept image filled and dropped it. A post has three answers
+// now (agent/IUplink.h): taken, not reached, and **refused**, which is the server having given
+// its verdict on that body.
+
+// Three results in the buffer, oldest first, with nothing posted: the server is away for as long
+// as the jobs take. `Fault::Unreachable` forever, because `post()` flushes the queue ahead of
+// every result it makes and how many calls that takes is the runner's business and not a test's.
+class RefusedResultTest : public RunnerTest {
+ protected:
+  void threeKeptResults() {
+    mesh.grant(self(), mm::kPermReadOnly);
+    server.failResults(fake::FakeUplink::Fault::Unreachable, -1);
+    server.queue(std::vector<std::string>{job(12430), job(12431), job(12432)});
+    ASSERT_EQ(runner.claimAndRun(), 2);
+    ASSERT_EQ(runner.claimAndRun(), 1);
+    ASSERT_EQ(runner.queueDepth(), 3) << "three results waiting, oldest first";
+    ASSERT_TRUE(server.results().empty()) << "the server took none of them";
+    // Posting three results took more calls than three - every `post()` flushes the queue ahead
+    // of its own body - so what each test holds is the **change** in the count and not the count.
+    failuresAfterSetup = runner.postFailures();
+    // The server is answering again; what each of the next posts is answered is each test's own.
+    server.failResults(fake::FakeUplink::Fault::None, 0);
+    server.forgetCalls();
+  }
+
+  uint32_t failuresAfterSetup = 0;
+
+  static std::string job(long long id) {
+    return fake::Job(id, "status")
+        .atClass("acl")
+        .leasedUntil(kLease)
+        .withAclLevel(mm::kPermReadOnly)
+        .withPayload("{\"version\":false}")
+        .json();
+  }
+
+  class Out : public mm::TextOut {
+   public:
+    void write(const char* text, size_t len) override { out.append(text, len); }
+    std::string out;
+  };
+};
+
+TEST_F(RefusedResultTest, TheOldestResultRefusedIsDroppedAndTheTwoBehindItGoInTheSameFlush) {
+  threeKeptResults();
+  // The 400 of 24 November: the server read the body and would not have it.
+  server.failResultsInTurn({fake::FakeUplink::Fault::BadRequest});
+
+  const int posted = runner.flushResults();
+
+  EXPECT_EQ(posted, 2) << "the two behind the refused one went, in this flush and not the next";
+  EXPECT_EQ(runner.queueDepth(), 0) << "and nothing is left waiting behind it";
+  EXPECT_EQ(runner.resultsRefused(), 1u);
+  EXPECT_EQ(runner.lastRefusedWith(), 400);
+  EXPECT_EQ(runner.postFailures(), failuresAfterSetup) << "a refusal is not a failure of the server's: it answered";
+  EXPECT_EQ(runner.resultsDropped(), 0u)
+      << "a refusal is not the buffer running out of room, which is the heartbeat's figure";
+  ASSERT_EQ(server.results().size(), 2u);
+  EXPECT_EQ(server.results()[0].jobId, 12431) << "in the order they were made";
+  EXPECT_EQ(server.results()[1].jobId, 12432);
+  EXPECT_EQ(server.calls().size(), 3u) << "the refused one, and the two that went";
+  EXPECT_TRUE(fake::LogCapture::the().holds("the result of job 12430 was refused by the server: http 400"));
+
+  // What the console says. `jobs` marks the job itself - *(not posted)* would read as "still on
+  // its way" - and counts them; `status` carries the count and the last status in its one line.
+  Out jobs;
+  runner.report(jobs);
+  EXPECT_NE(jobs.out.find("(refused by the server: http 400)"), std::string::npos) << jobs.out;
+  EXPECT_NE(jobs.out.find("1 result(s) refused by the server and dropped; the last with http 400"), std::string::npos)
+      << jobs.out;
+  const size_t refusedJob = jobs.out.find("12430");
+  ASSERT_NE(refusedJob, std::string::npos);
+  EXPECT_EQ(jobs.out.find("(not posted)", refusedJob), std::string::npos)
+      << "the refused job carries the status and not the bare mark";
+
+  char line[320];
+  runner.describe(line, sizeof line);
+  EXPECT_NE(std::string(line).find("1 result(s) refused (last http 400)"), std::string::npos) << line;
+
+  // And it is gone for good: a flush with the server perfectly well posts nothing more, and the
+  // claim no longer says this end holds it.
+  server.forgetCalls();
+  EXPECT_EQ(runner.flushResults(), 0);
+  EXPECT_TRUE(server.calls().empty());
+  long long holding[mm::kClaimHoldingMax] = {};
+  EXPECT_EQ(runner.holding(holding, mm::kClaimHoldingMax), 0);
+}
+
+TEST_F(RefusedResultTest, TheOldestResultNotReachedStopsTheFlushAndTheTwoBehindItWait) {
+  threeKeptResults();
+  // The other half, unchanged: the call did not come back, so the server said nothing about this
+  // body and nothing can be said about the ones behind it either.
+  server.failResultsInTurn({fake::FakeUplink::Fault::Unreachable});
+
+  const int posted = runner.flushResults();
+
+  EXPECT_EQ(posted, 0);
+  EXPECT_EQ(runner.queueDepth(), 3) << "all three are still waiting, in the order they were made";
+  EXPECT_EQ(runner.resultsRefused(), 0u) << "not reached is not refused";
+  EXPECT_EQ(runner.lastRefusedWith(), 0);
+  EXPECT_EQ(runner.postFailures(), failuresAfterSetup + 1) << "a call that did not come back is a failure, as before";
+  EXPECT_EQ(server.calls().size(), 1u) << "one call: the flush stopped at the oldest";
+  EXPECT_TRUE(server.results().empty());
+
+  // And a 401, a 429 and a 503 are read the same way: the token, a rate limit and a server that is
+  // unwell say nothing about a body, so the result waits for each of them.
+  for (fake::FakeUplink::Fault silent : {fake::FakeUplink::Fault::Unauthorized, fake::FakeUplink::Fault::RateLimited,
+                                         fake::FakeUplink::Fault::ServerError}) {
+    server.failResultsInTurn({silent});
+    EXPECT_EQ(runner.flushResults(), 0);
+    EXPECT_EQ(runner.queueDepth(), 3);
+    EXPECT_EQ(runner.resultsRefused(), 0u) << "none of these is a verdict on the body";
+  }
+
+  // The server comes back and all three go, oldest first: nothing was lost by waiting.
+  EXPECT_EQ(runner.flushResults(), 3);
+  ASSERT_EQ(server.results().size(), 3u);
+  EXPECT_EQ(server.results()[0].jobId, 12430);
+  EXPECT_EQ(server.results()[1].jobId, 12431);
+  EXPECT_EQ(server.results()[2].jobId, 12432);
+}
+
+TEST_F(RefusedResultTest, RefusedThenNotReachedThenTaken) {
+  threeKeptResults();
+  // The oldest is refused and goes; the second is not reached, which stops the flush where it
+  // always stopped; the third is never offered, because the server has not been reached.
+  server.failResultsInTurn({fake::FakeUplink::Fault::NotFound, fake::FakeUplink::Fault::Unreachable});
+
+  EXPECT_EQ(runner.flushResults(), 0) << "nothing was taken, and one was dropped";
+  EXPECT_EQ(runner.queueDepth(), 2);
+  EXPECT_EQ(runner.resultsRefused(), 1u);
+  EXPECT_EQ(runner.lastRefusedWith(), 404) << "no such job, or this exit node never attempted it";
+  EXPECT_EQ(runner.postFailures(), failuresAfterSetup + 1) << "the one that was not reached, and not the refusal";
+  EXPECT_EQ(server.calls().size(), 2u) << "the refused one and the one that was not reached, and no third";
+  EXPECT_TRUE(server.results().empty());
+
+  // The next flush, with the server answering: the two that are left go in order.
+  EXPECT_EQ(runner.flushResults(), 2);
+  ASSERT_EQ(server.results().size(), 2u);
+  EXPECT_EQ(server.results()[0].jobId, 12431);
+  EXPECT_EQ(server.results()[1].jobId, 12432);
+  EXPECT_EQ(runner.queueDepth(), 0);
+  EXPECT_EQ(runner.resultsRefused(), 1u) << "and no second refusal was invented";
+}
+
+TEST_F(RefusedResultTest, AResultRefusedAtItsOwnPostIsNeverKeptAtAll) {
+  // Not the flush: the result of the job that has just run, refused the moment it is posted. It
+  // does not reach the buffer, so no later wake posts it and the claim's `holding` never names it
+  // - and the job's own record says what it was refused with.
+  mesh.grant(self(), mm::kPermReadOnly);
+  server.failResults(fake::FakeUplink::Fault::Discard, 1);  // http 422
+  server.queue(job(12435));
+
+  ASSERT_EQ(runner.claimAndRun(), 1);
+
+  EXPECT_EQ(runner.queueDepth(), 0) << "the result was not kept";
+  EXPECT_EQ(runner.resultsRefused(), 1u);
+  EXPECT_EQ(runner.lastRefusedWith(), 422);
+  EXPECT_EQ(runner.postFailures(), 0u) << "the server answered";
+  EXPECT_EQ(runner.resultsDropped(), 0u);
+  ASSERT_NE(runner.newest(), nullptr);
+  EXPECT_EQ(runner.newest()->id, 12435);
+  EXPECT_FALSE(runner.newest()->posted) << "it never was";
+  EXPECT_EQ(runner.newest()->refusedWith, 422);
+  EXPECT_TRUE(fake::LogCapture::the().holds("the result of job 12435 was refused by the server: http 422"));
+  EXPECT_FALSE(fake::LogCapture::the().holds("it is kept (1 waiting) and sent again"));
+
+  // A job that runs afterwards and is taken carries no mark of it.
+  server.queue(job(12436));
+  ASSERT_EQ(runner.claimAndRun(), 1);
+  ASSERT_NE(runner.newest(), nullptr);
+  EXPECT_EQ(runner.newest()->id, 12436);
+  EXPECT_TRUE(runner.newest()->posted);
+  EXPECT_EQ(runner.newest()->refusedWith, 0) << "one refusal does not mark the job after it";
+  EXPECT_EQ(runner.resultsRefused(), 1u);
+}
+
 // ---------------------------------------------------------------------------------------------
 // The two calls the protocol has and the reference agent never makes (API §3)
 

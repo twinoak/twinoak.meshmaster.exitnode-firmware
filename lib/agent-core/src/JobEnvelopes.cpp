@@ -204,6 +204,26 @@ bool resultReplySaysJobsWaiting(const char* json, size_t len) {
   return waiting.is<bool>() && waiting.as<bool>();
 }
 
+bool resultIsTheServersVerdict(int httpStatus) {
+  // Written out rather than as a range, because the half of the list that matters is the statuses
+  // that are **not** here: a 401, a 403, a 408, a 429 and every 5xx are about the token, the
+  // pause, the clock or the server, and the result they did not take is posted again when that is
+  // over. Anything this function does not know keeps the result, which is this firmware's
+  // behaviour since the offline buffer was written: a result dropped is gone, and a result kept
+  // too long is counted, said, and bounded by the buffer.
+  switch (httpStatus) {
+    case 400:  // the envelope, or the job type's own contract
+    case 404:  // no such job, or this exit node never attempted it
+    case 409:  // the clientId belongs to another job
+    case 410:
+    case 413:  // larger than the server will read
+    case 422:
+      return true;
+    default:
+      return false;
+  }
+}
+
 bool parseClaimResponse(char* json, size_t len, ClaimedJob* jobs, int max, int& count, uint32_t& serverTime, char* err,
                         size_t errCap) {
   count = 0;

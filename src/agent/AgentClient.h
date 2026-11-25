@@ -88,7 +88,10 @@ class AgentClient : public IUplink, private uplink::Transport {
   bool postObservations(const char* body, size_t len, int& accepted, bool& duplicate) override;
   bool claimJobs(ClaimedJob* jobs, int max, int& count, int transactionsLeft, const long long* holding,
                  int holdingCount) override;
-  bool postJobResult(long long jobId, const char* body, size_t len, bool& jobsWaiting) override;
+  // `refusedWith` is the third answer of IUplink.h: 0 unless the server answered this post with a
+  // status that is its verdict on the body (task p1.22-72), and then that status. The status is
+  // what `postToJob` already had; `mm::resultIsTheServersVerdict` is the list.
+  bool postJobResult(long long jobId, const char* body, size_t len, bool& jobsWaiting, int& refusedWith) override;
   bool extendLease(long long jobId, int seconds, uint32_t& leaseUntil) override;
   bool postProgress(long long jobId, const char* body, size_t len) override;
   // POST /agent/v1/updates/{id}/result (task p1.15-61): the one result of an update meshmaster.dk
@@ -219,8 +222,12 @@ class AgentClient : public IUplink, private uplink::Transport {
   // A POST to /agent/v1/jobs/{id}/<action> whose reply is short: the result, the extend and the
   // progress. `what` names the call in the log. True when the server answered 200; the reply's
   // bytes are in `body` (bodyCap), for the caller that reads them.
+  //
+  // `httpStatus`, when a caller passes one, is what came back: **0 when no reply came back at
+  // all** and the status otherwise, which is the whole of what tells a refusal from a call that
+  // never arrived (task p1.22-72).
   bool postToJob(long long jobId, const char* action, const char* what, const char* requestBody, size_t len,
-                 char* body, size_t bodyCap, size_t& bodyLen);
+                 char* body, size_t bodyCap, size_t& bodyLen, int* httpStatus = nullptr);
 
   SettingsStore* settings_ = nullptr;
   AgentClock* clock_ = nullptr;

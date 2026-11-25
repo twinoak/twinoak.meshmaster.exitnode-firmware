@@ -255,6 +255,28 @@ size_t writeClaimRequest(int max, char* out, size_t cap, int transactionsLeft = 
 // them.
 bool resultReplySaysJobsWaiting(const char* json, size_t len);
 
+// **Whether this status is the server's verdict on the body that was posted** (task p1.22-72):
+// the server answered, and its answer is about *this result* - the same bytes posted again at
+// every wake for ever would be refused again. A result refused this way is dropped rather than
+// kept (`JobRunner::flushResults`), which is what keeps the one result the server will not take
+// from holding every result behind it; 24 November 2026 cost a repeater three hours of readings
+// that way.
+//
+// The list, which is API §3's door as it answers a result: **400** (the envelope or the type's
+// own contract), **404** (no such job, or this exit node never attempted it), **409** (the
+// `clientId` belongs to another job), **410**, **413** (larger than the server will read) and
+// **422**. And the ones that are **not**, each for the same reason - they say something about the
+// caller, the clock or the server and nothing about the body: **401** (the token), **403** (an
+// exit node its owner paused, which is answered again the moment the owner unpauses), **408**,
+// **429** and every **5xx**. A status no server of ours has sent is not a verdict either: keeping
+// a result is what this firmware has always done and dropping one cannot be undone.
+//
+// It is **not** `actionFor`'s `ServerAction::Discard` (agent/ServerPolicy.h), which is the same
+// list **and 403**: that question is "retry this call now, or back off?", and a paused exit node
+// should do neither. This one is "is this body finished?", and a pause is not an answer about a
+// body. test_envelopes holds the two sets against each other so neither moves alone.
+bool resultIsTheServersVerdict(int httpStatus);
+
 // Reads the claim's answer. At most `max` jobs are kept - the server sends at most what was
 // asked for, and a reply that says otherwise is not a reason to overrun a buffer. `count` is how
 // many were read; `serverTime` is the claim's own clock. On refusal, `err` says why.

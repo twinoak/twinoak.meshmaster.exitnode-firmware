@@ -182,6 +182,12 @@ class JobRunner {
     int transactions = 0;
     uint32_t atEpoch = 0;
     bool posted = false;
+    // **The status the server refused this job's result with**, or 0 (task p1.22-72): the result
+    // was made, posted, and turned away for what it said, so it is gone and will not be sent
+    // again. `posted` stays false - it never was - and `jobs` prints the status rather than the
+    // bare *(not posted)*, which is the difference between a result still on its way and one
+    // nobody will ever have.
+    int refusedWith = 0;
   };
   static constexpr int kRemembered = 10;
 
@@ -319,6 +325,13 @@ class JobRunner {
   // with the timestamps they were made with. Nothing is dropped and nothing goes out of order;
   // with no ledger, or a ledger with no bounds - `loop()`, so the Heltec - the bound is nothing
   // and this is what it always was.
+  //
+  // **A result the server refuses holds nobody back** (task p1.22-72). A post that was *not
+  // reached* stops the flush and is tried again, as it always did; a post the server **refused** -
+  // it answered, and its answer is a verdict on that body (`IUplink::postJobResult`'s
+  // `refusedWith`) - is dropped, counted (`resultsRefused`), said with the job and the status, and
+  // the flush **goes on to the next**. The return is results the server **took**, which a refused
+  // one is not.
   int flushResults();
 
   // How many results are waiting to be posted, which is the heartbeat's `queueDepth`.
@@ -350,6 +363,16 @@ class JobRunner {
   // for the next wake: *kept: budget*, which is a bound of ours and not a failure of the
   // server's, so it backs nothing off (task p1.6-21). The WakeReport carries a wake's own count.
   uint32_t resultsKeptForBudget() const { return resultsKeptForBudget_; }
+
+  // **Results the server refused** (task p1.22-72): posted, answered with a verdict on the body
+  // (`mm::resultIsTheServersVerdict`), and dropped rather than kept - the same bytes would be
+  // refused at every wake for ever. Not a `resultsDropped()`, which is the buffer having run out
+  // of room and is the heartbeat's `resultsDropped`: the heartbeat's counters are a contract and
+  // this is not in them. It is in `status` and in `jobs` at the console, and in the log with the
+  // job and the status.
+  uint32_t resultsRefused() const { return resultsRefused_; }
+  // The status of the last one, or 0: what `status` prints beside the count.
+  int lastRefusedWith() const { return lastRefusedWith_; }
 
   // **What this exit node holds** (API §3's `holding`, task p1.20-70): the ids of the results it
   // keeps and has not had taken, oldest first, into `out` - at most `cap` of them, and the count
@@ -698,6 +721,9 @@ class JobRunner {
   }
   // Every remembered job with this id is marked posted, once its result has gone through.
   void markPosted(long long jobId);
+  // A result the server refused: counted, said with the job and the status, and marked on every
+  // remembered job with this id (task p1.22-72). The caller drops the body; this is the book.
+  void noteRefused(long long jobId, int httpStatus);
   // The platform's millisecond clock, under the name every line of JobRunner.cpp already used
   // when it was Arduino's.
   uint32_t millis() const { return platform_->millis(); }
@@ -745,6 +771,15 @@ class JobRunner {
   uint32_t ran_ = 0;
   uint32_t postFailures_ = 0;
   uint32_t resultsKeptForBudget_ = 0;
+  uint32_t resultsRefused_ = 0;
+  int lastRefusedWith_ = 0;
+  // The one result whose own post - not the queue's, the job's own, the one `post()` makes with
+  // the body it was handed - the server refused, handed from `post()` to the `remember()` that
+  // follows it so that the job's record carries the status (task p1.22-72). The id is kept with
+  // it, so a job that runs again later is never marked from a stale refusal, and both are cleared
+  // the moment they are read.
+  long long postRefusedJob_ = 0;
+  int postRefusedWith_ = 0;
   // API §3's `jobsWaiting` from the answer to the last result posted since the last claim.
   bool lastResultJobsWaiting_ = false;
   // Jobs handed over again whose result this end already kept, and so did not run (task p1.20-70).
