@@ -874,6 +874,11 @@ function Invoke-SelfTest {
     # into the real one.
     $realSummary = $env:GITHUB_STEP_SUMMARY
     $env:GITHUB_STEP_SUMMARY = ''
+    # And no colour from the children, so that a refusal a case reads - and a person reads in the
+    # log of a red run - is the sentence and not the sentence inside escape sequences. PowerShell
+    # 7.2 and later honour it; 5.1 paints nothing anyway.
+    $realNoColour = $env:NO_COLOR
+    $env:NO_COLOR = '1'
 
     function Run {
         param([string]$Root, [string[]]$Arguments)
@@ -1046,14 +1051,15 @@ function Invoke-SelfTest {
     $whatsnew = Join-Path $scratch 'WHATSNEW.md'
 
     # PowerShell wraps a long error at the console's width and breaks a word in half to do it, so
-    # an assertion about a refusal's sentence must not depend on where the break landed. Both
-    # sides lose every space - and the two characters the error views draw the wrap with: pwsh's
-    # concise view prefixes every wrapped line of a message with `      | ` and underlines the
-    # line that threw with `~`, which is why taking the spaces out is not enough on its own.
+    # an assertion about a refusal's sentence must not depend on where the break landed. Three
+    # things go from both sides before they are compared: the ANSI colour sequences pwsh's concise
+    # view paints the whole block with, every space, and the two characters that view draws the
+    # wrap with - it prefixes each wrapped line of a message with `      | ` and underlines the
+    # line that threw with `~`. What is left is the sentence, however the console cut it.
     function Flat {
         param([string]$Text)
 
-        return ($Text -replace '[\s|~]', '')
+        return (($Text -replace '\u001b\[[0-9;]*[A-Za-z]', '') -replace '[\s|~]', '')
     }
 
     function Shaped {
@@ -1307,6 +1313,9 @@ function Invoke-SelfTest {
     else { Write-Host "the scratch repositories are in $scratch" }
     $env:GITHUB_OUTPUT = $realOutput
     $env:GITHUB_STEP_SUMMARY = $realSummary
+    # Through .NET, because `$env:NO_COLOR = $null` leaves the old value where it stands and an
+    # empty NO_COLOR is still a NO_COLOR: a session that had none must come out with none.
+    [System.Environment]::SetEnvironmentVariable('NO_COLOR', $realNoColour)
 
     Write-Host ''
     if ($script:selfFailures.Count -gt 0) {
