@@ -1046,12 +1046,14 @@ function Invoke-SelfTest {
     $whatsnew = Join-Path $scratch 'WHATSNEW.md'
 
     # PowerShell wraps a long error at the console's width and breaks a word in half to do it, so
-    # an assertion about a refusal's sentence must not depend on where the break landed: both
-    # sides lose every space before they are compared.
+    # an assertion about a refusal's sentence must not depend on where the break landed. Both
+    # sides lose every space - and the two characters the error views draw the wrap with: pwsh's
+    # concise view prefixes every wrapped line of a message with `      | ` and underlines the
+    # line that threw with `~`, which is why taking the spaces out is not enough on its own.
     function Flat {
         param([string]$Text)
 
-        return ($Text -replace '\s', '')
+        return ($Text -replace '[\s|~]', '')
     }
 
     function Shaped {
